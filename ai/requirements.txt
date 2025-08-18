@@ -1,0 +1,28 @@
+llama-index
+langchain-text-splitters
+chromadb
+sentence-transformers
+ollama
+PyMuPDF
+python-docx
+pandas
+openpyxl
+
+# --- Core utilities (fast installs) ---
+pandas
+openpyxl
+PyMuPDF
+python-docx
+
+# --- Vector DB + orchestration ---
+chromadb
+langchain-text-splitters
+
+# --- Connectors ---
+ollama
+
+# --- Embeddings + ML heavy deps ---
+sentence-transformers
+
+# --- High-level RAG framework (last, pulls a lot of extras) ---
+llama-index
