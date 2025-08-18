@@ -29,10 +29,21 @@ storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
 # --- utility to build/rebuild index ---
 def build_index():
-    
-    # Rebuilds the index from all documents in the documents folder.
-    # Supports manual file add/remove as well as API uploads.
-    
+    """
+    Rebuilds the index from all documents in the documents folder.
+    Supports manual file add/remove as well as API uploads.
+    """
+
+    # Clear the current Chroma collection to remove stale embeddings
+    # Delete the existing collection entirely
+    db.delete_collection("klair-ai-store")
+
+    # Create a fresh collection
+    chroma_collection = db.get_or_create_collection("klair-ai-store")
+    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+
     if os.listdir(DOCS_PATH):
         documents = SimpleDirectoryReader(DOCS_PATH).load_data()
         index = VectorStoreIndex.from_documents(documents, storage_context=storage_context)
@@ -41,6 +52,7 @@ def build_index():
     else:
         index = VectorStoreIndex([], storage_context=storage_context)
         print("✅ Empty index created.")
+
     return index
 
 # --- load index at startup ---
