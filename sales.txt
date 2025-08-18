@@ -1,0 +1,15 @@
+Monthly Sales Report - July 2025
+
+1. Tomato - Sold 120 units, Total Revenue: ₱5,400
+2. Tangerine - Sold 85 units, Total Revenue: ₱3,825
+3. Taiyaki - Sold 60 units, Total Revenue: ₱3,300
+4. Octopus - Sold 45 units, Total Revenue: ₱3,600
+5. Soda Bunny - Sold 75 units, Total Revenue: ₱6,000
+
+Total Units Sold: 385
+Total Revenue: ₱22,125
+
+Notes:
+- Taiyaki sales increased by 15% compared to June.
+- Soda Bunny is currently the best-selling item.
+- Tangerine sales dropped slightly due to seasonal demand.
