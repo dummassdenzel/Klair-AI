@@ -1,17 +1,17 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from typing import Optional
 import asyncio
-
-from .services.document_manager import DocumentManager
-from .services.file_monitor import DocumentFileHandler, Observer
-from .database.models import ChatSession, ChatMessage
-from .database.database import get_db
-from .schemas.chat import ChatRequest, ChatResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from services.document_processor import DocumentProcessor
+from services.file_monitor import DocumentFileHandler, Observer
+from database.models import ChatSession, ChatMessage
+from database.database import get_db
+from schemas.chat import ChatRequest, ChatResponse
 
 # Global state
-doc_manager: Optional[DocumentManager] = None
+doc_processor: Optional[DocumentProcessor] = None
 file_observer: Optional[Observer] = None
 current_directory: Optional[str] = None
 
@@ -42,7 +42,7 @@ app.add_middleware(
 
 @app.post("/api/set-directory")
 async def set_directory(request: dict, background_tasks: BackgroundTasks):
-    global doc_manager, file_observer, current_directory
+    global doc_processor, file_observer, current_directory
     
     directory_path = request.get("path")
     if not directory_path:
@@ -53,13 +53,13 @@ async def set_directory(request: dict, background_tasks: BackgroundTasks):
         file_observer.stop()
         file_observer.join()
     
-    # Initialize document manager
-    doc_manager = DocumentManager()
-    await doc_manager.initialize_from_directory(directory_path)
+    # Initialize document processor
+    doc_processor = DocumentProcessor()
+    await doc_processor.initialize_from_directory(directory_path)
     
     # Start file monitoring
     def on_file_change(file_path: str):
-        background_tasks.add_task(doc_manager.update_document, file_path)
+        background_tasks.add_task(doc_processor.update_document, file_path)
     
     event_handler = DocumentFileHandler(on_file_change)
     file_observer = Observer()
@@ -71,16 +71,16 @@ async def set_directory(request: dict, background_tasks: BackgroundTasks):
     return {
         "status": "success",
         "directory": directory_path,
-        "indexed_files": len(doc_manager.get_indexed_files())
+        "indexed_files": len(doc_processor.get_indexed_files())
     }
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, db: AsyncSession = Depends(get_db)):
-    if not doc_manager:
+    if not doc_processor:
         raise HTTPException(status_code=400, detail="No directory set")
     
     # Query RAG system
-    response = await doc_manager.query(request.message)
+    response = await doc_processor.query(request.message)
     
     # Save to database
     chat_message = ChatMessage(

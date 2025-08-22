@@ -2,8 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, F
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
-
-Base = declarative_base()
+from .database import Base
 
 class ChatSession(Base):
     __tablename__ = "chat_sessions"

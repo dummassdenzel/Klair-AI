@@ -1,12 +1,13 @@
 # app/services/document_processor.py
 from llama_index.core import Document, VectorStoreIndex, SimpleDirectoryReader
 from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.llms.openai import OpenAI
-from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.llms.ollama import Ollama
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 import chromadb
 from pathlib import Path
+import os
 
-class DocumentManager:
+class DocumentProcessor:
     def __init__(self, persist_dir: str = "./chroma_db"):
         # Initialize ChromaDB
         self.chroma_client = chromadb.PersistentClient(path=persist_dir)
@@ -15,10 +16,10 @@ class DocumentManager:
             metadata={"hnsw:space": "cosine"}
         )
         
-        # Initialize LlamaIndex components
+        # Initialize LlamaIndex components with Ollama
         self.vector_store = ChromaVectorStore(chroma_collection=self.collection)
-        self.llm = OpenAI(model="gpt-4-1106-preview", temperature=0.1)
-        self.embed_model = OpenAIEmbedding()
+        self.llm = Ollama(model="tinyllama", request_timeout=120.0)  # Using tinyllama model
+        self.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")  # Local embedding model
         
         self.index = None
         self.query_engine = None
@@ -64,3 +65,72 @@ class DocumentManager:
             text_qa_template=qa_prompt,
             response_mode="tree_summarize"
         )
+        
+    # Document extraction methods
+    def _extract_pdf(self, file_path: str) -> str:
+        """Extract text from PDF files"""
+        import fitz  # PyMuPDF
+        
+        doc = fitz.open(file_path)
+        text = ""
+        for page in doc:
+            text += page.get_text()
+        return text
+    
+    def _extract_docx(self, file_path: str) -> str:
+        """Extract text from DOCX files"""
+        import docx
+        
+        doc = docx.Document(file_path)
+        return "\n".join([para.text for para in doc.paragraphs])
+    
+    def _extract_txt(self, file_path: str) -> str:
+        """Extract text from TXT files"""
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+            
+    async def query(self, query_text: str):
+        """Query the document index"""
+        if not self.query_engine:
+            raise ValueError("Query engine not initialized. Please load documents first.")
+        
+        return self.query_engine.query(query_text)
+    
+    async def update_document(self, file_path: str):
+        """Update a single document in the index"""
+        # Get file extension
+        ext = os.path.splitext(file_path)[1].lower()
+        
+        # Extract text based on file type
+        if ext == ".pdf":
+            text = self._extract_pdf(file_path)
+        elif ext == ".docx":
+            text = self._extract_docx(file_path)
+        elif ext == ".txt":
+            text = self._extract_txt(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {ext}")
+        
+        # Create document object
+        doc = Document(text=text, metadata={"file_path": file_path})
+        
+        # Update index
+        if self.index:
+            self.index.insert(doc)
+            self._setup_query_engine()
+        
+    def get_indexed_files(self):
+        """Get list of indexed files"""
+        if not self.index:
+            return []
+        
+        # Get all documents from the index
+        all_docs = self.index.docstore.docs
+        file_paths = set()
+        
+        # Extract file paths from metadata
+        for doc_id, doc in all_docs.items():
+            if hasattr(doc, "metadata") and "file_path" in doc.metadata:
+                file_paths.add(doc.metadata["file_path"])
+        
+        return list(file_paths)
