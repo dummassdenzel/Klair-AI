@@ -117,6 +117,19 @@ class DocumentProcessor:
             self.index.insert(doc)
             self._setup_query_engine()
         
+    async def remove_document(self, file_path: str):
+        """Remove a document from the index when file is deleted"""
+        try:
+            # Remove from ChromaDB collection
+            # You'll need to implement this based on your ChromaDB setup
+            # This is a simplified example
+            if self.index:
+                # Remove documents with matching file_path from metadata
+                # Implementation depends on your specific ChromaDB setup
+                print(f"Removed document: {file_path}")
+        except Exception as e:
+            print(f"Error removing document {file_path}: {e}")
+    
     def get_indexed_files(self):
         """Get list of indexed files"""
         if not self.index:

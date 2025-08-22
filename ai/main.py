@@ -22,6 +22,12 @@ async def lifespan(app: FastAPI):
     # Shutdown
     global file_observer
     if file_observer:
+        # Clean up file handler
+        for handler in file_observer.emitters.values():
+            for event_handler in handler:
+                if hasattr(event_handler, 'cleanup'):
+                    event_handler.cleanup()
+        
         file_observer.stop()
         file_observer.join()
 
@@ -57,11 +63,17 @@ async def set_directory(request: dict, background_tasks: BackgroundTasks):
     doc_processor = DocumentProcessor()
     await doc_processor.initialize_from_directory(directory_path)
     
-    # Start file monitoring
-    def on_file_change(file_path: str):
-        background_tasks.add_task(doc_processor.update_document, file_path)
+    # Start file monitoring with proper event loop
+    def on_file_change(file_path: str, is_deletion: bool = False):
+        if is_deletion:
+            background_tasks.add_task(doc_processor.remove_document, file_path)
+        else:
+            background_tasks.add_task(doc_processor.update_document, file_path)
     
     event_handler = DocumentFileHandler(on_file_change)
+    # Set the current event loop
+    event_handler.set_event_loop(asyncio.get_running_loop())
+    
     file_observer = Observer()
     file_observer.schedule(event_handler, directory_path, recursive=True)
     file_observer.start()

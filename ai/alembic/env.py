@@ -23,8 +23,12 @@ from database import models
 # --- Set metadata for autogenerate ---
 target_metadata = Base.metadata
 
-# --- Override DB URL from config.py ---
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# --- Convert async URL to sync URL for Alembic ---
+sync_database_url = settings.DATABASE_URL
+if sync_database_url.startswith('postgresql+asyncpg://'):
+    sync_database_url = sync_database_url.replace('postgresql+asyncpg://', 'postgresql://')
+
+config.set_main_option("sqlalchemy.url", sync_database_url)
 
 
 def run_migrations_offline() -> None:

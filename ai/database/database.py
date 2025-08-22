@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from config import settings
 from sqlalchemy import text
@@ -7,26 +7,29 @@ from sqlalchemy import text
 Base = declarative_base()
 
 # Create engine from .env DATABASE_URL
-engine = create_engine(settings.DATABASE_URL, echo=True)  # echo=True logs SQL queries
+async_database_url = settings.DATABASE_URL.replace('postgresql://', 'postgresql+asyncpg://')
+engine = create_async_engine(async_database_url, echo=True)
 
 # Create a session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+AsyncSessionLocal = sessionmaker(
+    engine, 
+    class_=AsyncSession, 
+    expire_on_commit=False
+)
 
 # Dependency for FastAPI routes
-def get_db():
-    db = SessionLocal()
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
+
+async def test_connection():
     try:
-        yield db
-    finally:
-        db.close()
-
-
-# testing connection
-
-# if __name__ == "__main__":
-#     try:
-#         with engine.connect() as conn:
-#             result = conn.execute(text("SELECT 1"))
-#             print("✅ Database connected! Result:", result.scalar())
-#     except Exception as e:
-#         print("❌ Database connection failed:", e)
+        async with engine.begin() as conn:
+            result = await conn.execute(text("SELECT 1"))
+            print("✅ Database connected! Result:", result.scalar())
+    except Exception as e:
+        print("❌ Database connection failed:", e)
