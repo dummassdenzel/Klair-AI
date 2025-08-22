@@ -26,22 +26,20 @@ class DocumentProcessor:
     
     async def initialize_from_directory(self, directory_path: str):
         """Load all documents from directory and create initial index"""
-        documents = SimpleDirectoryReader(
-            directory_path,
-            file_extractor={
-                ".pdf": self._extract_pdf,
-                ".docx": self._extract_docx,
-                ".txt": self._extract_txt
-            }
-        ).load_data()
-        
-        self.index = VectorStoreIndex.from_documents(
-            documents,
-            vector_store=self.vector_store,
-            embed_model=self.embed_model
-        )
-        
-        self._setup_query_engine()
+        try:
+            # Use SimpleDirectoryReader without custom extractors first
+            documents = SimpleDirectoryReader(directory_path).load_data()
+            
+            self.index = VectorStoreIndex.from_documents(
+                documents,
+                vector_store=self.vector_store,
+                embed_model=self.embed_model
+            )
+            
+            self._setup_query_engine()
+            print(f"Successfully indexed {len(documents)} documents from {directory_path}")
+        except Exception as e:
+            print(f"Failed to initialize from directory: {e}")
     
     def _setup_query_engine(self):
         """Configure RAG query engine with custom prompts"""
