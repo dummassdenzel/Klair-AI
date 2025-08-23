@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -19,12 +19,6 @@ async def lifespan(app: FastAPI):
     # Shutdown
     global file_observer
     if file_observer:
-        # Clean up file handler
-        for handler in file_observer.emitters.values():
-            for event_handler in handler:
-                if hasattr(event_handler, 'cleanup'):
-                    event_handler.cleanup()
-        
         file_observer.stop()
         file_observer.join()
 
@@ -44,7 +38,7 @@ app.add_middleware(
 )
 
 @app.post("/api/set-directory")
-async def set_directory(request: dict, background_tasks: BackgroundTasks):
+async def set_directory(request: dict):
     global doc_processor, file_observer, current_directory
     
     directory_path = request.get("path")
@@ -61,15 +55,19 @@ async def set_directory(request: dict, background_tasks: BackgroundTasks):
         doc_processor = DocumentProcessor()
         await doc_processor.initialize_from_directory(directory_path)
         
-        # Start file monitoring with proper event loop
-        def on_file_change(file_path: str, is_deletion: bool = False):
-            if is_deletion:
-                background_tasks.add_task(doc_processor.remove_document, file_path)
-            else:
-                background_tasks.add_task(doc_processor.update_document, file_path)
+        # Start file monitoring
+        async def on_file_change(file_path: str, is_deletion: bool = False):
+            """Async callback for file changes"""
+            try:
+                if is_deletion:
+                    await doc_processor.remove_document(file_path)
+                else:
+                    await doc_processor.add_document(file_path)
+                print(f"🔄 File change processed: {file_path} (deletion: {is_deletion})")
+            except Exception as e:
+                print(f"❌ Error processing file change {file_path}: {e}")
         
         event_handler = DocumentFileHandler(on_file_change)
-        # Set the current event loop
         event_handler.set_event_loop(asyncio.get_running_loop())
         
         file_observer = Observer()
@@ -100,22 +98,9 @@ async def chat(request: ChatRequest):
         # Query RAG system
         response = await doc_processor.query(request.message)
         
-        # Process response safely
-        response_text = str(response)
-        
-        # Handle sources safely
-        sources = []
-        if hasattr(response, 'source_nodes') and response.source_nodes:
-            for node in response.source_nodes:
-                sources.append({
-                    "file_path": getattr(node.metadata, 'get', lambda x, y='': y)("file_path", ""),
-                    "relevance_score": getattr(node, 'score', 0.0),
-                    "content_snippet": getattr(node, 'text', '')[:200] + "..."
-                })
-        
         return ChatResponse(
-            message=response_text,
-            sources=sources
+            message=response.message,
+            sources=response.sources
         )
         
     except Exception as e:
@@ -131,3 +116,23 @@ async def get_status():
         "observer_running": file_observer is not None and file_observer.is_alive() if file_observer else False,
         "index_stats": doc_processor.get_index_stats() if doc_processor else None
     }
+
+@app.post("/api/clear-index")
+async def clear_index():
+    """Clear the entire index (for testing)"""
+    global doc_processor
+    if doc_processor:
+        try:
+            # Get all documents first
+            all_results = doc_processor.collection.get()
+            if all_results['ids']:
+                # Delete by IDs
+                doc_processor.collection.delete(ids=all_results['ids'])
+                print(f"Cleared {len(all_results['ids'])} documents")
+            
+            doc_processor.file_hashes.clear()
+            return {"status": "success", "message": "Index cleared"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to clear index: {str(e)}")
+    else:
+        raise HTTPException(status_code=400, detail="No processor initialized")

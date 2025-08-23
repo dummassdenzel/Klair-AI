@@ -1,16 +1,12 @@
-# app/services/document_processor.py
-from llama_index.core import Document, VectorStoreIndex, SimpleDirectoryReader
-from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.llms.ollama import Ollama
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 import chromadb
-from pathlib import Path
 import os
 import hashlib
 import logging
-from typing import Optional, Dict, Set
-from config import settings
+from typing import Optional, Dict, List
 from datetime import datetime
+from config import settings
+from sentence_transformers import SentenceTransformer
+import asyncio
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -25,17 +21,13 @@ class DocumentProcessor:
             metadata={"hnsw:space": "cosine"}
         )
         
-        # Initialize LlamaIndex components with Ollama
-        self.vector_store = ChromaVectorStore(chroma_collection=self.collection)
-        self.llm = Ollama(model="tinyllama", request_timeout=120.0)
-        self.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        
-        self.index = None
-        self.query_engine = None
+        # Initialize embedding model
+        self.embed_model = SentenceTransformer("BAAI/bge-small-en-v1.5")
         
         # Track file hashes to detect actual changes
         self.file_hashes: Dict[str, str] = {}
         self.supported_extensions = {".pdf", ".docx", ".txt"}
+        self.current_directory: Optional[str] = None
         
         # File processing limits
         self.max_file_size_mb = getattr(settings, 'MAX_FILE_SIZE_MB', 50)
@@ -56,24 +48,20 @@ class DocumentProcessor:
     def _validate_file(self, file_path: str) -> bool:
         """Validate file before processing"""
         try:
-            # Check if file exists
             if not os.path.exists(file_path):
                 logger.warning(f"File does not exist: {file_path}")
                 return False
             
-            # Check file extension
             ext = os.path.splitext(file_path)[1].lower()
             if ext not in self.supported_extensions:
                 logger.warning(f"Unsupported file type: {ext} for {file_path}")
                 return False
             
-            # Check file size
             file_size = os.path.getsize(file_path)
             if file_size > self.max_file_size_bytes:
                 logger.warning(f"File too large ({file_size / 1024 / 1024:.1f}MB): {file_path}")
                 return False
             
-            # Check if file is readable
             if not os.access(file_path, os.R_OK):
                 logger.warning(f"File not readable: {file_path}")
                 return False
@@ -85,13 +73,27 @@ class DocumentProcessor:
             return False
     
     async def initialize_from_directory(self, directory_path: str):
-        """Load all documents from directory and create initial index"""
+        """Load all documents from directory"""
         try:
             logger.info(f"Initializing document processor for directory: {directory_path}")
             
-            # Validate directory
             if not os.path.exists(directory_path):
                 raise ValueError(f"Directory does not exist: {directory_path}")
+            
+            self.current_directory = directory_path
+            
+            # Clear existing collection - Fix the delete operation
+            try:
+                # Get all existing documents first
+                all_results = self.collection.get()
+                if all_results['ids']:
+                    # Delete by IDs instead of empty where clause
+                    self.collection.delete(ids=all_results['ids'])
+                    logger.info(f"Cleared {len(all_results['ids'])} existing documents")
+            except Exception as e:
+                logger.warning(f"Error clearing collection: {e}")
+            
+            self.file_hashes.clear()
             
             # Get all supported files
             supported_files = []
@@ -105,102 +107,180 @@ class DocumentProcessor:
                 logger.warning(f"No supported files found in {directory_path}")
                 return
             
-            # Process files with error handling
-            documents = []
+            # Process files
             for file_path in supported_files:
                 try:
-                    doc = await self._process_single_file(file_path)
-                    if doc:
-                        documents.append(doc)
-                        # Store file hash
-                        self.file_hashes[file_path] = self._calculate_file_hash(file_path)
+                    await self.add_document(file_path)
                 except Exception as e:
                     logger.error(f"Failed to process file {file_path}: {e}")
                     continue
             
-            if documents:
-                self.index = VectorStoreIndex.from_documents(
-                    documents,
-                    vector_store=self.vector_store,
-                    embed_model=self.embed_model
-                )
-                self._setup_query_engine()
-                logger.info(f"Successfully indexed {len(documents)} documents from {directory_path}")
-            else:
-                logger.warning("No documents were successfully processed")
+            logger.info(f"Successfully indexed {len(self.file_hashes)} documents from {directory_path}")
                 
         except Exception as e:
             logger.error(f"Failed to initialize from directory: {e}")
             raise
     
-    async def _process_single_file(self, file_path: str) -> Optional[Document]:
-        """Process a single file with comprehensive error handling"""
+    async def add_document(self, file_path: str):
+        """Add or update a document"""
         try:
-            # Validate file
             if not self._validate_file(file_path):
-                return None
+                return
             
-            # Extract text based on file type
-            ext = os.path.splitext(file_path)[1].lower()
-            
-            if ext == ".pdf":
-                text = self._extract_pdf(file_path)
-            elif ext == ".docx":
-                text = self._extract_docx(file_path)
-            elif ext == ".txt":
-                text = self._extract_txt(file_path)
-            else:
-                logger.warning(f"Unsupported file type: {ext}")
-                return None
-            
-            # Validate extracted text
+            # Extract text
+            text = self._extract_text(file_path)
             if not text or not text.strip():
                 logger.warning(f"No text extracted from {file_path}")
-                return None
+                return
             
-            # Create document with metadata
+            # Generate embedding
+            embedding = self.embed_model.encode(text).tolist()
+            
+            # Create metadata
             metadata = {
                 "file_path": file_path,
                 "file_size": os.path.getsize(file_path),
-                "file_type": ext,
+                "file_type": os.path.splitext(file_path)[1].lower(),
                 "extracted_at": str(datetime.now())
             }
             
-            return Document(text=text, metadata=metadata)
+            # Use file path as unique ID
+            doc_id = file_path
+            
+            # Upsert to ChromaDB (add or update)
+            self.collection.upsert(
+                ids=[doc_id],
+                embeddings=[embedding],
+                documents=[text],
+                metadatas=[metadata]
+            )
+            
+            # Update file hash
+            self.file_hashes[file_path] = self._calculate_file_hash(file_path)
+            
+            logger.info(f"Successfully added/updated document: {file_path}")
             
         except Exception as e:
-            logger.error(f"Error processing file {file_path}: {e}")
-            return None
+            logger.error(f"Error adding document {file_path}: {e}")
+            raise
     
-    def _setup_query_engine(self):
-        """Configure RAG query engine with custom prompts"""
-        from llama_index.core.prompts import PromptTemplate
-        
-        qa_prompt = PromptTemplate(
-            "Context information is below.\n"
-            "---------------------\n"
-            "{context_str}\n"
-            "---------------------\n"
-            "Given the context information about documents in the monitored folder, "
-            "answer the query. If the information is not contained in the documents, "
-            "say 'I don't have information about that in the current documents.'\n"
-            "Query: {query_str}\n"
-            "Answer: "
-        )
-        
-        self.query_engine = self.index.as_query_engine(
-            llm=self.llm,
-            similarity_top_k=5,
-            text_qa_template=qa_prompt,
-            response_mode="tree_summarize"
-        )
+    async def remove_document(self, file_path: str):
+        """Remove a document"""
+        try:
+            # Remove from ChromaDB
+            self.collection.delete(ids=[file_path])
+            
+            # Remove from file hashes
+            if file_path in self.file_hashes:
+                del self.file_hashes[file_path]
+            
+            logger.info(f"Successfully removed document: {file_path}")
+            
+        except Exception as e:
+            logger.error(f"Error removing document {file_path}: {e}")
     
-    # Document extraction methods with error handling
+    async def query(self, query_text: str):
+        """Query documents"""
+        try:
+            # Generate query embedding
+            query_embedding = self.embed_model.encode(query_text).tolist()
+            
+            # Search ChromaDB
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=5,
+                include=['documents', 'metadatas', 'distances']
+            )
+            
+            if not results['documents'] or not results['documents'][0]:
+                return QueryResponse(
+                    message="I don't have information about that in the current documents.",
+                    sources=[]
+                )
+            
+            # Prepare context
+            documents = results['documents'][0]
+            metadatas = results['metadatas'][0]
+            distances = results['distances'][0]
+            
+            # Create sources
+            sources = []
+            for i, (doc, metadata, distance) in enumerate(zip(documents, metadatas, distances)):
+                sources.append({
+                    "file_path": metadata.get("file_path", ""),
+                    "relevance_score": 1.0 - distance,  # Convert distance to similarity
+                    "content_snippet": doc[:200] + "..." if len(doc) > 200 else doc
+                })
+            
+            # Generate response using Ollama
+            context = "\n\n".join(documents)
+            response = await self._generate_response(query_text, context)
+            
+            return QueryResponse(message=response, sources=sources)
+            
+        except Exception as e:
+            logger.error(f"Error during query: {e}")
+            raise
+    
+    async def _generate_response(self, query: str, context: str) -> str:
+        """Generate response using Ollama"""
+        try:
+            import httpx
+            
+            prompt = f"""You are a helpful AI assistant that answers questions based on the provided document context.
+
+Context information:
+{context}
+
+Question: {query}
+
+Instructions:
+- Answer the question directly and clearly
+- Use information from the provided context
+- If the information is not in the context, say 'I don't have information about that in the current documents'
+- Be concise and helpful
+
+Answer:"""
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{settings.OLLAMA_BASE_URL}/api/generate",
+                    json={
+                        "model": settings.OLLAMA_MODEL,
+                        "prompt": prompt,
+                        "stream": False
+                    },
+                    timeout=settings.OLLAMA_TIMEOUT
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    return result.get("response", "I couldn't generate a response.")
+                else:
+                    logger.error(f"Ollama API error: {response.status_code}")
+                    return "I couldn't generate a response due to an error."
+                    
+        except Exception as e:
+            logger.error(f"Error generating response: {e}")
+            return "I couldn't generate a response due to an error."
+    
+    def _extract_text(self, file_path: str) -> str:
+        """Extract text from file based on type"""
+        ext = os.path.splitext(file_path)[1].lower()
+        
+        if ext == ".pdf":
+            return self._extract_pdf(file_path)
+        elif ext == ".docx":
+            return self._extract_docx(file_path)
+        elif ext == ".txt":
+            return self._extract_txt(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {ext}")
+    
     def _extract_pdf(self, file_path: str) -> str:
-        """Extract text from PDF files with error handling"""
+        """Extract text from PDF files"""
         try:
             import fitz  # PyMuPDF
-            
             doc = fitz.open(file_path)
             text = ""
             for page in doc:
@@ -212,10 +292,9 @@ class DocumentProcessor:
             raise
     
     def _extract_docx(self, file_path: str) -> str:
-        """Extract text from DOCX files with error handling"""
+        """Extract text from DOCX files"""
         try:
             import docx
-            
             doc = docx.Document(file_path)
             return "\n".join([para.text for para in doc.paragraphs])
         except Exception as e:
@@ -223,9 +302,8 @@ class DocumentProcessor:
             raise
     
     def _extract_txt(self, file_path: str) -> str:
-        """Extract text from TXT files with error handling"""
+        """Extract text from TXT files"""
         try:
-            # Try multiple encodings
             encodings = ['utf-8', 'latin-1', 'cp1252']
             for encoding in encodings:
                 try:
@@ -234,88 +312,13 @@ class DocumentProcessor:
                 except UnicodeDecodeError:
                     continue
             
-            # If all encodings fail, try with error handling
             with open(file_path, "r", encoding='utf-8', errors='ignore') as f:
                 return f.read()
         except Exception as e:
             logger.error(f"Error extracting TXT {file_path}: {e}")
             raise
     
-    async def query(self, query_text: str):
-        """Query the document index with error handling"""
-        if not self.query_engine:
-            raise ValueError("Query engine not initialized. Please load documents first.")
-        
-        try:
-            return self.query_engine.query(query_text)
-        except Exception as e:
-            logger.error(f"Error during query: {e}")
-            raise
-    
-    async def update_document(self, file_path: str):
-        """Update a single document in the index with change detection"""
-        try:
-            # Check if file has actually changed
-            current_hash = self._calculate_file_hash(file_path)
-            if file_path in self.file_hashes and self.file_hashes[file_path] == current_hash:
-                logger.info(f"File unchanged, skipping update: {file_path}")
-                return
-            
-            # Process the file
-            doc = await self._process_single_file(file_path)
-            if not doc:
-                logger.warning(f"Failed to process file for update: {file_path}")
-                return
-            
-            # Update index
-            if self.index:
-                # Remove old version if it exists
-                await self._remove_document_from_index(file_path)
-                
-                # Insert new version
-                self.index.insert(doc)
-                
-                # Update file hash
-                self.file_hashes[file_path] = current_hash
-                
-                logger.info(f"Successfully updated document: {file_path}")
-            else:
-                logger.warning("Index not initialized, cannot update document")
-                
-        except Exception as e:
-            logger.error(f"Error updating document {file_path}: {e}")
-    
-    async def remove_document(self, file_path: str):
-        """Remove a document from the index when file is deleted"""
-        try:
-            await self._remove_document_from_index(file_path)
-            
-            # Remove from file hashes
-            if file_path in self.file_hashes:
-                del self.file_hashes[file_path]
-            
-            logger.info(f"Successfully removed document: {file_path}")
-            
-        except Exception as e:
-            logger.error(f"Error removing document {file_path}: {e}")
-    
-    async def _remove_document_from_index(self, file_path: str):
-        """Remove document from ChromaDB index"""
-        try:
-            # Get document IDs that match the file path
-            results = self.collection.get(
-                where={"file_path": file_path}
-            )
-            
-            if results['ids']:
-                # Delete from ChromaDB
-                self.collection.delete(ids=results['ids'])
-                logger.info(f"Removed {len(results['ids'])} document chunks for {file_path}")
-            
-        except Exception as e:
-            logger.error(f"Error removing document from index {file_path}: {e}")
-    
-    def get_indexed_files(self) -> list:
+    def get_indexed_files(self) -> List[str]:
         """Get list of indexed files"""
         return list(self.file_hashes.keys())
     
@@ -325,10 +328,14 @@ class DocumentProcessor:
             return {
                 "total_files": len(self.file_hashes),
                 "indexed_files": list(self.file_hashes.keys()),
-                "collection_count": self.collection.count() if self.collection else 0,
-                "index_initialized": self.index is not None,
-                "query_engine_ready": self.query_engine is not None
+                "collection_count": self.collection.count(),
+                "current_directory": self.current_directory
             }
         except Exception as e:
             logger.error(f"Error getting index stats: {e}")
             return {"error": str(e)}
+
+class QueryResponse:
+    def __init__(self, message: str, sources: List[dict]):
+        self.message = message
+        self.sources = sources
