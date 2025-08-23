@@ -139,42 +139,63 @@ class DocumentProcessor:
                 logger.warning(f"No text extracted from {file_path}")
                 return
             
-            # Generate embedding
-            embedding = self.embed_model.encode(text).tolist()
+            # Remove old document chunks first
+            await self._remove_document_chunks(file_path)
             
-            # Create metadata
-            metadata = {
-                "file_path": file_path,
-                "file_size": os.path.getsize(file_path),
-                "file_type": os.path.splitext(file_path)[1].lower(),
-                "extracted_at": str(datetime.now())
-            }
+            # Chunk the text
+            chunks = self._chunk_text(text)
+            logger.info(f"Created {len(chunks)} chunks for {file_path}")
             
-            # Use file path as unique ID
-            doc_id = file_path
+            # Process each chunk
+            chunk_embeddings = []
+            chunk_texts = []
+            chunk_metadatas = []
+            chunk_ids = []
             
-            # Upsert to ChromaDB (add or update)
-            self.collection.upsert(
-                ids=[doc_id],
-                embeddings=[embedding],
-                documents=[text],
-                metadatas=[metadata]
-            )
+            for chunk in chunks:
+                # Generate embedding for this chunk
+                embedding = self.embed_model.encode(chunk["text"]).tolist()
+                
+                # Create metadata for this chunk
+                metadata = {
+                    "file_path": file_path,
+                    "file_size": os.path.getsize(file_path),
+                    "file_type": os.path.splitext(file_path)[1].lower(),
+                    "extracted_at": str(datetime.now()),
+                    "chunk_id": chunk["chunk_id"],
+                    "total_chunks": chunk["total_chunks"]
+                }
+                
+                # Create unique ID for this chunk
+                chunk_id = f"{file_path}_chunk_{chunk['chunk_id']}"
+                
+                chunk_embeddings.append(embedding)
+                chunk_texts.append(chunk["text"])
+                chunk_metadatas.append(metadata)
+                chunk_ids.append(chunk_id)
+            
+            # Batch insert all chunks
+            if chunk_embeddings:
+                self.collection.upsert(
+                    ids=chunk_ids,
+                    embeddings=chunk_embeddings,
+                    documents=chunk_texts,
+                    metadatas=chunk_metadatas
+                )
             
             # Update file hash
             self.file_hashes[file_path] = current_hash
             
-            logger.info(f"Successfully added/updated document: {file_path}")
+            logger.info(f"Successfully added/updated document: {file_path} ({len(chunks)} chunks)")
             
         except Exception as e:
             logger.error(f"Error adding document {file_path}: {e}")
             raise
-    
+
     async def remove_document(self, file_path: str):
-        """Remove a document"""
+        """Remove a document from the index when file is deleted"""
         try:
-            # Remove from ChromaDB
-            self.collection.delete(ids=[file_path])
+            await self._remove_document_chunks(file_path)
             
             # Remove from file hashes
             if file_path in self.file_hashes:
@@ -184,6 +205,21 @@ class DocumentProcessor:
             
         except Exception as e:
             logger.error(f"Error removing document {file_path}: {e}")
+
+    async def _remove_document_chunks(self, file_path: str):
+        """Remove all chunks for a specific document"""
+        try:
+            # Get all chunks for this file
+            results = self.collection.get(
+                where={"file_path": file_path}
+            )
+            
+            if results['ids']:
+                self.collection.delete(ids=results['ids'])
+                logger.info(f"Removed {len(results['ids'])} chunks for {file_path}")
+                
+        except Exception as e:
+            logger.error(f"Error removing document chunks {file_path}: {e}")
     
     async def query(self, query_text: str):
         """Query documents"""
@@ -204,22 +240,49 @@ class DocumentProcessor:
                     sources=[]
                 )
             
-            # Prepare context
+            # Prepare context and sources
             documents = results['documents'][0]
             metadatas = results['metadatas'][0]
             distances = results['distances'][0]
             
-            # Create sources
-            sources = []
-            for i, (doc, metadata, distance) in enumerate(zip(documents, metadatas, distances)):
-                sources.append({
-                    "file_path": metadata.get("file_path", ""),
-                    "relevance_score": 1.0 - distance,  # Convert distance to similarity
-                    "content_snippet": doc[:200] + "..." if len(doc) > 200 else doc
+            # Group chunks by file for better context
+            file_chunks = {}
+            for doc, metadata, distance in zip(documents, metadatas, distances):
+                file_path = metadata.get("file_path", "")
+                if file_path not in file_chunks:
+                    file_chunks[file_path] = []
+                file_chunks[file_path].append({
+                    "text": doc,
+                    "distance": distance,
+                    "chunk_id": metadata.get("chunk_id", 0)
                 })
             
+            # Create sources with grouped context
+            sources = []
+            context_parts = []
+            
+            for file_path, chunks in file_chunks.items():
+                # Sort chunks by chunk_id for proper order
+                chunks.sort(key=lambda x: x["chunk_id"])
+                
+                # Combine chunks for this file
+                file_text = "\n".join([chunk["text"] for chunk in chunks])
+                
+                # Calculate average relevance score
+                avg_distance = sum(chunk["distance"] for chunk in chunks) / len(chunks)
+                relevance_score = 1.0 - avg_distance
+                
+                sources.append({
+                    "file_path": file_path,
+                    "relevance_score": relevance_score,
+                    "content_snippet": file_text[:300] + "..." if len(file_text) > 300 else file_text,
+                    "chunks_found": len(chunks)
+                })
+                
+                context_parts.append(file_text)
+            
             # Generate response using Ollama
-            context = "\n\n".join(documents)
+            context = "\n\n---\n\n".join(context_parts)
             response = await self._generate_response(query_text, context)
             
             return QueryResponse(message=response, sources=sources)
@@ -296,7 +359,7 @@ Answer:"""
         except Exception as e:
             logger.error(f"Error extracting PDF {file_path}: {e}")
             raise
-    
+
     def _extract_docx(self, file_path: str) -> str:
         """Extract text from DOCX files"""
         try:
@@ -306,7 +369,7 @@ Answer:"""
         except Exception as e:
             logger.error(f"Error extracting DOCX {file_path}: {e}")
             raise
-    
+
     def _extract_txt(self, file_path: str) -> str:
         """Extract text from TXT files"""
         try:
@@ -340,6 +403,57 @@ Answer:"""
         except Exception as e:
             logger.error(f"Error getting index stats: {e}")
             return {"error": str(e)}
+
+    
+    def _chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> List[dict]:
+        """Split text into overlapping chunks with semantic boundaries"""
+        if len(text) <= chunk_size:
+            # No need to chunk small texts
+            return [{"text": text, "chunk_id": 0, "total_chunks": 1}]
+        
+        chunks = []
+        start = 0
+        chunk_id = 0
+        
+        while start < len(text):
+            end = start + chunk_size
+            
+            # Try to find a good break point (sentence or paragraph end)
+            if end < len(text):
+                # Look for sentence endings first
+                for i in range(end, max(start + chunk_size - 100, start), -1):
+                    if text[i] in '.!?':
+                        end = i + 1
+                        break
+                else:
+                    # If no sentence ending, look for paragraph breaks
+                    for i in range(end, max(start + chunk_size - 50, start), -1):
+                        if text[i] == '\n' and (i + 1 >= len(text) or text[i + 1] == '\n'):
+                            end = i + 1
+                            break
+            
+            chunk_text = text[start:end].strip()
+            if chunk_text:  # Only add non-empty chunks
+                chunks.append({
+                    "text": chunk_text,
+                    "chunk_id": chunk_id,
+                    "total_chunks": None  # Will be set after all chunks are created
+                })
+                chunk_id += 1
+            
+            # Calculate next start position with overlap
+            start = max(start + 1, end - overlap)
+            
+            # Prevent infinite loops
+            if start >= len(text):
+                break
+        
+        # Set total_chunks for all chunks
+        total_chunks = len(chunks)
+        for chunk in chunks:
+            chunk["total_chunks"] = total_chunks
+        
+        return chunks
 
 class QueryResponse:
     def __init__(self, message: str, sources: List[dict]):
