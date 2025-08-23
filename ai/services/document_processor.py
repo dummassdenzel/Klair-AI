@@ -127,6 +127,12 @@ class DocumentProcessor:
             if not self._validate_file(file_path):
                 return
             
+            # Check if file has actually changed
+            current_hash = self._calculate_file_hash(file_path)
+            if file_path in self.file_hashes and self.file_hashes[file_path] == current_hash:
+                logger.info(f"File unchanged, skipping: {file_path}")
+                return
+            
             # Extract text
             text = self._extract_text(file_path)
             if not text or not text.strip():
@@ -156,7 +162,7 @@ class DocumentProcessor:
             )
             
             # Update file hash
-            self.file_hashes[file_path] = self._calculate_file_hash(file_path)
+            self.file_hashes[file_path] = current_hash
             
             logger.info(f"Successfully added/updated document: {file_path}")
             
