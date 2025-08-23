@@ -4,12 +4,14 @@ from contextlib import asynccontextmanager
 from typing import Optional
 import asyncio
 from services.document_processor import DocumentProcessor
-from services.file_monitor import DocumentFileHandler, Observer
+from services.file_monitor import DocumentFileHandler
+from watchdog.observers import Observer  # Fixed import
 from schemas.chat import ChatRequest, ChatResponse
 
 # Global state
 doc_processor: Optional[DocumentProcessor] = None
 file_observer: Optional[Observer] = None
+file_handler: Optional[DocumentFileHandler] = None  # Add handler reference
 current_directory: Optional[str] = None
 
 @asynccontextmanager
@@ -17,7 +19,9 @@ async def lifespan(app: FastAPI):
     # Startup
     yield
     # Shutdown
-    global file_observer
+    global file_observer, file_handler
+    if file_handler:
+        file_handler.cleanup()  # Clean up file handler
     if file_observer:
         file_observer.stop()
         file_observer.join()
@@ -39,14 +43,16 @@ app.add_middleware(
 
 @app.post("/api/set-directory")
 async def set_directory(request: dict):
-    global doc_processor, file_observer, current_directory
+    global doc_processor, file_observer, file_handler, current_directory
     
     directory_path = request.get("path")
     if not directory_path:
         raise HTTPException(status_code=400, detail="Directory path required")
     
     try:
-        # Stop existing observer
+        # Stop existing observer and clean up handler
+        if file_handler:
+            file_handler.cleanup()
         if file_observer:
             file_observer.stop()
             file_observer.join()
@@ -67,11 +73,11 @@ async def set_directory(request: dict):
             except Exception as e:
                 print(f"❌ Error processing file change {file_path}: {e}")
         
-        event_handler = DocumentFileHandler(on_file_change)
-        event_handler.set_event_loop(asyncio.get_running_loop())
+        file_handler = DocumentFileHandler(on_file_change)
+        file_handler.set_event_loop(asyncio.get_running_loop())
         
         file_observer = Observer()
-        file_observer.schedule(event_handler, directory_path, recursive=True)
+        file_observer.schedule(file_handler, directory_path, recursive=True)
         file_observer.start()
         
         current_directory = directory_path
@@ -114,6 +120,7 @@ async def get_status():
         "current_directory": current_directory,
         "processor_ready": doc_processor is not None,
         "observer_running": file_observer is not None and file_observer.is_alive() if file_observer else False,
+        "handler_ready": file_handler is not None,
         "index_stats": doc_processor.get_index_stats() if doc_processor else None
     }
 
