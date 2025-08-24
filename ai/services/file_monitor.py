@@ -10,9 +10,9 @@ import time  # Use time.time() instead of asyncio.get_event_loop().time()
 logger = logging.getLogger(__name__)
 
 class DocumentFileHandler(FileSystemEventHandler):
-    def __init__(self, event_queue: asyncio.Queue):
+    def __init__(self, event_queue: asyncio.Queue, supported_extensions: set):
         self.event_queue = event_queue
-        self.supported_extensions = {".pdf", ".docx", ".txt"}
+        self.supported_extensions = supported_extensions
     
     def on_modified(self, event):
         if not event.is_directory and self._is_supported_file(event.src_path):
@@ -52,7 +52,11 @@ class FileMonitorService:
     def __init__(self, document_processor, max_queue_size: int = 100):
         self.document_processor = document_processor
         self.event_queue = asyncio.Queue(maxsize=max_queue_size)
-        self.file_handler = DocumentFileHandler(self.event_queue)
+        
+        # Get supported extensions from the document processor's file validator
+        supported_extensions = getattr(document_processor.file_validator, 'supported_extensions', {".pdf", ".docx", ".txt"})
+        
+        self.file_handler = DocumentFileHandler(self.event_queue, supported_extensions)
         self.observer: Optional[Observer] = None
         self.processor_task: Optional[asyncio.Task] = None
         self.is_running = False
@@ -60,6 +64,8 @@ class FileMonitorService:
         # Debouncing
         self.pending_events = {}  # file_path -> event_info
         self.debounce_delay = 1.0  # seconds
+        
+        logger.info(f"File monitor initialized with supported extensions: {supported_extensions}")
     
     async def start_monitoring(self, directory_path: str):
         """Start monitoring directory for file changes"""
@@ -178,3 +184,12 @@ class FileMonitorService:
                 
         except Exception as e:
             logger.error(f"Error processing {event_type} for {file_path}: {e}")
+    
+    def get_status(self) -> dict:
+        """Get current monitoring status"""
+        return {
+            "is_running": self.is_running,
+            "queue_size": self.event_queue.qsize(),
+            "pending_events": len(self.pending_events),
+            "supported_extensions": list(self.file_handler.supported_extensions)
+        }
