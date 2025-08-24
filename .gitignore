@@ -38,3 +38,5 @@ chroma_db/
 # IDE / Editor specific settings
 .vscode/
 .idea/
+
+documents/
