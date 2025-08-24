@@ -4,14 +4,12 @@ from contextlib import asynccontextmanager
 from typing import Optional
 import asyncio
 from services.document_processor import DocumentProcessor
-from services.file_monitor import DocumentFileHandler
-from watchdog.observers import Observer  # Fixed import
+from services.file_monitor import FileMonitorService  # Updated import
 from schemas.chat import ChatRequest, ChatResponse
 
 # Global state
 doc_processor: Optional[DocumentProcessor] = None
-file_observer: Optional[Observer] = None
-file_handler: Optional[DocumentFileHandler] = None  # Add handler reference
+file_monitor: Optional[FileMonitorService] = None  # Updated
 current_directory: Optional[str] = None
 
 @asynccontextmanager
@@ -19,12 +17,9 @@ async def lifespan(app: FastAPI):
     # Startup
     yield
     # Shutdown
-    global file_observer, file_handler
-    if file_handler:
-        file_handler.cleanup()  # Clean up file handler
-    if file_observer:
-        file_observer.stop()
-        file_observer.join()
+    global file_monitor
+    if file_monitor:
+        await file_monitor.stop_monitoring()  # Updated cleanup
 
 app = FastAPI(
     title="AI Document Assistant",
@@ -43,52 +38,35 @@ app.add_middleware(
 
 @app.post("/api/set-directory")
 async def set_directory(request: dict):
-    global doc_processor, file_observer, file_handler, current_directory
+    global doc_processor, file_monitor, current_directory
     
     directory_path = request.get("path")
     if not directory_path:
         raise HTTPException(status_code=400, detail="Directory path required")
     
     try:
-        # Stop existing observer and clean up handler
-        if file_handler:
-            file_handler.cleanup()
-        if file_observer:
-            file_observer.stop()
-            file_observer.join()
+        # Stop existing file monitor
+        if file_monitor:
+            await file_monitor.stop_monitoring()
         
         # Initialize document processor
         doc_processor = DocumentProcessor()
         await doc_processor.initialize_from_directory(directory_path)
         
-        # Start file monitoring
-        async def on_file_change(file_path: str, is_deletion: bool = False):
-            """Async callback for file changes"""
-            try:
-                if is_deletion:
-                    await doc_processor.remove_document(file_path)
-                else:
-                    await doc_processor.add_document(file_path)
-                print(f"🔄 File change processed: {file_path} (deletion: {is_deletion})")
-            except Exception as e:
-                print(f"❌ Error processing file change {file_path}: {e}")
-        
-        file_handler = DocumentFileHandler(on_file_change)
-        file_handler.set_event_loop(asyncio.get_running_loop())
-        
-        file_observer = Observer()
-        file_observer.schedule(file_handler, directory_path, recursive=True)
-        file_observer.start()
+        # Start file monitoring with new service
+        file_monitor = FileMonitorService(doc_processor)
+        await file_monitor.start_monitoring(directory_path)
         
         current_directory = directory_path
         
-        # Get index stats
-        stats = doc_processor.get_index_stats()
+        # Get stats using new method
+        stats = doc_processor.get_stats()
         
         return {
             "status": "success",
             "directory": directory_path,
-            "indexed_files": len(doc_processor.get_indexed_files()),
+            "indexed_files": stats["total_files"],
+            "total_chunks": stats["total_chunks"],
             "stats": stats
         }
         
@@ -119,9 +97,8 @@ async def get_status():
         "directory_set": current_directory is not None,
         "current_directory": current_directory,
         "processor_ready": doc_processor is not None,
-        "observer_running": file_observer is not None and file_observer.is_alive() if file_observer else False,
-        "handler_ready": file_handler is not None,
-        "index_stats": doc_processor.get_index_stats() if doc_processor else None
+        "monitor_running": file_monitor is not None and file_monitor.is_running if file_monitor else False,
+        "index_stats": doc_processor.get_stats() if doc_processor else None
     }
 
 @app.post("/api/clear-index")
@@ -130,16 +107,20 @@ async def clear_index():
     global doc_processor
     if doc_processor:
         try:
-            # Get all documents first
-            all_results = doc_processor.collection.get()
-            if all_results['ids']:
-                # Delete by IDs
-                doc_processor.collection.delete(ids=all_results['ids'])
-                print(f"Cleared {len(all_results['ids'])} documents")
-            
+            await doc_processor._clear_collection()
             doc_processor.file_hashes.clear()
+            doc_processor.file_metadata.clear()
             return {"status": "success", "message": "Index cleared"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to clear index: {str(e)}")
     else:
         raise HTTPException(status_code=400, detail="No processor initialized")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    global doc_processor, file_monitor
+    if file_monitor:
+        await file_monitor.stop_monitoring()
+    if doc_processor:
+        await doc_processor.cleanup()
