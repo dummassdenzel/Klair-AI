@@ -24,7 +24,7 @@ file_monitor: Optional[FileMonitorService] = None
 current_directory: Optional[str] = None
 prewarming_complete = False
 prewarming_task = None
-
+ 
 # NEW: Add database service
 db_service = DatabaseService()
 
