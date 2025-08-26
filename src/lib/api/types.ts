@@ -1,12 +1,13 @@
 // Chat Types
 export interface ChatRequest {
+    session_id: number;
     message: string;
   }
   
   export interface ChatResponse {
     message: string;
     sources: DocumentSource[];
-    response_time: number; // Add this missing field
+    response_time: number;
   }
   
   export interface DocumentSource {
@@ -67,6 +68,7 @@ export interface ChatRequest {
     directory_path: string;
     created_at: string;
     updated_at: string;
+    message_count: number;
   }
   
   export interface ChatMessage {

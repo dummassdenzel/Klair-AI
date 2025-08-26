@@ -53,7 +53,8 @@ export const apiService = {
   // Chat Session Management
   async getChatSessions(): Promise<ChatSession[]> {
     const response = await apiClient.get('/chat-sessions');
-    return response.data;
+    // Fix: Extract sessions from the nested response structure
+    return response.data.sessions || [];
   },
 
   async createChatSession(directoryPath: string, title: string): Promise<ChatSession> {
@@ -64,13 +65,19 @@ export const apiService = {
       title,
       directory_path: directoryPath,
       created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
+      message_count: 0 // Initialize with 0 messages
     };
     return tempSession;
   },
 
-  async getChatMessages(sessionId: number): Promise<ChatMessage[]> {
+  async getChatMessages(sessionId: number): Promise<any> {
+    console.log('🔍 API Service: Getting messages for session:', sessionId);
     const response = await apiClient.get(`/chat-sessions/${sessionId}/messages`);
+    console.log('🔍 API Service: Raw messages response:', response);
+    console.log('🔍 API Service: Messages data:', response.data);
+    
+    // FIX: Return the entire response object, not just messages
     return response.data;
   },
 

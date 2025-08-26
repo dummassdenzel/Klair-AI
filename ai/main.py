@@ -171,11 +171,32 @@ async def chat(request: ChatRequest):
     try:
         logger.info(f"Processing chat query: {request.message[:100]}...")
         
-        # Create or get chat session
-        chat_session = await db_service.create_chat_session(
-            directory_path=current_directory,
-            title=f"Chat about: {request.message[:50]}..."
-        )
+        # FIX: Check if session_id exists, create new only if needed
+        if request.session_id:
+            # Try to get existing session
+            try:
+                chat_session = await db_service.get_chat_session_by_id(request.session_id)
+                if chat_session:
+                    logger.info(f"Using existing session: {request.session_id}")
+                else:
+                    logger.warning(f"Session {request.session_id} not found, creating new one")
+                    chat_session = await db_service.create_chat_session(
+                        directory_path=current_directory,
+                        title=f"Chat about: {request.message[:50]}..."
+                    )
+            except Exception as e:
+                logger.error(f"Error getting session {request.session_id}: {e}")
+                # Fallback to creating new session
+                chat_session = await db_service.create_chat_session(
+                    directory_path=current_directory,
+                    title=f"Chat about: {request.message[:50]}..."
+                )
+        else:
+            # No session_id provided, create new session
+            chat_session = await db_service.create_chat_session(
+                directory_path=current_directory,
+                title=f"Chat about: {request.message[:50]}..."
+            )
         
         # Query RAG system
         response = await doc_processor.query(request.message)

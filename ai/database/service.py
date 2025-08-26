@@ -558,3 +558,15 @@ class DatabaseService:
                 
             except Exception as e:
                 raise e
+
+    async def get_chat_session_by_id(self, session_id: int) -> Optional[ChatSession]:
+        """Get a chat session by its ID"""
+        try:
+            async for session in get_db():
+                stmt = select(ChatSession).where(ChatSession.id == session_id)
+                result = await session.execute(stmt)
+                return result.scalar_one_or_none()
+        except Exception as e:
+            # Use print since logger might not be available
+            print(f"Error getting chat session {session_id}: {e}")
+            return None
