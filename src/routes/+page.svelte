@@ -1,14 +1,24 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { apiService } from '$lib/api/services';
-    import { systemStatus, isLoading, error, apiActions } from '$lib/stores/api';
+    import { 
+      systemStatus, 
+      currentChatSession, 
+      chatHistory, 
+      isChatLoading,
+      apiActions 
+    } from '$lib/stores/api';
     import { createApiRequest } from '$lib/utils/api';
+    import ChatHeader from '$lib/components/ChatHeader.svelte';
+    import ChatContainer from '$lib/components/ChatContainer.svelte';
+    import type { ChatRequest, ChatMessage } from '$lib/api/types';
   
+    let messages: ChatMessage[] = [];
     let directoryPath = 'C:\\xampp\\htdocs\\klair-ai\\documents';
   
     onMount(async () => {
-      // Test backend connection on page load
       await testConnection();
+      await loadChatHistory();
     });
   
     async function testConnection() {
@@ -28,7 +38,6 @@
       await createApiRequest(
         async () => {
           const result = await apiService.setDirectory(directoryPath);
-          // Refresh status after setting directory
           await testConnection();
           return result;
         },
@@ -36,112 +45,209 @@
       );
     }
   
-    async function clearIndex() {
+    async function loadChatHistory() {
+      const sessions = await apiService.getChatSessions();
+      chatHistory.set(sessions);
+    }
+  
+    async function handleSendMessage(event: CustomEvent<{ message: string }>) {
+      const { message } = event.detail;
+      
+      if (!message.trim()) return;
+  
+      // Create or get current chat session
+      let session = $currentChatSession;
+      if (!session) {
+        session = await apiService.createChatSession(
+          $systemStatus?.current_directory || '',
+          `Chat about: ${message.substring(0, 50)}...`
+        );
+        currentChatSession.set(session);
+        await loadChatHistory();
+      }
+  
+      // Add user message to UI immediately
+      const userMessage: ChatMessage = {
+        id: Date.now(),
+        session_id: session.id,
+        user_message: message,
+        ai_response: '',
+        sources: [],
+        response_time: 0,
+        timestamp: new Date().toISOString()
+      };
+      
+      messages = [...messages, userMessage];
+      
+      // Set loading state
+      apiActions.setChatLoading(true);
+      
+      try {
+        // Send to backend
+        const response = await apiService.sendChatMessage({ message });
+        
+        // Update the user message with AI response
+        const updatedMessage: ChatMessage = {
+          ...userMessage,
+          ai_response: response.message,
+          sources: response.sources,
+          response_time: response.response_time
+        };
+        
+        messages = messages.map(msg => 
+          msg.id === userMessage.id ? updatedMessage : msg
+        );
+        
+        // Update session title if it's the first message
+        if (messages.length === 2) { // User message + AI response
+          const newTitle = `Chat about: ${message.substring(0, 50)}...`;
+          await apiService.updateChatSessionTitle(session.id, newTitle);
+          session.title = newTitle;
+          currentChatSession.set(session);
+          await loadChatHistory();
+        }
+        
+      } catch (error) {
+        console.error('Failed to send message:', error);
+        // Remove the failed message
+        messages = messages.filter(msg => msg.id !== userMessage.id);
+      } finally {
+        apiActions.setChatLoading(false);
+      }
+    }
+  
+    async function handleUpdateTitle(event: CustomEvent<{ title: string }>) {
+      if (!$currentChatSession) return;
+      
       await createApiRequest(
         async () => {
-          const result = await apiService.clearIndex();
-          // Refresh status after clearing
-          await testConnection();
-          return result;
+          const updatedSession = await apiService.updateChatSessionTitle(
+            $currentChatSession.id, 
+            event.detail.title
+          );
+          currentChatSession.set(updatedSession);
+          await loadChatHistory();
+          return updatedSession;
         },
-        'Clear index'
+        'Update session title'
       );
+    }
+  
+    async function handleDeleteSession() {
+      if (!$currentChatSession) return;
+      
+      await createApiRequest(
+        async () => {
+          await apiService.deleteChatSession($currentChatSession.id);
+          currentChatSession.set(null);
+          messages = [];
+          await loadChatHistory();
+          return true;
+        },
+        'Delete session'
+      );
+    }
+  
+    async function startNewChat() {
+      currentChatSession.set(null);
+      messages = [];
+    }
+  
+    async function loadSession(session: any) {
+      currentChatSession.set(session);
+      const sessionMessages = await apiService.getChatMessages(session.id);
+      messages = sessionMessages;
     }
   </script>
   
   <svelte:head>
-    <title>Klair AI - Backend Connection Test</title>
+    <title>Klair AI - Chat Interface</title>
   </svelte:head>
   
-  <main class="min-h-screen bg-gray-50 p-8">
-    <div class="max-w-4xl mx-auto">
-      <h1 class="text-3xl font-bold text-gray-900 mb-8">Backend Connection Test</h1>
-      
-      <!-- Error Display -->
-      {#if $error}
-        <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
-          <strong>Error:</strong> {$error}
-        </div>
-      {/if}
-  
-      <!-- Loading Indicator -->
-      {#if $isLoading}
-        <div class="bg-blue-100 border border-blue-400 text-blue-700 px-4 py-3 rounded mb-6">
-          <strong>Loading...</strong> Please wait...
-        </div>
-      {/if}
-  
-      <!-- Connection Status -->
-      <div class="bg-white rounded-lg shadow p-6 mb-6">
-        <h2 class="text-xl font-semibold mb-4">📡 Connection Status</h2>
+  <div class="min-h-screen bg-gray-50">
+    <!-- Top Navigation -->
+    <div class="bg-white border-b border-gray-200 px-6 py-4">
+      <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-bold text-gray-900">🤖 Klair AI</h1>
         
-        {#if $systemStatus}
-          <div class="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <span class="font-medium">Directory Set:</span>
-              <span class="ml-2 {$systemStatus.directory_set ? 'text-green-600' : 'text-red-600'}">
-                {$systemStatus.directory_set ? '✅ Yes' : '❌ No'}
-              </span>
-            </div>
-            <div>
-              <span class="font-medium">Processor Ready:</span>
-              <span class="ml-2 {$systemStatus.processor_ready ? 'text-green-600' : 'text-red-600'}">
-                {$systemStatus.processor_ready ? '✅ Yes' : '❌ No'}
-              </span>
-            </div>
-            <div>
-              <span class="font-medium">Current Directory:</span>
-              <span class="ml-2 text-gray-600">{$systemStatus.current_directory || 'None'}</span>
-            </div>
-            <div>
-              <span class="font-medium">Total Documents:</span>
-              <span class="ml-2 text-gray-600">{$systemStatus.database_stats?.total_documents || 0}</span>
-            </div>
+        <div class="flex items-center gap-4">
+          <!-- Directory Status -->
+          <div class="text-sm text-gray-600">
+            {#if $systemStatus?.directory_set}
+              📁 {$systemStatus.current_directory?.split('\\').pop()}
+            {:else}
+              📁 No directory set
+            {/if}
           </div>
-        {:else}
-          <p class="text-gray-500">No status information available</p>
-        {/if}
-      </div>
-  
-      <!-- Directory Management -->
-      <div class="bg-white rounded-lg shadow p-6 mb-6">
-        <h2 class="text-xl font-semibold mb-4">📁 Directory Management</h2>
-        
-        <div class="flex gap-4 mb-4">
-          <input
-            type="text"
-            bind:value={directoryPath}
-            placeholder="Enter directory path"
-            class="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
+          
+          <!-- Set Directory Button -->
           <button
             on:click={setDirectory}
-            disabled={$isLoading}
-            class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
           >
             Set Directory
           </button>
         </div>
-  
-        <button
-          on:click={clearIndex}
-          disabled={$isLoading}
-          class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Clear Index
-        </button>
-      </div>
-  
-      <!-- Test Connection Button -->
-      <div class="bg-white rounded-lg shadow p-6">
-        <h2 class="text-xl font-semibold mb-4">�� Test Connection</h2>
-        <button
-          on:click={testConnection}
-          disabled={$isLoading}
-          class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Test Backend Connection
-        </button>
       </div>
     </div>
-  </main>
+  
+    <div class="flex h-[calc(100vh-80px)]">
+      <!-- Sidebar -->
+      <div class="w-80 bg-white border-r border-gray-200 flex flex-col">
+        <!-- New Chat Button -->
+        <div class="p-4 border-b border-gray-200">
+          <button
+            on:click={startNewChat}
+            class="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center justify-center gap-2"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+            </svg>
+            New Chat
+          </button>
+        </div>
+        
+        <!-- Chat History -->
+        <div class="flex-1 overflow-y-auto p-4">
+          <h3 class="text-sm font-medium text-gray-900 mb-3">Recent Chats</h3>
+          <div class="space-y-2">
+            {#each $chatHistory as session}
+              <button
+                on:click={() => loadSession(session)}
+                class="w-full text-left p-3 rounded-lg hover:bg-gray-100 transition-colors {$currentChatSession?.id === session.id ? 'bg-blue-50 border border-blue-200' : ''}"
+              >
+                <div class="text-sm font-medium text-gray-900 truncate">
+                  {session.title}
+                </div>
+                <div class="text-xs text-gray-500">
+                  {new Date(session.created_at).toLocaleDateString()}
+                </div>
+              </button>
+            {/each}
+          </div>
+        </div>
+      </div>
+  
+      <!-- Main Chat Area -->
+      <div class="flex-1 flex flex-col">
+        {#if $currentChatSession}
+          <ChatHeader
+            session={$currentChatSession}
+            on:updateTitle={handleUpdateTitle}
+            on:deleteSession={handleDeleteSession}
+          />
+        {:else}
+          <div class="bg-white border-b border-gray-200 px-6 py-4">
+            <h2 class="text-xl font-semibold text-gray-900">New Chat</h2>
+            <p class="text-gray-600">Start a new conversation about your documents</p>
+          </div>
+        {/if}
+        
+        <ChatContainer
+          {messages}
+          isLoading={$isChatLoading}
+          on:send={handleSendMessage}
+        />
+      </div>
+    </div>
+  </div>

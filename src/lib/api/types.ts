@@ -6,6 +6,7 @@ export interface ChatRequest {
   export interface ChatResponse {
     message: string;
     sources: DocumentSource[];
+    response_time: number; // Add this missing field
   }
   
   export interface DocumentSource {
