@@ -16,15 +16,21 @@ class Settings:
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     
-    # Ollama settings
+    # LLM settings
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")  # 'ollama' | 'gemini'
+    # Ollama
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "tinyllama")
     OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "120"))
+    # Gemini
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
     
     # File processing
     SUPPORTED_EXTENSIONS: List[str] = os.getenv("SUPPORTED_EXTENSIONS", ".pdf,.docx,.txt").split(',')
     
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    SQLALCHEMY_ECHO: bool = os.getenv("SQLALCHEMY_ECHO", "false").lower() in ("1", "true", "yes")
 
 settings = Settings()

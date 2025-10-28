@@ -58,17 +58,8 @@ export const apiService = {
   },
 
   async createChatSession(directoryPath: string, title: string): Promise<ChatSession> {
-    // Since the backend doesn't have a separate create endpoint,
-    // we'll create a temporary session and let the chat endpoint handle the real creation
-    const tempSession: ChatSession = {
-      id: Date.now(), // Temporary ID
-      title,
-      directory_path: directoryPath,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      message_count: 0 // Initialize with 0 messages
-    };
-    return tempSession;
+    const response = await apiClient.post('/chat-sessions', { title });
+    return response.data;
   },
 
   async getChatMessages(sessionId: number): Promise<any> {

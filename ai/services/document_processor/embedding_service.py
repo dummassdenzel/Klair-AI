@@ -43,7 +43,7 @@ class EmbeddingService:
                 raise RuntimeError("Embedding model not initialized")
             
             # Convert to numpy array for batch processing
-            embeddings = self.embed_model.encode(texts)
+            embeddings = self.embed_model.encode(texts, show_progress_bar=False)
             
             # Convert to list of lists
             if isinstance(embeddings, np.ndarray):

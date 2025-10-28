@@ -34,6 +34,7 @@ class DocumentProcessorOrchestrator:
         self.chunker = DocumentChunker(chunk_size, chunk_overlap)
         self.embedding_service = EmbeddingService(embed_model_name)
         self.vector_store = VectorStoreService(persist_dir)
+        # LLM service now supports provider switch (ollama | gemini) via settings
         self.llm_service = LLMService(ollama_base_url, ollama_model)
         self.file_validator = FileValidator(max_file_size_mb)
         self.database_service = DatabaseService()
@@ -127,7 +128,7 @@ class DocumentProcessorOrchestrator:
             return ProcessingResult(
                 success=True,
                 file_path=file_path,
-                chunks_created=len(self.file_metadata[file_path].chunks_count) if file_path in self.file_metadata else 0,
+                chunks_created=0,
                 processing_time=processing_time
             )
             
@@ -281,14 +282,15 @@ class DocumentProcessorOrchestrator:
         """Get comprehensive stats"""
         try:
             collection_count = self.vector_store.get_collection_count()
+            # file_metadata entries are dicts already; avoid __dict__ access
             return {
                 "total_files": len(self.file_hashes),
                 "total_chunks": collection_count,
                 "current_directory": self.current_directory,
                 "indexed_files": list(self.file_hashes.keys()),
-                "file_metadata": {k: v.__dict__ for k, v in self.file_metadata.items()},
+                "file_metadata": {k: v for k, v in self.file_metadata.items()},
                 "avg_chunks_per_file": (
-                    collection_count / len(self.file_hashes) 
+                    collection_count / len(self.file_hashes)
                     if self.file_hashes else 0
                 ),
                 "embedding_model": self.embedding_service.model_name,

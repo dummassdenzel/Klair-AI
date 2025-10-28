@@ -1,42 +1,85 @@
 import logging
 from typing import Optional
+from config import settings
+import asyncio
 
 
 logger = logging.getLogger(__name__)
 
 
 class LLMService:
-    """Service for managing LLM interactions"""
-    
+    """Service for managing LLM interactions (Ollama | Gemini)"""
+
     def __init__(self, base_url: str, model: str):
         self.base_url = base_url
         self.model = model
         self.http_client = None
-        # Don't initialize immediately - use lazy loading
+        self._gemini = None
+        self.provider = settings.LLM_PROVIDER.lower().strip()
+        # Lazy initialization per provider
     
     def _initialize_client(self):
-        """Initialize HTTP client for Ollama (lazy loading)"""
-        if self.http_client is not None:
-            return  # Already initialized
-        
-        try:
-            # Import here to avoid startup issues
-            import httpx
-            
-            self.http_client = httpx.AsyncClient(timeout=30.0)
-            logger.info(f"LLM service initialized with model: {self.model}")
-        except Exception as e:
-            logger.error(f"Failed to initialize LLM service: {e}")
-            raise
+        """Initialize client for the selected provider (lazy)."""
+        if self.provider == "gemini":
+            if self._gemini is not None:
+                return
+            try:
+                import google.generativeai as genai
+                if not settings.GEMINI_API_KEY:
+                    raise RuntimeError("GEMINI_API_KEY is not set")
+                genai.configure(api_key=settings.GEMINI_API_KEY)
+                # Configure model with sane defaults
+                self._gemini = genai.GenerativeModel(
+                    settings.GEMINI_MODEL or self.model,
+                    generation_config={
+                        "temperature": 0.7,
+                        "top_p": 0.9,
+                        "max_output_tokens": 1024,
+                    }
+                )
+                logger.info(f"Gemini initialized with model: {settings.GEMINI_MODEL or self.model}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Gemini: {e}")
+                raise
+        else:
+            if self.http_client is not None:
+                return  # Already initialized
+            try:
+                import httpx
+                self.http_client = httpx.AsyncClient(timeout=30.0)
+                logger.info(f"Ollama client initialized with model: {self.model}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Ollama client: {e}")
+                raise
     
     async def generate_response(self, query: str, context: str) -> str:
-        """Generate response using Ollama LLM"""
+        """Generate response using selected provider."""
         try:
-            # Initialize client if needed
             self._initialize_client()
-            
             prompt = self._build_prompt(query, context)
-            
+
+            if self.provider == "gemini":
+                try:
+                    # Run blocking SDK call in a thread to avoid blocking the event loop
+                    result = await asyncio.to_thread(self._gemini.generate_content, prompt)
+                    text = getattr(result, "text", None)
+                    if not text:
+                        # Fallback: attempt to extract from candidates/parts
+                        candidates = getattr(result, "candidates", []) or []
+                        for c in candidates:
+                            content = getattr(c, "content", None)
+                            parts = getattr(content, "parts", []) if content else []
+                            part_texts = [getattr(p, "text", "") for p in parts]
+                            joined = "".join(part_texts).strip()
+                            if joined:
+                                text = joined
+                                break
+                    return text or "I couldn't generate a response."
+                except Exception as ge:
+                    logger.error(f"Gemini generation error: {ge}")
+                    return "I couldn't generate a response due to an AI provider error."
+
+            # Default: Ollama
             response = await self.http_client.post(
                 f"{self.base_url}/api/generate",
                 json={
@@ -50,14 +93,13 @@ class LLMService:
                     }
                 }
             )
-            
             if response.status_code == 200:
                 result = response.json()
                 return result.get("response", "I couldn't generate a response.")
             else:
                 logger.error(f"Ollama API error: {response.status_code} - {response.text}")
                 return "I couldn't generate a response due to an API error."
-                
+
         except Exception as e:
             logger.error(f"Error generating LLM response: {e}")
             return "I couldn't generate a response due to an error."
@@ -96,6 +138,7 @@ Answer:"""
             if self.http_client:
                 await self.http_client.aclose()
                 self.http_client = None
+            # Gemini has no persistent client to close
         except Exception as e:
             logger.error(f"Error during LLM service cleanup: {e}")
     

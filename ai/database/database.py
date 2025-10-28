@@ -8,7 +8,7 @@ Base = declarative_base()
 
 # Create engine from .env DATABASE_URL
 async_database_url = settings.DATABASE_URL.replace('postgresql://', 'postgresql+asyncpg://')
-engine = create_async_engine(async_database_url, echo=True)
+engine = create_async_engine(async_database_url, echo=settings.SQLALCHEMY_ECHO)
 
 # Create a session factory
 AsyncSessionLocal = sessionmaker(

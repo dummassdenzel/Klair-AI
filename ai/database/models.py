@@ -5,7 +5,7 @@ from .database import Base
 
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
-    
+     
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, default="New Chat")
     directory_path = Column(String, nullable=False)

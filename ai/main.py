@@ -1,10 +1,12 @@
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
 import asyncio
 import logging
 from services.document_processor import DocumentProcessorOrchestrator, config
+from config import settings
 from services.file_monitor import FileMonitorService
 from schemas.chat import ChatRequest, ChatResponse
 
@@ -16,6 +18,13 @@ from sqlalchemy import select, func, or_, and_, desc
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+for noisy in [
+    "sqlalchemy.engine",
+    "httpx",
+    "chromadb",
+    "watchdog.observers.inotify",
+]:
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # Global state
@@ -280,6 +289,20 @@ async def get_status():
             logger.warning(f"Could not get configuration: {e}")
             status_info["configuration"] = {"error": "Configuration not available"}
         
+        # Add active LLM provider/model info
+        try:
+            provider = (settings.LLM_PROVIDER or "ollama").lower()
+            if provider == "gemini":
+                model_name = settings.GEMINI_MODEL or "gemini-2.5-pro"
+            else:
+                model_name = getattr(config, "ollama_model", "tinyllama")
+            status_info["llm"] = {
+                "provider": provider,
+                "model": model_name
+            }
+        except Exception as e:
+            logger.warning(f"Could not determine LLM provider/model: {e}")
+        
         # Add index stats if processor is available
         if doc_processor:
             try:
@@ -428,18 +451,40 @@ async def delete_chat_session(session_id: int):
         logger.error(f"Failed to delete chat session: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete chat session: {str(e)}")
 
+class UpdateTitleRequest(BaseModel):
+    title: str
+
+class CreateSessionRequest(BaseModel):
+    title: str
+
 @app.put("/api/chat-sessions/{session_id}/title")
-async def update_chat_title(session_id: int, title: str):
-    """Update chat session title"""
+async def update_chat_title(session_id: int, request: UpdateTitleRequest):
+    """Update chat session title (expects JSON body { title }) and return updated session"""
     try:
-        success = await db_service.update_chat_session_title(session_id, title)
-        if success:
-            return {"status": "success", "message": "Title updated"}
-        else:
+        success = await db_service.update_chat_session_title(session_id, request.title)
+        if not success:
             raise HTTPException(status_code=404, detail="Chat session not found")
+        # Return updated session
+        updated = await db_service.get_chat_session_by_id(session_id)
+        return updated
     except Exception as e:
         logger.error(f"Failed to update chat title: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update title: {str(e)}")
+
+@app.post("/api/chat-sessions")
+async def create_chat_session(request: CreateSessionRequest):
+    """Create a chat session for the current directory and return it"""
+    if not current_directory:
+        raise HTTPException(status_code=400, detail="No directory set")
+    try:
+        session = await db_service.create_chat_session(
+            directory_path=current_directory,
+            title=request.title
+        )
+        return session
+    except Exception as e:
+        logger.error(f"Failed to create chat session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
 
 @app.get("/api/chat-sessions/{session_id}/messages")
 async def get_chat_messages(session_id: int):
