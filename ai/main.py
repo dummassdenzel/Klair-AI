@@ -77,7 +77,10 @@ async def prewarm_services():
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap,
             ollama_base_url=config.ollama_base_url,
-            ollama_model=config.ollama_model
+            ollama_model=config.ollama_model,
+            gemini_api_key=settings.GEMINI_API_KEY,
+            gemini_model=settings.GEMINI_MODEL,
+            llm_provider=settings.LLM_PROVIDER
         )
         
         # Warm up embedding model (this is the biggest time saver)
@@ -144,10 +147,18 @@ async def set_directory(request: dict):
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap,
             ollama_base_url=config.ollama_base_url,
-            ollama_model=config.ollama_model
+            ollama_model=config.ollama_model,
+            gemini_api_key=settings.GEMINI_API_KEY,
+            gemini_model=settings.GEMINI_MODEL,
+            llm_provider=settings.LLM_PROVIDER
         )
         
         logger.info(f"Initializing document processor for directory: {directory_path}")
+        
+        # Clear old directory data synchronously (prevents race conditions)
+        logger.info("Clearing previous directory data...")
+        await doc_processor.clear_all_data()
+        logger.info("Previous directory data cleared successfully")
         
         # Start file monitoring immediately
         file_monitor = FileMonitorService(doc_processor)
@@ -374,14 +385,14 @@ async def update_configuration(request: dict):
 
 @app.post("/api/clear-index")
 async def clear_index():
-    """Clear the entire index (for testing)"""
+    """Clear the entire index and database records"""
     global doc_processor
     if doc_processor:
         try:
-            await doc_processor.clear_collection()
+            await doc_processor.clear_all_data()
             
-            logger.info("Document index cleared successfully")
-            return {"status": "success", "message": "Index cleared"}
+            logger.info("Document index and database records cleared successfully")
+            return {"status": "success", "message": "Index and database records cleared"}
             
         except Exception as e:
             logger.error(f"Failed to clear index: {e}")

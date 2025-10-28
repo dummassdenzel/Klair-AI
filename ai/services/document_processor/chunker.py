@@ -44,9 +44,9 @@ class DocumentChunker:
                 ))
                 chunk_id += 1
             
-            # Next start with overlap
-            start = max(start + 1, end - self.chunk_overlap)
-            if start >= len(text):
+            # Move to next chunk with overlap
+            start = end - self.chunk_overlap
+            if start >= len(text) - self.chunk_overlap:
                 break
         
         # Update total_chunks

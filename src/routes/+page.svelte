@@ -13,12 +13,24 @@
 
   let messages: ChatMessage[] = [];
   let directoryPath = "C:\\xampp\\htdocs\\klair-ai\\documents";
+  let isSettingDirectory = false;
+  let showDirectoryInput = false;
+  let indexedDocuments: any[] = [];
+  let isLoadingDocuments = false;
+  let showDocumentsPanel = false;
   
     onMount(async () => {
     console.log(" Component mounted, testing connection...");
       await testConnection();
     console.log(" Connection tested, loading chat history...");
-    await loadChatHistory();
+    
+    // Auto-open directory input if no directory is set
+    if (!$systemStatus?.directory_set) {
+      showDirectoryInput = true;
+    } else {
+      await loadChatHistory();
+    }
+    
     console.log("🔍 Initialization complete");
     });
   
@@ -36,12 +48,23 @@
     console.log("🔍 Setting directory...");
       if (!directoryPath.trim()) return;
       
-    await createApiRequest(async () => {
+      isSettingDirectory = true;
+      try {
           const result = await apiService.setDirectory(directoryPath);
-      console.log("🔍 Directory set:", result);
+        console.log("🔍 Directory set:", result);
+        
+        // Refresh status, reload chat history, and load indexed documents
           await testConnection();
-          return result;
-    }, "Set directory");
+        await loadChatHistory();
+        await loadIndexedDocuments();
+        
+        // Hide directory input after successful set
+        showDirectoryInput = false;
+      } catch (error) {
+        console.error("❌ Failed to set directory:", error);
+      } finally {
+        isSettingDirectory = false;
+      }
   }
 
   async function loadChatHistory() {
@@ -52,6 +75,23 @@
       chatHistory.set(sessions);
     } catch (error) {
       console.error("❌ Failed to load chat history:", error);
+    }
+  }
+
+  async function loadIndexedDocuments() {
+    console.log("🔍 Loading indexed documents...");
+    isLoadingDocuments = true;
+    try {
+      const response = await apiService.searchDocuments({ limit: 100 });
+      console.log("🔍 Documents response:", response);
+      // Backend returns nested structure: response.documents.documents
+      indexedDocuments = response.documents?.documents || [];
+      console.log("🔍 Indexed documents:", indexedDocuments);
+    } catch (error) {
+      console.error("❌ Failed to load documents:", error);
+      indexedDocuments = [];
+    } finally {
+      isLoadingDocuments = false;
     }
   }
 
@@ -246,7 +286,7 @@
       </div>
 
       <!-- Directory Status and Controls -->
-      <div class="flex items-center gap-6">
+      <div class="flex items-center gap-4">
         <div class="text-sm text-[#37352F] bg-[#F7F7F7] px-4 py-2 rounded-lg">
           {#if $systemStatus?.directory_set}
             📁 {$systemStatus.current_directory?.split("\\").pop()}
@@ -256,15 +296,45 @@
         </div>
 
         <button
-          on:click={setDirectory}
+          on:click={() => showDirectoryInput = !showDirectoryInput}
           class="px-6 py-2.5 bg-[#443C68] text-white rounded-lg hover:bg-[#3A3457] transition-colors font-medium"
         >
-          Set Directory
+          {showDirectoryInput ? 'Cancel' : 'Change Directory'}
         </button>
+          </div>
       </div>
-    </div>
-  </div>
-
+  
+    <!-- Directory Input Section (collapsible) -->
+    {#if showDirectoryInput}
+      <div class="bg-[#F7F7F7] border-b border-gray-200 px-6 py-4">
+        <div class="flex items-center gap-4 max-w-4xl">
+          <input
+            type="text"
+            bind:value={directoryPath}
+            placeholder="Enter directory path (e.g., C:\path\to\documents)"
+            class="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent"
+            disabled={isSettingDirectory}
+          />
+          <button
+            on:click={setDirectory}
+            disabled={isSettingDirectory || !directoryPath.trim()}
+            class="px-8 py-2.5 bg-[#443C68] text-white rounded-lg hover:bg-[#3A3457] transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 min-w-[140px] justify-center"
+          >
+            {#if isSettingDirectory}
+              <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              Setting...
+            {:else}
+            Set Directory
+            {/if}
+          </button>
+        </div>
+      </div>
+    {/if}
+        </div>
+  
   <div class="flex h-[calc(100vh-120px)]">
     <!-- Left Sidebar - Chat History -->
     <div class="w-80 bg-[#F7F7F7] border-r border-gray-100 flex flex-col">
@@ -290,7 +360,7 @@
           New Chat
         </button>
       </div>
-
+  
       <!-- Chat History -->
       <div class="flex-1 overflow-y-auto p-6">
         <h3
@@ -325,6 +395,94 @@
             </button>
           {/each}
         </div>
+      </div>
+
+      <!-- Indexed Documents Section -->
+      <div class="border-t border-gray-200 bg-[#F7F7F7]">
+        <button
+          on:click={() => {
+            showDocumentsPanel = !showDocumentsPanel;
+            if (showDocumentsPanel && indexedDocuments.length === 0) {
+              loadIndexedDocuments();
+            }
+          }}
+          class="w-full px-6 py-4 flex items-center justify-between text-sm font-semibold text-[#37352F] hover:bg-gray-100 transition-colors"
+        >
+          <div class="flex items-center gap-2">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+            </svg>
+            <span>INDEXED DOCUMENTS</span>
+            {#if indexedDocuments.length > 0}
+              <span class="bg-[#443C68] text-white text-xs px-2 py-0.5 rounded-full">
+                {indexedDocuments.length}
+              </span>
+            {/if}
+          </div>
+          <svg
+            class="w-4 h-4 transition-transform {showDocumentsPanel ? 'rotate-180' : ''}"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+          </svg>
+        </button>
+
+        {#if showDocumentsPanel}
+          <div class="px-6 pb-6 max-h-80 overflow-y-auto">
+            {#if isLoadingDocuments}
+              <div class="flex items-center justify-center py-8">
+                <svg class="animate-spin h-6 w-6 text-[#443C68]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+              </div>
+            {:else if indexedDocuments.length === 0}
+              <div class="text-center py-8 text-gray-500 text-sm">
+                No documents indexed yet
+              </div>
+            {:else}
+              <div class="space-y-2">
+                {#each indexedDocuments as doc}
+                  <div class="bg-white p-3 rounded-lg border border-gray-200 hover:border-[#443C68] transition-colors">
+                    <div class="flex items-start gap-3">
+                      <div class="flex-shrink-0">
+                        {#if doc.file_type === 'pdf'}
+                          <svg class="w-5 h-5 text-red-500" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z"></path>
+                          </svg>
+                        {:else if doc.file_type === 'docx'}
+                          <svg class="w-5 h-5 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M9 2a2 2 0 00-2 2v8a2 2 0 002 2h6a2 2 0 002-2V6.414A2 2 0 0016.414 5L14 2.586A2 2 0 0012.586 2H9z"></path>
+                          </svg>
+                        {:else}
+                          <svg class="w-5 h-5 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"></path>
+                          </svg>
+                        {/if}
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <div class="text-sm font-medium text-[#37352F] truncate" title={doc.file_path}>
+                          {doc.file_path?.split('\\').pop() || doc.file_path?.split('/').pop() || 'Unknown'}
+                        </div>
+                        <div class="flex items-center gap-2 mt-1 text-xs text-gray-500">
+                          <span class="uppercase">{doc.file_type}</span>
+                          <span>•</span>
+                          <span>{doc.chunks_count || 0} chunks</span>
+                          {#if doc.file_size}
+                            <span>•</span>
+                            <span>{(doc.file_size / 1024).toFixed(1)} KB</span>
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
       </div>
     </div>
 

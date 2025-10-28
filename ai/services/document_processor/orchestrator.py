@@ -27,15 +27,24 @@ class DocumentProcessorOrchestrator:
                  chunk_size: int = 1000,
                  chunk_overlap: int = 200,
                  ollama_base_url: str = "http://localhost:11434",
-                 ollama_model: str = "tinyllama"):
+                 ollama_model: str = "tinyllama",
+                 gemini_api_key: Optional[str] = None,
+                 gemini_model: str = "gemini-2.5-pro",
+                 llm_provider: str = "ollama"):
         
         # Initialize all services
         self.text_extractor = TextExtractor()
         self.chunker = DocumentChunker(chunk_size, chunk_overlap)
         self.embedding_service = EmbeddingService(embed_model_name)
         self.vector_store = VectorStoreService(persist_dir)
-        # LLM service now supports provider switch (ollama | gemini) via settings
-        self.llm_service = LLMService(ollama_base_url, ollama_model)
+        # LLM service now supports provider switch (ollama | gemini)
+        self.llm_service = LLMService(
+            ollama_base_url=ollama_base_url,
+            ollama_model=ollama_model,
+            gemini_api_key=gemini_api_key,
+            gemini_model=gemini_model,
+            provider=llm_provider
+        )
         self.file_validator = FileValidator(max_file_size_mb)
         self.database_service = DatabaseService()
         
@@ -52,6 +61,31 @@ class DocumentProcessorOrchestrator:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.cleanup()
     
+    async def clear_all_data(self):
+        """Clear all indexed data (vector store and database records)"""
+        logger.info("Clearing all indexed data...")
+        
+        # Clear vector store
+        await self.vector_store.clear_collection()
+        self.file_hashes.clear()
+        self.file_metadata.clear()
+        logger.info("Vector store cleared")
+        
+        # Clear database records
+        try:
+            from database.database import get_db
+            from database.models import IndexedDocument
+            from sqlalchemy import delete
+            
+            async for session in get_db():
+                stmt = delete(IndexedDocument)
+                await session.execute(stmt)
+                await session.commit()
+                logger.info("Database document index records cleared")
+                break
+        except Exception as e:
+            logger.warning(f"Failed to clear database records: {e}")
+    
     async def initialize_from_directory(self, directory_path: str):
         """Initialize processor with documents from directory"""
         start_time = asyncio.get_event_loop().time()
@@ -66,11 +100,6 @@ class DocumentProcessorOrchestrator:
             
             logger.info(f"Initializing from directory: {directory_path}")
             self.current_directory = directory_path
-            
-            # Clear existing data
-            await self.vector_store.clear_collection()
-            self.file_hashes.clear()
-            self.file_metadata.clear()
             
             # Find all supported files
             supported_files = []

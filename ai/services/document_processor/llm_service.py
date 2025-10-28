@@ -10,12 +10,15 @@ logger = logging.getLogger(__name__)
 class LLMService:
     """Service for managing LLM interactions (Ollama | Gemini)"""
 
-    def __init__(self, base_url: str, model: str):
-        self.base_url = base_url
-        self.model = model
+    def __init__(self, ollama_base_url: str, ollama_model: str, gemini_api_key: Optional[str] = None, gemini_model: str = "gemini-2.5-pro", provider: str = "ollama"):
+        self.base_url = ollama_base_url
+        self.model = ollama_model
+        self.gemini_api_key = gemini_api_key
+        self.gemini_model = gemini_model
         self.http_client = None
         self._gemini = None
-        self.provider = settings.LLM_PROVIDER.lower().strip()
+        self.provider = provider.lower().strip()
+        logger.info(f"LLMService initialized with provider: {self.provider}")
         # Lazy initialization per provider
     
     def _initialize_client(self):
@@ -25,19 +28,19 @@ class LLMService:
                 return
             try:
                 import google.generativeai as genai
-                if not settings.GEMINI_API_KEY:
+                if not self.gemini_api_key:
                     raise RuntimeError("GEMINI_API_KEY is not set")
-                genai.configure(api_key=settings.GEMINI_API_KEY)
+                genai.configure(api_key=self.gemini_api_key)
                 # Configure model with sane defaults
                 self._gemini = genai.GenerativeModel(
-                    settings.GEMINI_MODEL or self.model,
+                    self.gemini_model,
                     generation_config={
                         "temperature": 0.7,
                         "top_p": 0.9,
                         "max_output_tokens": 1024,
                     }
                 )
-                logger.info(f"Gemini initialized with model: {settings.GEMINI_MODEL or self.model}")
+                logger.info(f"Gemini initialized with model: {self.gemini_model}")
             except Exception as e:
                 logger.error(f"Failed to initialize Gemini: {e}")
                 raise

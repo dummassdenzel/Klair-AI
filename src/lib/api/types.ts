@@ -45,20 +45,27 @@ export interface ChatRequest {
     type_breakdown: Record<string, number>;
   }
   
+  export interface IndexedDocument {
+    id: number;
+    file_path: string;
+    file_type: string;
+    file_size: number;
+    last_modified: string;
+    content_preview: string;
+    processing_status: string;
+    chunks_count?: number;
+    indexed_at?: string;
+  }
+
   export interface SearchResult {
-    documents: Array<{
-      id: number;
-      file_path: string;
-      file_type: string;
-      file_size: number;
-      last_modified: string;
-      content_preview: string;
-      processing_status: string;
-    }>;
-    total_count: number;
-    limit: number;
-    offset: number;
-    has_more: boolean;
+    status: string;
+    documents: {
+      documents: IndexedDocument[];
+      total_count: number;
+      limit: number;
+      offset: number;
+      has_more: boolean;
+    };
   }
   
   // Chat Session Types
