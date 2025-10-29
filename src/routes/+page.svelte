@@ -20,6 +20,9 @@
   let showDocumentsPanel = false;
   let isIndexingInProgress = false;
   
+  // Track expanded state for each message's sources
+  let expandedSources: Record<number, boolean> = {};
+  
     onMount(async () => {
     console.log(" Component mounted, testing connection...");
       await testConnection();
@@ -202,8 +205,10 @@
         await apiService.updateChatSessionTitle(session.id, newTitle);
         session.title = newTitle;
         currentChatSession.set(session);
-        await loadChatHistory();
       }
+      
+      // Always reload chat history to update message counts
+      await loadChatHistory();
     } catch (error) {
       console.error("❌ Failed to send message:", error);
 
@@ -632,60 +637,137 @@
 
                   <!-- Sources Display -->
                   {#if message.sources && message.sources.length > 0}
+                    {@const isExpanded = expandedSources[message.id] ?? false}
+                    {@const previewLimit = 3}
+                    {@const hasMoreSources = message.sources.length > previewLimit}
+                    {@const displayedSources = isExpanded ? message.sources : message.sources.slice(0, previewLimit)}
+                    
                     <div
-                      class="mt-4 p-4 bg-[#443C68]/5 rounded-xl border border-[#443C68]/20"
+                      class="mt-4 p-4 bg-[#443C68]/5 rounded-xl "
                     >
-                      <div
-                        class="text-sm font-semibold text-[#443C68] mb-3 flex items-center gap-2"
-                      >
-                        <svg
-                          class="w-4 h-4"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
+                      <!-- Header - only interactive if there are more than 3 sources -->
+                      {#if hasMoreSources}
+                        <button
+                          on:click={() => {
+                            expandedSources[message.id] = !isExpanded;
+                            expandedSources = { ...expandedSources };
+                          }}
+                          class="w-full text-sm font-semibold text-[#443C68] mb-3 flex items-center justify-between hover:text-[#3A3457] transition-colors"
                         >
-                          <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            stroke-width="2"
-                            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                          ></path>
-                        </svg>
-                        Sources ({message.sources.length})
-                      </div>
-                      <div class="space-y-3">
-                        {#each message.sources as source}
-                          <div
-                            class="flex items-start gap-3 p-3 bg-white rounded-lg border border-gray-100"
-                          >
-                            <div
-                              class="w-8 h-8 bg-[#443C68]/10 rounded-lg flex items-center justify-center flex-shrink-0"
+                          <div class="flex text-xs items-center gap-2">
+                            <svg
+                              class="w-4 h-4"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
                             >
-                              <span
-                                class="text-xs font-bold text-[#443C68] uppercase"
+                              <path
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"
+                                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                              ></path>
+                            </svg>
+                            <span>Sources ({message.sources.length})</span>
+                          </div>
+                          <svg
+                            class="w-4 h-4 transition-transform {isExpanded ? 'rotate-180' : ''}"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                          </svg>
+                        </button>
+                      {:else}
+                        <div class="text-sm font-semibold text-[#443C68] mb-3 flex items-center gap-2">
+                          <svg
+                            class="w-4 h-4"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                              stroke-width="2"
+                              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                            ></path>
+                          </svg>
+                          <span>Sources ({message.sources.length})</span>
+                        </div>
+                      {/if}
+                      
+                      <!-- Sources list -->
+                      {#if hasMoreSources && isExpanded}
+                        <!-- Expanded: Vertical cards with full details -->
+                        <div class="space-y-3">
+                          {#each displayedSources as source}
+                            <div
+                              class="flex items-start gap-3 p-3 bg-white rounded-lg border border-gray-100"
+                            >
+                              <div
+                                class="w-8 h-8 bg-[#443C68]/10 rounded-lg flex items-center justify-center flex-shrink-0"
                               >
+                                <span
+                                  class="text-xs font-bold text-[#443C68] uppercase"
+                                >
+                                  {source.file_type || "DOC"}
+                                </span>
+                              </div>
+                              <div class="flex-1 min-w-0">
+                                <div
+                                  class="text-sm font-medium text-[#37352F] truncate mb-1"
+                                >
+                                  {source.file_path?.split("\\").pop() ||
+                                    "Unknown file"}
+                                </div>
+                                <div class="text-xs text-gray-600 mb-2">
+                                  Relevance: {(
+                                    source.relevance_score * 100
+                                  ).toFixed(1)}%
+                                </div>
+                                <div class="text-xs text-gray-500 line-clamp-2">
+                                  {source.content_snippet || "No content preview"}
+                                </div>
+                              </div>
+                            </div>
+                          {/each}
+                        </div>
+                      {:else}
+                        <!-- Collapsed or ≤3 sources: Horizontal chips (minimal space) -->
+                        <div class="flex flex-wrap gap-2">
+                          {#each displayedSources as source}
+                            <div
+                              class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white rounded-full border border-gray-200 text-[0.625rem] hover:border-[#443C68] transition-colors cursor-default"
+                              title="{source.file_path?.split('\\').pop()} - {(source.relevance_score * 100).toFixed(1)}% relevance"
+                            >
+                              <span class="font-bold text-[#443C68] uppercase">
                                 {source.file_type || "DOC"}
                               </span>
+                              <span class="text-[#37352F] font-medium truncate max-w-[200px]">
+                                {source.file_path?.split("\\").pop() || "Unknown"}
+                              </span>
+                              <span class="text-gray-500">
+                                {(source.relevance_score * 100).toFixed(0)}%
+                              </span>
                             </div>
-                            <div class="flex-1 min-w-0">
-                              <div
-                                class="text-sm font-medium text-[#37352F] truncate mb-1"
-                              >
-                                {source.file_path?.split("\\").pop() ||
-                                  "Unknown file"}
-                              </div>
-                              <div class="text-xs text-gray-600 mb-2">
-                                Relevance: {(
-                                  source.relevance_score * 100
-                                ).toFixed(1)}%
-                              </div>
-                              <div class="text-xs text-gray-500 line-clamp-2">
-                                {source.content_snippet || "No content preview"}
-                              </div>
-                            </div>
-                          </div>
-                        {/each}
-                      </div>
+                          {/each}
+                          
+                          <!-- Show more button as inline chip -->
+                          {#if hasMoreSources && !isExpanded}
+                            <button
+                              on:click={() => {
+                                expandedSources[message.id] = true;
+                                expandedSources = { ...expandedSources };
+                              }}
+                              class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#443C68] text-white rounded-full border border-[#443C68] text-[0.625rem] hover:bg-[#3A3457] transition-colors font-medium"
+                            >
+                              + {message.sources.length - previewLimit} more
+                            </button>
+                          {/if}
+                        </div>
+                      {/if}
                     </div>
                   {/if}
                 </div>

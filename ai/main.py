@@ -287,10 +287,10 @@ async def get_status():
     """Get current system status and configuration"""
     try:
         status_info = {
-            "directory_set": current_directory is not None,
-            "current_directory": current_directory,
+        "directory_set": current_directory is not None,
+        "current_directory": current_directory,
             "processor_ready": doc_processor is not None and doc_processor.is_ready() if doc_processor else False,
-            "monitor_running": file_monitor is not None and file_monitor.is_running if file_monitor else False,
+        "monitor_running": file_monitor is not None and file_monitor.is_running if file_monitor else False,
         }
         
         # Add configuration info safely
