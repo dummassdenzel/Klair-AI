@@ -18,6 +18,7 @@
   let indexedDocuments: any[] = [];
   let isLoadingDocuments = false;
   let showDocumentsPanel = false;
+  let isIndexingInProgress = false;
   
     onMount(async () => {
     console.log(" Component mounted, testing connection...");
@@ -60,6 +61,32 @@
         
         // Hide directory input after successful set
         showDirectoryInput = false;
+        
+        // Auto-refresh documents as they're being indexed in background
+        // Check every 2 seconds for up to 30 seconds
+        isIndexingInProgress = true;
+        let refreshCount = 0;
+        const maxRefreshes = 15;
+        let previousCount = indexedDocuments.length;
+        
+        const refreshInterval = setInterval(async () => {
+          refreshCount++;
+          console.log(`🔄 Auto-refreshing documents (${refreshCount}/${maxRefreshes})...`);
+          await loadIndexedDocuments();
+          
+          // Stop if no new documents for 2 consecutive checks, or max reached
+          const hasNewDocs = indexedDocuments.length > previousCount;
+          if (hasNewDocs) {
+            previousCount = indexedDocuments.length;
+          }
+          
+          if (refreshCount >= maxRefreshes || (!hasNewDocs && refreshCount > 3)) {
+            console.log(`✅ Auto-refresh complete. Found ${indexedDocuments.length} documents.`);
+            isIndexingInProgress = false;
+            clearInterval(refreshInterval);
+          }
+        }, 2000);
+        
       } catch (error) {
         console.error("❌ Failed to set directory:", error);
       } finally {
@@ -413,7 +440,15 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
             </svg>
             <span>INDEXED DOCUMENTS</span>
-            {#if indexedDocuments.length > 0}
+            {#if isIndexingInProgress}
+              <span class="flex items-center gap-1 bg-blue-100 text-blue-600 text-xs px-2 py-0.5 rounded-full">
+                <svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Indexing...
+              </span>
+            {:else if indexedDocuments.length > 0}
               <span class="bg-[#443C68] text-white text-xs px-2 py-0.5 rounded-full">
                 {indexedDocuments.length}
               </span>

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Dict, List, Optional
 from datetime import datetime
 from pathlib import Path
@@ -223,16 +224,225 @@ class DocumentProcessorOrchestrator:
         except Exception as e:
             logger.error(f"Error removing document {file_path}: {e}")
     
-    async def query(self, question: str, max_results: int = 5) -> QueryResult:
-        """Query the document index with LLM integration"""
+    async def _select_relevant_files(self, question: str) -> Optional[List[str]]:
+        """
+        Use LLM to intelligently select which files are relevant to the query.
+        Returns None if all files should be considered (general query).
+        Returns list of file paths if specific files are relevant.
+        """
+        try:
+            # Get all indexed files with their metadata
+            if not self.file_metadata:
+                logger.info("No files indexed, skipping file selection")
+                return None
+            
+            # Build file list for LLM
+            file_list = []
+            for idx, (file_path, metadata) in enumerate(self.file_metadata.items(), 1):
+                filename = Path(file_path).name
+                file_type = metadata.get("file_type", "unknown")
+                file_list.append(f"{idx}. {filename} (type: {file_type})")
+            
+            file_list_str = "\n".join(file_list)
+            
+            # Create selection prompt
+            selection_prompt = f"""You are a file selection AI. Your ONLY job is to pick which files are needed to answer a question.
+
+AVAILABLE FILES:
+{file_list_str}
+
+USER QUESTION: "{question}"
+
+INSTRUCTIONS:
+• If the question needs ALL files (e.g., "summarize everything", "list all documents"), respond: ALL_FILES
+• If the question needs SPECIFIC files, respond with ONLY their numbers separated by commas
+
+EXAMPLES:
+• "What's in REQUEST LETTER?" → Find file with "REQUEST LETTER" in name → Return: 5
+• "How many TCO documents?" → Find files starting with "TCO" → Return: 1,2,7,9
+• "Files NOT delivery receipts" → Find files that are NOT receipts → Return: 3,5,8,10,11
+• "Summarize all documents" → Return: ALL_FILES
+
+CRITICAL RULES:
+1. Look at filenames carefully
+2. For "NOT X" queries, EXCLUDE X files
+3. For pattern queries (e.g., "TCO"), match filename patterns
+4. Only return numbers or "ALL_FILES"
+5. NO explanations, NO other text
+
+YOUR RESPONSE (ONLY numbers or "ALL_FILES"):"""
+
+            # Get LLM selection (use simple method without templating)
+            response = await self.llm_service.generate_simple(selection_prompt)
+            
+            response = response.strip()
+            logger.info(f"🤖 LLM file selection response: {response}")
+            
+            # Handle error responses from LLM
+            if "couldn't generate" in response.lower() or "error" in response.lower():
+                logger.warning(f"LLM selection failed, falling back to ALL files")
+                return None
+            
+            # Parse response
+            if "ALL_FILES" in response.upper() or response.upper() == "ALL":
+                logger.info("📋 LLM decided: ALL files are relevant (general query)")
+                return None
+            
+            # Parse file numbers - be more flexible with parsing
+            try:
+                # Remove any text, keep only numbers and commas
+                # Handle responses like "1,3,5,7" or "1, 3, 5, 7" or even "Files: 1,3,5"
+                cleaned = ''.join(c for c in response if c.isdigit() or c == ',')
+                if not cleaned:
+                    logger.warning(f"No numbers found in LLM response: '{response}'")
+                    return None
+                
+                file_numbers = [int(num.strip()) for num in cleaned.split(",") if num.strip()]
+                file_paths_list = list(self.file_metadata.keys())
+                
+                selected_files = []
+                for num in file_numbers:
+                    if 1 <= num <= len(file_paths_list):
+                        selected_files.append(file_paths_list[num - 1])
+                    else:
+                        logger.warning(f"File number {num} out of range (1-{len(file_paths_list)})")
+                
+                if selected_files:
+                    selected_names = [Path(f).name for f in selected_files]
+                    logger.info(f"🎯 LLM selected {len(selected_files)} specific files: {selected_names}")
+                    return selected_files
+                else:
+                    logger.warning(f"LLM returned invalid file numbers: {response}")
+                    return None
+                    
+            except ValueError as e:
+                logger.warning(f"Failed to parse LLM response '{response}': {e}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"File selection failed: {e}, falling back to all files")
+            return None
+    
+    async def _classify_query(self, question: str) -> str:
+        """
+        Classify the query to determine if document retrieval is needed.
+        Returns: 'greeting', 'general', or 'document'
+        """
+        try:
+            classification_prompt = f"""You are a query classification AI. Classify the user's query into ONE of these categories:
+
+USER QUERY: "{question}"
+
+CATEGORIES:
+1. greeting - Simple greetings, pleasantries, or introductions
+   Examples: "hello", "hi", "how are you?", "good morning", "thanks", "goodbye"
+   
+2. general - General questions NOT about documents, or questions about the AI itself
+   Examples: "what can you do?", "how does this work?", "who made you?", "what's the weather?"
+   
+3. document - Questions that need document retrieval to answer
+   Examples: "what's in the sales report?", "how many TCO documents?", "summarize the meeting notes"
+
+INSTRUCTIONS:
+- Respond with ONLY ONE WORD: "greeting", "general", or "document"
+- If the query mentions files, documents, or specific information that would be in documents, return "document"
+- If the query is casual conversation or about the system itself, return "greeting" or "general"
+- NO explanations, NO other text
+
+YOUR CLASSIFICATION (ONE WORD):"""
+
+            response = await self.llm_service.generate_simple(classification_prompt)
+            classification = response.strip().lower()
+            
+            # Validate response
+            if classification in ['greeting', 'general', 'document']:
+                logger.info(f"🔍 Query classified as: {classification.upper()}")
+                return classification
+            else:
+                # If LLM returns something unexpected, default to 'document' (safe fallback)
+                logger.warning(f"Unexpected classification '{response}', defaulting to 'document'")
+                return 'document'
+                
+        except Exception as e:
+            logger.error(f"Query classification failed: {e}, defaulting to 'document'")
+            return 'document'
+    
+    async def _generate_direct_response(self, question: str, response_type: str) -> str:
+        """
+        Generate a direct response without document retrieval.
+        Used for greetings and general queries.
+        """
+        try:
+            if response_type == 'greeting':
+                prompt = f"""You are a friendly AI assistant for a document management system.
+
+User said: "{question}"
+
+Respond warmly and briefly (1-2 sentences). Let them know you can help with documents.
+
+Your response:"""
+            else:  # general
+                prompt = f"""You are an AI assistant for a document management system.
+
+User asked: "{question}"
+
+Answer their question. Your capabilities:
+- Search and analyze indexed documents
+- Answer questions about specific files
+- List and compare documents
+- Find information across multiple files
+
+Keep your response concise and helpful (2-3 sentences).
+
+Your response:"""
+
+            # Use generate_simple for direct responses (not the Q&A method)
+            response = await self.llm_service.generate_simple(prompt)
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Direct response generation failed: {e}")
+            return "Hello! I'm your document assistant. I can help you search and analyze your indexed documents. What would you like to know?"
+    
+    async def query(self, question: str, max_results: int = 15) -> QueryResult:
+        """Query the document index with agentic LLM-based classification and file selection"""
         start_time = asyncio.get_event_loop().time()
         
         try:
-            # Generate query embedding
-            query_embedding = self.embedding_service.encode_single_text(question)
+            # Step 0: Classify query to determine if document retrieval is needed
+            query_type = await self._classify_query(question)
             
-            # Search vector store
-            results = await self.vector_store.search_similar(query_embedding, max_results)
+            # Handle non-document queries directly (fast path)
+            if query_type in ['greeting', 'general']:
+                response_text = await self._generate_direct_response(question, query_type)
+                response_time = asyncio.get_event_loop().time() - start_time
+                
+                logger.info(f"⚡ Fast response (no retrieval): {response_time:.2f}s")
+                
+                return QueryResult(
+                    message=response_text,
+                    sources=[],  # No document sources for greetings/general
+                    response_time=round(response_time, 3)
+                )
+            
+            # Document query - proceed with RAG pipeline
+            logger.info(f"📚 Document query detected, starting RAG pipeline...")
+            
+            # Step 1: Use LLM to intelligently select relevant files
+            selected_files = await self._select_relevant_files(question)
+            
+            # Step 2: Adjust retrieval parameters based on file selection
+            if selected_files is not None:
+                # Specific files selected - retrieve more chunks to ensure good coverage
+                adjusted_max_results = min(max_results * 2, 30)
+            else:
+                # General query - retrieve chunks from all files
+                adjusted_max_results = min(max_results * 4, 60)
+            
+            # Step 3: Generate query embedding and search vector store
+            query_embedding = self.embedding_service.encode_single_text(question)
+            results = await self.vector_store.search_similar(query_embedding, adjusted_max_results)
             
             if not results['documents'] or not results['documents'][0]:
                 return QueryResult(
@@ -241,10 +451,37 @@ class DocumentProcessorOrchestrator:
                     response_time=asyncio.get_event_loop().time() - start_time
                 )
             
-            # Process results
+            # Step 4: Process results and prioritize selected files
             documents = results['documents'][0]
             metadatas = results['metadatas'][0] 
             distances = results['distances'][0]
+            
+            # If LLM selected specific files, prioritize their chunks
+            if selected_files:
+                prioritized_docs = []
+                prioritized_metas = []
+                prioritized_dists = []
+                other_docs = []
+                other_metas = []
+                other_dists = []
+                
+                for doc, meta, dist in zip(documents, metadatas, distances):
+                    file_path = meta.get("file_path", "")
+                    if any(sf in file_path for sf in selected_files):
+                        prioritized_docs.append(doc)
+                        prioritized_metas.append(meta)
+                        prioritized_dists.append(dist)
+                    else:
+                        other_docs.append(doc)
+                        other_metas.append(meta)
+                        other_dists.append(dist)
+                
+                # Reconstruct with prioritized first
+                documents = prioritized_docs + other_docs
+                metadatas = prioritized_metas + other_metas
+                distances = prioritized_dists + other_dists
+                
+                logger.info(f"✅ Prioritized {len(prioritized_docs)} chunks from {len(selected_files)} LLM-selected files")
             
             # Group chunks by file for better context
             file_chunks = {}
@@ -259,17 +496,31 @@ class DocumentProcessorOrchestrator:
                     "metadata": metadata
                 })
             
-            # Create sources and context
+            # Step 5: Create sources and context from selected files
             sources = []
             context_parts = []
             
-            for file_path, chunks in file_chunks.items():
+            # Filter files based on LLM selection
+            files_to_process = file_chunks.items()
+            if selected_files:
+                # Only include LLM-selected files - NO additional context files for specific queries
+                selected_file_chunks = {fp: chunks for fp, chunks in file_chunks.items() if any(sf in fp for sf in selected_files)}
+                
+                files_to_process = list(selected_file_chunks.items())
+                logger.info(f"🎯 Focusing exclusively on {len(selected_file_chunks)} LLM-selected file(s)")
+            
+            for file_path, chunks in files_to_process:
                 # Sort chunks by chunk_id for proper order
                 chunks.sort(key=lambda x: x["chunk_id"])
                 
-                # Combine chunks for this file
+                # Get just the filename for better readability
+                filename = Path(file_path).name
+                
+                # Combine chunks for this file WITH filename header
                 file_text = "\n".join([chunk["text"] for chunk in chunks])
-                context_parts.append(file_text)
+                # Format: [Filename: xyz.pdf]\nContent...
+                context_with_filename = f"[Document: {filename}]\n{file_text}"
+                context_parts.append(context_with_filename)
                 
                 # Calculate average relevance (lower distance = higher relevance)
                 avg_distance = sum(chunk["distance"] for chunk in chunks) / len(chunks)
@@ -286,7 +537,16 @@ class DocumentProcessorOrchestrator:
             # Sort sources by relevance
             sources.sort(key=lambda x: x["relevance_score"], reverse=True)
             
-            # Generate response using LLM
+            # Step 6: Smart source limiting
+            if selected_files is None:
+                # General query - limit to top 10 most relevant sources
+                logger.info(f"📊 General query: limiting to top 10 of {len(sources)} sources")
+                sources = sources[:10]
+            else:
+                # Specific files query - show only LLM-selected files (no arbitrary limit)
+                logger.info(f"📊 Specific query: showing {len(sources)} LLM-selected file sources")
+            
+            # Step 7: Generate final response using LLM with document context
             context = "\n\n---\n\n".join(context_parts)
             response_text = await self.llm_service.generate_response(question, context)
             

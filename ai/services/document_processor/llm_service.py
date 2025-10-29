@@ -37,7 +37,7 @@ class LLMService:
                     generation_config={
                         "temperature": 0.7,
                         "top_p": 0.9,
-                        "max_output_tokens": 1024,
+                        "max_output_tokens": 8192,  # Increased to handle longer responses
                     }
                 )
                 logger.info(f"Gemini initialized with model: {self.gemini_model}")
@@ -107,9 +107,90 @@ class LLMService:
             logger.error(f"Error generating LLM response: {e}")
             return "I couldn't generate a response due to an error."
     
+    async def generate_simple(self, prompt: str) -> str:
+        """
+        Generate a simple response without context/prompt templating.
+        Used for selection tasks, structured output, etc.
+        """
+        try:
+            # Ensure client is initialized
+            self._initialize_client()
+            
+            if self.provider == "gemini":
+                if not self._gemini:
+                    logger.error("Gemini client not initialized")
+                    return "I couldn't generate a response."
+
+                try:
+                    response = await asyncio.to_thread(
+                        self._gemini.generate_content,
+                        prompt
+                        # No generation_config - use model defaults
+                    )
+                    
+                    # Extract text from response
+                    text = None
+                    
+                    # Method 1: Direct text attribute (most common)
+                    if hasattr(response, 'text'):
+                        try:
+                            text = response.text.strip()
+                        except Exception as e:
+                            logger.warning(f"Failed to access .text: {e}")
+                    
+                    # Method 2: Candidates (fallback)
+                    if not text and hasattr(response, 'candidates'):
+                        try:
+                            if response.candidates:
+                                candidate = response.candidates[0]
+                                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                                    text = ''.join(part.text for part in candidate.content.parts if hasattr(part, 'text')).strip()
+                        except Exception as e:
+                            logger.warning(f"Failed to access .candidates: {e}")
+                    
+                    if text:
+                        return text
+                    else:
+                        logger.error(f"Could not extract text from Gemini response. Finish reason: {getattr(response.candidates[0] if response.candidates else None, 'finish_reason', 'UNKNOWN')}")
+                        return "I couldn't generate a response."
+                        
+                except Exception as ge:
+                    logger.error(f"Gemini generation error: {ge}")
+                    logger.error(f"Error type: {type(ge)}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    return "I couldn't generate a response due to an AI provider error."
+
+            # Default: Ollama
+            response = await self.http_client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,  # Low temperature for structured output
+                        "top_p": 0.9,
+                        "max_tokens": 200
+                    }
+                }
+            )
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("response", "I couldn't generate a response.")
+            else:
+                logger.error(f"Ollama API error: {response.status_code} - {response.text}")
+                return "I couldn't generate a response due to an API error."
+
+        except Exception as e:
+            logger.error(f"Error generating simple LLM response: {e}")
+            return "I couldn't generate a response due to an error."
+    
     def _build_prompt(self, query: str, context: str) -> str:
         """Build the prompt for the LLM"""
         return f"""You are a helpful AI assistant that answers questions based on the provided document context.
+
+Each document is labeled with its filename in the format [Document: filename.ext].
 
 Context information:
 {context}
@@ -118,6 +199,7 @@ Question: {query}
 
 Instructions:
 - Answer the question directly and clearly based on the provided context
+- When asked about filenames or listing documents, include the document names shown in [Document: ...] labels
 - If the information is not in the context, say "I don't have information about that in the current documents"
 - Be concise but comprehensive
 - Use specific details from the context when relevant
