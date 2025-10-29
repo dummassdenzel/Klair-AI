@@ -198,12 +198,13 @@ Context information:
 Question: {query}
 
 Instructions:
-- Answer the question directly and clearly based on the provided context
-- When asked about filenames or listing documents, include the document names shown in [Document: ...] labels
+- Answer based on the DOCUMENT CONTENT, not just filenames
+- Read the actual text in each document to understand what it contains
+- When listing documents, look for mentions in the CONTENT (e.g., if content says "delivery receipt", include it)
+- Include the [Document: filename] label when referencing documents in your answer
 - If the information is not in the context, say "I don't have information about that in the current documents"
-- Be concise but comprehensive
-- Use specific details from the context when relevant
-- If you're uncertain, acknowledge it
+- Be thorough - check all provided documents carefully
+- Use specific details and quotes from the content when relevant
 
 Answer:"""
     

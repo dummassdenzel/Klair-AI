@@ -253,20 +253,29 @@ AVAILABLE FILES:
 
 USER QUESTION: "{question}"
 
-INSTRUCTIONS:
-• If the question needs ALL files (e.g., "summarize everything", "list all documents"), respond: ALL_FILES
-• If the question needs SPECIFIC files, respond with ONLY their numbers separated by commas
+IMPORTANT: You can ONLY see filenames, NOT document content!
 
-EXAMPLES:
-• "What's in REQUEST LETTER?" → Find file with "REQUEST LETTER" in name → Return: 5
-• "How many TCO documents?" → Find files starting with "TCO" → Return: 1,2,7,9
-• "Files NOT delivery receipts" → Find files that are NOT receipts → Return: 3,5,8,10,11
-• "Summarize all documents" → Return: ALL_FILES
+INSTRUCTIONS:
+• If the question is about DOCUMENT CONTENT (not filenames), respond: ALL_FILES
+• If the question is about SPECIFIC FILENAMES or filename patterns, select those files
+• If uncertain, respond: ALL_FILES (better to include too many than miss relevant files)
+
+CONTENT-BASED QUERIES (respond ALL_FILES):
+• "List delivery receipts" → Content-based, you can't see content → ALL_FILES
+• "Documents about sales" → Content-based → ALL_FILES  
+• "Find acknowledgement receipts" → Content-based → ALL_FILES
+• "Show me invoices" → Content-based → ALL_FILES
+
+FILENAME-BASED QUERIES (select specific files):
+• "What's in REQUEST LETTER?" → Filename match → Return: 5
+• "How many TCO files?" → Filename pattern → Return: 1,2,7,9
+• "Show me all PDF files" → File type → Return: 2,3,4,5
+• "Files starting with PES" → Filename pattern → Return: 4,5
 
 CRITICAL RULES:
-1. Look at filenames carefully
-2. For "NOT X" queries, EXCLUDE X files
-3. For pattern queries (e.g., "TCO"), match filename patterns
+1. If query is about document CONTENT → return ALL_FILES
+2. If query is about FILENAMES or patterns → select specific files
+3. When in doubt → return ALL_FILES
 4. Only return numbers or "ALL_FILES"
 5. NO explanations, NO other text
 
