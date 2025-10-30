@@ -29,6 +29,8 @@ from .embedding_service import EmbeddingService
 from .vector_store import VectorStoreService
 from .llm_service import LLMService
 from .file_validator import FileValidator
+from .bm25_service import BM25Service
+from .hybrid_search import HybridSearchService
 from .config import config, DocumentProcessorConfig
 
 __all__ = [
@@ -43,6 +45,8 @@ __all__ = [
     "VectorStoreService",
     "LLMService",
     "FileValidator",
+    "BM25Service",
+    "HybridSearchService",
     "config",
     "DocumentProcessorConfig"
 ]

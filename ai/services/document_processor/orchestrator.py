@@ -12,6 +12,8 @@ from .embedding_service import EmbeddingService
 from .vector_store import VectorStoreService
 from .llm_service import LLMService
 from .file_validator import FileValidator
+from .bm25_service import BM25Service
+from .hybrid_search import HybridSearchService
 from database import DatabaseService
 
 
@@ -49,12 +51,47 @@ class DocumentProcessorOrchestrator:
         self.file_validator = FileValidator(max_file_size_mb)
         self.database_service = DatabaseService()
         
+        # Hybrid search services (semantic + keyword)
+        self.bm25_service = BM25Service(persist_dir)
+        self.hybrid_search = HybridSearchService(k=60)  # RRF constant
+        
         # State tracking
         self.file_hashes: Dict[str, str] = {}
         self.file_metadata: Dict[str, FileMetadata] = {}
         self.current_directory: Optional[str] = None
         
-        logger.info("DocumentProcessorOrchestrator initialized successfully")
+        logger.info("DocumentProcessorOrchestrator initialized with hybrid search (semantic + keyword)")
+        
+        # Load existing indexed documents into memory
+        asyncio.create_task(self._load_existing_metadata())
+    
+    async def _load_existing_metadata(self):
+        """Load existing indexed documents from database into memory"""
+        try:
+            from database.database import get_db
+            from database.models import IndexedDocument
+            from sqlalchemy import select
+            
+            async for db_session in get_db():
+                stmt = select(IndexedDocument).where(IndexedDocument.processing_status == "indexed")
+                result = await db_session.execute(stmt)
+                docs = result.scalars().all()
+                
+                for doc in docs:
+                    # Reconstruct file metadata
+                    self.file_metadata[doc.file_path] = {
+                        "file_type": doc.file_type,
+                        "size_bytes": doc.file_size,
+                        "modified_at": doc.last_modified,
+                        "chunks": doc.chunks_count
+                    }
+                    self.file_hashes[doc.file_path] = doc.file_hash
+                
+                logger.info(f"📚 Loaded {len(docs)} existing indexed documents into memory")
+                break
+                
+        except Exception as e:
+            logger.warning(f"Could not load existing metadata: {e}")
     
     async def __aenter__(self):
         return self
@@ -63,7 +100,7 @@ class DocumentProcessorOrchestrator:
         await self.cleanup()
     
     async def clear_all_data(self):
-        """Clear all indexed data (vector store and database records)"""
+        """Clear all indexed data (vector store, BM25, and database records)"""
         logger.info("Clearing all indexed data...")
         
         # Clear vector store
@@ -71,6 +108,10 @@ class DocumentProcessorOrchestrator:
         self.file_hashes.clear()
         self.file_metadata.clear()
         logger.info("Vector store cleared")
+        
+        # Clear BM25 index
+        self.bm25_service.clear()
+        logger.info("BM25 index cleared")
         
         # Clear database records
         try:
@@ -190,6 +231,22 @@ class DocumentProcessorOrchestrator:
             chunks = self.chunker.create_chunks(text, file_path)
             embeddings = self.embedding_service.encode_texts([chunk.text for chunk in chunks])
             await self.vector_store.batch_insert_chunks(chunks, embeddings)
+            
+            # Add to BM25 keyword index
+            bm25_documents = [
+                {
+                    'id': f"{chunk.file_path}:{chunk.chunk_id}",  # Create unique ID
+                    'text': chunk.text,
+                    'metadata': {
+                        'file_path': chunk.file_path,
+                        'chunk_id': chunk.chunk_id,
+                        'file_type': file_metadata["file_type"]
+                    }
+                }
+                for chunk in chunks
+            ]
+            self.bm25_service.add_documents(bm25_documents)
+            logger.debug(f"Added {len(chunks)} chunks to BM25 index for {file_path}")
             
             # Store complete metadata in database
             await self.database_service.store_document_metadata(
@@ -332,36 +389,70 @@ YOUR RESPONSE (ONLY numbers or "ALL_FILES"):"""
             logger.error(f"File selection failed: {e}, falling back to all files")
             return None
     
-    async def _classify_query(self, question: str) -> str:
+    async def _classify_query(self, question: str, conversation_history: list = None) -> str:
         """
         Classify the query to determine if document retrieval is needed.
         Returns: 'greeting', 'general', or 'document'
         """
         try:
+            # Build conversation context if available
+            conversation_context = ""
+            if conversation_history:
+                conversation_context = "\n\nRecent conversation context:\n"
+                for msg in conversation_history[-2:]:  # Last 2 messages for classification
+                    role = "User" if msg["role"] == "user" else "Assistant"
+                    conversation_context += f"{role}: {msg['content'][:150]}...\n"
+            
             classification_prompt = f"""You are a query classification AI. Classify the user's query into ONE of these categories:
-
+{conversation_context}
 USER QUERY: "{question}"
 
 CATEGORIES:
 1. greeting - Simple greetings, pleasantries, or introductions
    Examples: "hello", "hi", "how are you?", "good morning", "thanks", "goodbye"
    
-2. general - General questions NOT about documents, or questions about the AI itself
+2. general - General questions NOT about documents, or questions about the AI itself (ONLY if not a follow-up)
    Examples: "what can you do?", "how does this work?", "who made you?", "what's the weather?"
    
 3. document - Questions that need document retrieval to answer
    Examples: "what's in the sales report?", "how many TCO documents?", "summarize the meeting notes"
 
+🚨 CRITICAL: FOLLOW-UP QUESTION DETECTION 🚨
+If the query contains ANY of these, it's ALWAYS "document":
+• Pronouns: "that", "it", "this", "those", "them", "which", "what about"
+• File references: "that file", "the file", "the document", "that one", "this one"
+• Questions about previous context: "who", "what", "where", "when", "why", "how" + pronoun
+
+EXAMPLES OF FOLLOW-UPS (all are "document"):
+• "Who is the driver on that?" → "document" (pronoun "that" refers to previous file)
+• "What about this one?" → "document" (pronoun "this")
+• "Tell me more about it" → "document" (pronoun "it")
+• "Which is the latest?" → "document" (pronoun "which" implies previous list)
+• "How many are there?" → "document" (pronoun "there" implies previous context)
+
+SAFE DEFAULT RULE:
+⚠️ If you're even 1% unsure whether it's a follow-up → return "document" (it's safer to search than miss context)
+
 INSTRUCTIONS:
 - Respond with ONLY ONE WORD: "greeting", "general", or "document"
-- If the query mentions files, documents, or specific information that would be in documents, return "document"
-- If the query is casual conversation or about the system itself, return "greeting" or "general"
-- NO explanations, NO other text
+- Check conversation context FIRST - if query relates to any previous message, return "document"
+- NO explanations, NO other text, NO punctuation
 
 YOUR CLASSIFICATION (ONE WORD):"""
 
             response = await self.llm_service.generate_simple(classification_prompt)
             classification = response.strip().lower()
+            
+            # Additional heuristic: check for pronouns that indicate follow-up questions
+            follow_up_indicators = ['that', 'it', 'this', 'those', 'them', 'the file', 'the document', 
+                                   'that file', 'that document', 'which one', 'what about']
+            query_lower = question.lower()
+            has_follow_up_indicator = any(indicator in query_lower for indicator in follow_up_indicators)
+            
+            # If query has follow-up indicators, force it to be 'document'
+            if has_follow_up_indicator and classification in ['general', 'greeting']:
+                logger.info(f"🔍 Query contains follow-up indicators, overriding '{classification}' → DOCUMENT")
+                return 'document'
             
             # Validate response
             if classification in ['greeting', 'general', 'document']:
@@ -414,13 +505,13 @@ Your response:"""
             logger.error(f"Direct response generation failed: {e}")
             return "Hello! I'm your document assistant. I can help you search and analyze your indexed documents. What would you like to know?"
     
-    async def query(self, question: str, max_results: int = 15) -> QueryResult:
+    async def query(self, question: str, max_results: int = 15, conversation_history: list = None) -> QueryResult:
         """Query the document index with agentic LLM-based classification and file selection"""
         start_time = asyncio.get_event_loop().time()
         
         try:
             # Step 0: Classify query to determine if document retrieval is needed
-            query_type = await self._classify_query(question)
+            query_type = await self._classify_query(question, conversation_history)
             
             # Handle non-document queries directly (fast path)
             if query_type in ['greeting', 'general']:
@@ -438,29 +529,151 @@ Your response:"""
             # Document query - proceed with RAG pipeline
             logger.info(f"📚 Document query detected, starting RAG pipeline...")
             
-            # Step 1: Use LLM to intelligently select relevant files
+            # Step 1: Detect listing queries (need to see ALL documents)
+            listing_query_patterns = [
+                'list', 'all documents', 'all files', 'what documents', 'what files',
+                'show me documents', 'show me files', 'how many documents', 'how many files',
+                'document list', 'file list', 'enumerate', 'inventory'
+            ]
+            is_listing_query = any(pattern in question.lower() for pattern in listing_query_patterns)
+            
+            # Step 2: Use LLM to intelligently select relevant files
             selected_files = await self._select_relevant_files(question)
             
-            # Step 2: Adjust retrieval parameters based on file selection
-            if selected_files is not None:
+            # Step 3: Special handling for listing queries (use database, not semantic search)
+            if is_listing_query:
+                logger.info(f"📋 Listing query detected: fetching all indexed documents from database...")
+                try:
+                    from database.database import get_db
+                    from database.models import IndexedDocument
+                    from sqlalchemy import select
+                    
+                    # Get all indexed documents from database
+                    all_docs = []
+                    async for db_session in get_db():
+                        stmt = select(IndexedDocument).where(IndexedDocument.processing_status == "indexed")
+                        result = await db_session.execute(stmt)
+                        all_docs = result.scalars().all()
+                        break
+                    
+                    if not all_docs:
+                        return QueryResult(
+                            message="No documents are currently indexed.",
+                            sources=[],
+                            response_time=asyncio.get_event_loop().time() - start_time
+                        )
+                    
+                    # Build sources from database records
+                    sources = []
+                    context_parts = []
+                    for doc in all_docs:
+                        filename = Path(doc.file_path).name
+                        context_parts.append(f"[Document: {filename}]\n{doc.content_preview}")
+                        sources.append({
+                            "file_path": doc.file_path,
+                            "relevance_score": 1.0,  # All equally relevant for listing
+                            "content_snippet": doc.content_preview[:300] + "..." if len(doc.content_preview) > 300 else doc.content_preview,
+                            "chunks_found": doc.chunks_count,
+                            "file_type": doc.file_type
+                        })
+                    
+                    logger.info(f"📋 Found {len(all_docs)} indexed documents in database")
+                    
+                    # Generate response using all documents
+                    context = "\n\n---\n\n".join(context_parts)
+                    response_text = await self.llm_service.generate_response(
+                        question,
+                        context,
+                        conversation_history=conversation_history or []
+                    )
+                    
+                    return QueryResult(
+                        message=response_text,
+                        sources=sources,
+                        response_time=asyncio.get_event_loop().time() - start_time
+                    )
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to fetch from database for listing query: {e}, falling back to hybrid search")
+                    # Fall through to hybrid search
+            
+            # Step 4: Adjust retrieval parameters based on query type
+            if is_listing_query:
+                # Listing query - retrieve MANY chunks to cover all documents
+                adjusted_max_results = min(max_results * 8, 120)
+                logger.info(f"📋 Listing query detected: increasing retrieval to {adjusted_max_results} chunks")
+            elif selected_files is not None:
                 # Specific files selected - retrieve more chunks to ensure good coverage
                 adjusted_max_results = min(max_results * 2, 30)
             else:
                 # General query - retrieve chunks from all files
                 adjusted_max_results = min(max_results * 4, 60)
             
-            # Step 3: Generate query embedding and search vector store
-            query_embedding = self.embedding_service.encode_single_text(question)
-            results = await self.vector_store.search_similar(query_embedding, adjusted_max_results)
+            # Step 5: Hybrid Search (Semantic with BM25 boosting)
+            logger.info(f"🔍 Performing hybrid search (semantic with BM25 boost)...")
             
-            if not results['documents'] or not results['documents'][0]:
+            # 5a. Semantic search (ChromaDB)
+            query_embedding = self.embedding_service.encode_single_text(question)
+            semantic_results = await self.vector_store.search_similar(query_embedding, adjusted_max_results)
+            
+            if not semantic_results['documents'] or not semantic_results['documents'][0]:
                 return QueryResult(
                     message="I don't have information about that in the current documents.",
                     sources=[],
                     response_time=asyncio.get_event_loop().time() - start_time
                 )
             
-            # Step 4: Process results and prioritize selected files
+            # 5b. Keyword search (BM25) - used only to BOOST semantic results
+            bm25_results_raw = self.bm25_service.search(question, top_k=adjusted_max_results)
+            bm25_hits = set()
+            for doc_id, score, meta in (bm25_results_raw or []):
+                fp = meta.get('file_path', '')
+                cid = meta.get('chunk_id')
+                if fp is not None and cid is not None:
+                    bm25_hits.add((fp, cid))
+            logger.info(f"🔎 BM25 hits for boosting: {len(bm25_hits)}")
+            
+            # Build boosted semantic results; do NOT include BM25-only items
+            documents = []
+            metadatas = []
+            boosted_scores = []
+            
+            for doc, meta, dist in zip(
+                semantic_results['documents'][0],
+                semantic_results['metadatas'][0],
+                semantic_results['distances'][0]
+            ):
+                base_score = max(0.0, 1.0 - float(dist))  # Convert distance to similarity
+                fp = meta.get('file_path', '')
+                cid = meta.get('chunk_id')
+                boost = 0.0
+                if (fp, cid) in bm25_hits:
+                    boost = 0.1  # modest boost for exact keyword match
+                final_score = min(1.0, base_score + boost)
+                
+                # Append only if doc text is non-empty
+                if doc and doc.strip():
+                    documents.append(doc)
+                    metadatas.append(meta)
+                    boosted_scores.append(final_score)
+                else:
+                    logger.warning(f"Skipping empty semantic chunk for {fp}#{cid}")
+            
+            # Guard: if we lost everything (shouldn't happen), fall back to unboosted semantic
+            if not documents:
+                documents = semantic_results['documents'][0]
+                metadatas = semantic_results['metadatas'][0]
+                boosted_scores = [max(0.0, 1.0 - float(d)) for d in semantic_results['distances'][0]]
+                logger.warning("Boosting produced no usable chunks, falling back to semantic-only results")
+            
+            # Wrap in results structure
+            results = {
+                'documents': [documents],
+                'metadatas': [metadatas],
+                'distances': [boosted_scores]  # store similarity-like scores
+            }
+            
+            # Step 6: Process results and prioritize selected files
             documents = results['documents'][0]
             metadatas = results['metadatas'][0] 
             distances = results['distances'][0]
@@ -494,18 +707,18 @@ Your response:"""
             
             # Group chunks by file for better context
             file_chunks = {}
-            for doc, metadata, distance in zip(documents, metadatas, distances):
+            for doc, metadata, score in zip(documents, metadatas, distances):  # 'distances' is actually scores now
                 file_path = metadata.get("file_path", "Unknown")
                 if file_path not in file_chunks:
                     file_chunks[file_path] = []
                 file_chunks[file_path].append({
                     "text": doc,
-                    "distance": distance,
+                    "score": score,  # RRF score (higher = better)
                     "chunk_id": metadata.get("chunk_id", 0),
                     "metadata": metadata
                 })
             
-            # Step 5: Create sources and context from selected files
+            # Step 7: Create sources and context from selected files
             sources = []
             context_parts = []
             
@@ -531,9 +744,11 @@ Your response:"""
                 context_with_filename = f"[Document: {filename}]\n{file_text}"
                 context_parts.append(context_with_filename)
                 
-                # Calculate average relevance (lower distance = higher relevance)
-                avg_distance = sum(chunk["distance"] for chunk in chunks) / len(chunks)
-                relevance_score = max(0, 1.0 - avg_distance)  # Convert to 0-1 score
+                # Calculate average relevance from RRF scores
+                avg_score = sum(chunk["score"] for chunk in chunks) / len(chunks)
+                # Normalize RRF score to percentage (RRF scores are typically 0.01-0.05)
+                # Multiply by 100 to get percentage, cap at 100%
+                relevance_score = min(1.0, avg_score * 50)  # Scale RRF scores to ~0-1 range
                 
                 sources.append({
                     "file_path": file_path,
@@ -546,8 +761,11 @@ Your response:"""
             # Sort sources by relevance
             sources.sort(key=lambda x: x["relevance_score"], reverse=True)
             
-            # Step 6: Smart source limiting
-            if selected_files is None:
+            # Step 8: Smart source limiting
+            if is_listing_query:
+                # Listing query - show ALL sources (no limit)
+                logger.info(f"📋 Listing query: showing all {len(sources)} document sources")
+            elif selected_files is None:
                 # General query - limit to top 10 most relevant sources
                 logger.info(f"📊 General query: limiting to top 10 of {len(sources)} sources")
                 sources = sources[:10]
@@ -555,9 +773,13 @@ Your response:"""
                 # Specific files query - show only LLM-selected files (no arbitrary limit)
                 logger.info(f"📊 Specific query: showing {len(sources)} LLM-selected file sources")
             
-            # Step 7: Generate final response using LLM with document context
+            # Step 9: Generate final response using LLM with document context and conversation history
             context = "\n\n---\n\n".join(context_parts)
-            response_text = await self.llm_service.generate_response(question, context)
+            response_text = await self.llm_service.generate_response(
+                question, 
+                context, 
+                conversation_history=conversation_history or []
+            )
             
             response_time = asyncio.get_event_loop().time() - start_time
             

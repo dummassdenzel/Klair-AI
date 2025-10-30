@@ -12,7 +12,7 @@
   import type { ChatRequest, ChatMessage } from "$lib/api/types";
 
   let messages: ChatMessage[] = [];
-  let directoryPath = "C:\\xampp\\htdocs\\klair-ai\\documents";
+  let directoryPath = "C:\\Users\\Administrator\\Documents\\nazrene.logistics@gmailcom2024"; 
   let isSettingDirectory = false;
   let showDirectoryInput = false;
   let indexedDocuments: any[] = [];

@@ -55,11 +55,11 @@ class LLMService:
                 logger.error(f"Failed to initialize Ollama client: {e}")
                 raise
     
-    async def generate_response(self, query: str, context: str) -> str:
+    async def generate_response(self, query: str, context: str, conversation_history: list = None) -> str:
         """Generate response using selected provider."""
         try:
             self._initialize_client()
-            prompt = self._build_prompt(query, context)
+            prompt = self._build_prompt(query, context, conversation_history or [])
 
             if self.provider == "gemini":
                 try:
@@ -186,12 +186,23 @@ class LLMService:
             logger.error(f"Error generating simple LLM response: {e}")
             return "I couldn't generate a response due to an error."
     
-    def _build_prompt(self, query: str, context: str) -> str:
-        """Build the prompt for the LLM"""
+    def _build_prompt(self, query: str, context: str, conversation_history: list = None) -> str:
+        """Build the prompt for the LLM with conversation history"""
+        conversation_history = conversation_history or []
+        
+        # Build conversation context if history exists
+        conversation_context = ""
+        if conversation_history:
+            conversation_context = "\n\nPrevious conversation:\n"
+            for msg in conversation_history:
+                role = "User" if msg["role"] == "user" else "Assistant"
+                conversation_context += f"{role}: {msg['content']}\n"
+            conversation_context += "\n"
+        
         return f"""You are a helpful AI assistant that answers questions based on the provided document context.
 
 Each document is labeled with its filename in the format [Document: filename.ext].
-
+{conversation_context}
 Context information:
 {context}
 
@@ -202,6 +213,7 @@ Instructions:
 - Read the actual text in each document to understand what it contains
 - When listing documents, look for mentions in the CONTENT (e.g., if content says "delivery receipt", include it)
 - Include the [Document: filename] label when referencing documents in your answer
+- Use previous conversation context to understand follow-up questions (e.g., "that file" refers to previously mentioned documents)
 - If the information is not in the context, say "I don't have information about that in the current documents"
 - Be thorough - check all provided documents carefully
 - Use specific details and quotes from the content when relevant

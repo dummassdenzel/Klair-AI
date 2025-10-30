@@ -3,7 +3,7 @@ import axios, { type AxiosInstance, type AxiosResponse } from 'axios';
 // Create axios instance with base configuration
 const apiClient: AxiosInstance = axios.create({
   baseURL: 'http://127.0.0.1:8000/api', // Your FastAPI backend
-  timeout: 30000, // 30 seconds for LLM responses
+  timeout: 60000, // 60 seconds for LLM responses (increased for conversation history)
   headers: {
     'Content-Type': 'application/json',
   },

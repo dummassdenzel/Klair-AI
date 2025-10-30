@@ -218,8 +218,26 @@ async def chat(request: ChatRequest):
                 title=f"Chat about: {request.message[:50]}..."
             )
         
-        # Query RAG system
-        response = await doc_processor.query(request.message)
+        # Get conversation history for context (last 3 messages for efficiency)
+        conversation_history = []
+        try:
+            previous_messages = await db_service.get_chat_history(chat_session.id)
+            # Get last 3 messages for context (balance between context and speed)
+            recent_messages = previous_messages[-3:] if len(previous_messages) > 3 else previous_messages
+            
+            # Interleave user and assistant messages properly
+            conversation_history = []
+            for msg in recent_messages:
+                conversation_history.append({"role": "user", "content": msg.user_message})
+                conversation_history.append({"role": "assistant", "content": msg.ai_response})
+            
+            logger.info(f"Including {len(recent_messages)} previous messages in conversation context")
+        except Exception as e:
+            logger.warning(f"Could not fetch conversation history: {e}")
+            conversation_history = []
+        
+        # Query RAG system with conversation context
+        response = await doc_processor.query(request.message, conversation_history=conversation_history)
         
         # Store chat message in database
         await db_service.add_chat_message(
