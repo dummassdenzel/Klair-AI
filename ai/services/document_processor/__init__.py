@@ -31,6 +31,7 @@ from .llm_service import LLMService
 from .file_validator import FileValidator
 from .bm25_service import BM25Service
 from .hybrid_search import HybridSearchService
+from .reranker_service import ReRankingService
 from .config import config, DocumentProcessorConfig
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "FileValidator",
     "BM25Service",
     "HybridSearchService",
+    "ReRankingService",
     "config",
     "DocumentProcessorConfig"
 ]

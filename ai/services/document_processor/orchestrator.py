@@ -14,6 +14,7 @@ from .llm_service import LLMService
 from .file_validator import FileValidator
 from .bm25_service import BM25Service
 from .hybrid_search import HybridSearchService
+from .reranker_service import ReRankingService
 from database import DatabaseService
 
 
@@ -54,6 +55,9 @@ class DocumentProcessorOrchestrator:
         # Hybrid search services (semantic + keyword)
         self.bm25_service = BM25Service(persist_dir)
         self.hybrid_search = HybridSearchService(k=60)  # RRF constant
+        
+        # Re-ranking service (cross-encoder for improved relevance)
+        self.reranker = ReRankingService(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
         
         # State tracking
         self.file_hashes: Dict[str, str] = {}
@@ -705,7 +709,41 @@ Your response:"""
                 
                 logger.info(f"✅ Prioritized {len(prioritized_docs)} chunks from {len(selected_files)} LLM-selected files")
             
-            # Group chunks by file for better context
+            # Step 6.5: Re-rank top results for improved relevance (skip for listing queries)
+            rerank_top_k = 15  # Re-rank top 15, then take top 5
+            final_top_k = 5    # Final top K after re-ranking
+            
+            if not is_listing_query and len(documents) > final_top_k:
+                logger.info(f"🔄 Re-ranking top {min(rerank_top_k, len(documents))} of {len(documents)} results...")
+                
+                # Re-rank top chunks
+                documents_to_rerank = documents[:min(rerank_top_k, len(documents))]
+                metadatas_to_rerank = metadatas[:min(rerank_top_k, len(metadatas))]
+                scores_to_rerank = distances[:min(rerank_top_k, len(distances))]
+                
+                # Perform re-ranking
+                reranked_docs, reranked_metas, reranked_scores = self.reranker.rerank_with_metadata(
+                    query=question,
+                    documents=documents_to_rerank,
+                    metadata_list=metadatas_to_rerank,
+                    scores_list=scores_to_rerank,
+                    top_k=final_top_k
+                )
+                
+                # Combine reranked results with remaining lower-ranked results
+                remaining_docs = documents[min(rerank_top_k, len(documents)):]
+                remaining_metas = metadatas[min(rerank_top_k, len(metadatas)):]
+                remaining_scores = distances[min(rerank_top_k, len(distances)):]
+                
+                documents = reranked_docs + remaining_docs
+                metadatas = reranked_metas + remaining_metas
+                distances = reranked_scores + remaining_scores
+                
+                logger.info(f"✅ Re-ranked {len(documents_to_rerank)} → top {len(reranked_docs)} (kept {len(remaining_docs)} lower-ranked)")
+            elif not is_listing_query:
+                logger.debug(f"Skipping re-ranking: only {len(documents)} results (need > {final_top_k})")
+            
+            # Step 7: Group chunks by file for better context
             file_chunks = {}
             for doc, metadata, score in zip(documents, metadatas, distances):  # 'distances' is actually scores now
                 file_path = metadata.get("file_path", "Unknown")
