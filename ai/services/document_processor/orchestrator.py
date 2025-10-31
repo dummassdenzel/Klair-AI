@@ -471,6 +471,94 @@ YOUR CLASSIFICATION (ONE WORD):"""
             logger.error(f"Query classification failed: {e}, defaulting to 'document'")
             return 'document'
     
+    async def _rewrite_query(self, question: str, conversation_history: list = None) -> str:
+        """
+        Rewrite ambiguous queries using conversation context for better retrieval.
+        
+        Examples:
+        - "Who drove that?" → "Who is the driver in [previous file mentioned]?"
+        - "What about this one?" → "What are the contents of [file name from previous message]?"
+        - "Tell me more" → "Tell me more about [topic from previous message]"
+        
+        Args:
+            question: Original query (may contain pronouns, references)
+            conversation_history: Previous conversation messages
+            
+        Returns:
+            Rewritten query with explicit context, or original if no rewriting needed
+        """
+        try:
+            conversation_history = conversation_history or []
+            
+            # Check if query needs rewriting (has pronouns or ambiguous references)
+            ambiguous_indicators = [
+                'that', 'it', 'this', 'those', 'them', 'which', 'what about',
+                'the file', 'the document', 'that file', 'that document',
+                'this one', 'that one', 'tell me more', 'what about'
+            ]
+            
+            query_lower = question.lower()
+            needs_rewriting = any(indicator in query_lower for indicator in ambiguous_indicators)
+            
+            # If no conversation history or query is already explicit, skip rewriting
+            if not conversation_history or not needs_rewriting:
+                logger.debug(f"Query does not need rewriting: '{question}'")
+                return question
+            
+            # Build conversation context
+            conversation_context = "\n\nPrevious conversation:\n"
+            for msg in conversation_history[-4:]:  # Last 4 messages for context
+                role = "User" if msg["role"] == "user" else "Assistant"
+                content = msg["content"][:200]  # Limit length
+                conversation_context += f"{role}: {content}\n"
+            
+            rewriting_prompt = f"""You are a query rewriting AI. Your job is to rewrite ambiguous user queries by replacing pronouns and references with explicit information from the conversation context.
+
+CONVERSATION CONTEXT:
+{conversation_context}
+
+USER QUERY: "{question}"
+
+INSTRUCTIONS:
+- Replace pronouns ("that", "it", "this", etc.) with explicit references from the conversation
+- Replace file references ("that file", "the document") with actual filenames mentioned
+- If the query asks "who" or "what" about something previously mentioned, make it explicit
+- Keep the rewritten query concise and natural
+- If the query is already explicit or you can't determine the reference, return the original query unchanged
+
+EXAMPLES:
+- "Who drove that?" → "Who is the driver in TCO005 10.14 ABI.pdf?"
+- "What about this one?" → "What are the contents of PES starter_005.pdf?"
+- "Tell me more about it" → "Tell me more about the delivery receipt TCO005"
+- "Who is the driver on that file?" → "Who is the driver in TCO005 10.14 ABI.pdf?"
+
+CRITICAL RULES:
+1. Only rewrite if pronouns/references can be resolved from context
+2. If unsure, return the original query (don't guess)
+3. Preserve the user's intent and question structure
+4. Keep it concise (max 20 words)
+
+REWRITTEN QUERY (or original if no changes needed):"""
+
+            rewritten = await self.llm_service.generate_simple(rewriting_prompt)
+            rewritten = rewritten.strip().strip('"').strip("'")  # Clean up quotes
+            
+            # Validate: don't use if it's too different or seems like an error response
+            if rewritten and len(rewritten) > 5 and "couldn't" not in rewritten.lower():
+                if rewritten.lower() != question.lower():
+                    logger.info(f"🔄 Query rewritten: '{question}' → '{rewritten}'")
+                    return rewritten
+                else:
+                    logger.debug(f"LLM decided query doesn't need rewriting: '{question}'")
+                    return question
+            else:
+                logger.warning(f"Query rewriting returned invalid result, using original: '{rewritten}'")
+                return question
+                
+        except Exception as e:
+            logger.warning(f"Query rewriting failed: {e}, using original query")
+            return question
+    
     async def _generate_direct_response(self, question: str, response_type: str) -> str:
         """
         Generate a direct response without document retrieval.
@@ -533,6 +621,11 @@ Your response:"""
             # Document query - proceed with RAG pipeline
             logger.info(f"📚 Document query detected, starting RAG pipeline...")
             
+            # Step 0.5: Rewrite ambiguous queries using conversation context
+            rewritten_question = await self._rewrite_query(question, conversation_history)
+            # Use rewritten query for retrieval, but keep original for LLM response
+            retrieval_query = rewritten_question if rewritten_question != question else question
+            
             # Step 1: Detect listing queries (need to see ALL documents)
             listing_query_patterns = [
                 'list', 'all documents', 'all files', 'what documents', 'what files',
@@ -541,8 +634,8 @@ Your response:"""
             ]
             is_listing_query = any(pattern in question.lower() for pattern in listing_query_patterns)
             
-            # Step 2: Use LLM to intelligently select relevant files
-            selected_files = await self._select_relevant_files(question)
+            # Step 2: Use LLM to intelligently select relevant files (use rewritten query for better selection)
+            selected_files = await self._select_relevant_files(retrieval_query)
             
             # Step 3: Special handling for listing queries (use database, not semantic search)
             if is_listing_query:
@@ -616,8 +709,8 @@ Your response:"""
             # Step 5: Hybrid Search (Semantic with BM25 boosting)
             logger.info(f"🔍 Performing hybrid search (semantic with BM25 boost)...")
             
-            # 5a. Semantic search (ChromaDB)
-            query_embedding = self.embedding_service.encode_single_text(question)
+            # 5a. Semantic search (ChromaDB) - use rewritten query for better retrieval
+            query_embedding = self.embedding_service.encode_single_text(retrieval_query)
             semantic_results = await self.vector_store.search_similar(query_embedding, adjusted_max_results)
             
             if not semantic_results['documents'] or not semantic_results['documents'][0]:
@@ -627,8 +720,8 @@ Your response:"""
                     response_time=asyncio.get_event_loop().time() - start_time
                 )
             
-            # 5b. Keyword search (BM25) - used only to BOOST semantic results
-            bm25_results_raw = self.bm25_service.search(question, top_k=adjusted_max_results)
+            # 5b. Keyword search (BM25) - used only to BOOST semantic results (use rewritten query)
+            bm25_results_raw = self.bm25_service.search(retrieval_query, top_k=adjusted_max_results)
             bm25_hits = set()
             for doc_id, score, meta in (bm25_results_raw or []):
                 fp = meta.get('file_path', '')
@@ -721,9 +814,9 @@ Your response:"""
                 metadatas_to_rerank = metadatas[:min(rerank_top_k, len(metadatas))]
                 scores_to_rerank = distances[:min(rerank_top_k, len(distances))]
                 
-                # Perform re-ranking
+                # Perform re-ranking (use rewritten query for better relevance)
                 reranked_docs, reranked_metas, reranked_scores = self.reranker.rerank_with_metadata(
-                    query=question,
+                    query=retrieval_query,
                     documents=documents_to_rerank,
                     metadata_list=metadatas_to_rerank,
                     scores_list=scores_to_rerank,
