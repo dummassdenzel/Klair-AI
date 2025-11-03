@@ -10,31 +10,52 @@
   } from "$lib/stores/api";
   import { createApiRequest } from "$lib/utils/api";
   import type { ChatRequest, ChatMessage } from "$lib/api/types";
+  import DirectorySelectionModal from "$lib/components/DirectorySelectionModal.svelte";
 
   let messages: ChatMessage[] = [];
-  let directoryPath = "C:\\Users\\Administrator\\Documents\\nazrene.logistics@gmailcom2024"; 
   let isSettingDirectory = false;
-  let showDirectoryInput = false;
+  let showDirectoryModal = false;
   let indexedDocuments: any[] = [];
   let isLoadingDocuments = false;
   let showDocumentsPanel = false;
   let isIndexingInProgress = false;
+  let isInitializing = true; // Track initialization state
+  let hasAutoOpenedModal = false; // Track if we've auto-opened the modal on initial load
   
   // Track expanded state for each message's sources
   let expandedSources: Record<number, boolean> = {};
   
+  let userCancelledModal = false; // Track if user manually cancelled the modal
+  
+  // Reactive statement to ensure modal shows when needed (only on initial load)
+  $: {
+    // If system status is loaded and no directory is set, auto-open modal once on initial load
+    // But don't auto-open if user has manually cancelled
+    // After that, let user control the modal manually
+    if (!isInitializing && !hasAutoOpenedModal && !userCancelledModal && $systemStatus && !$systemStatus.directory_set && !showDirectoryModal) {
+      showDirectoryModal = true;
+      hasAutoOpenedModal = true; // Mark that we've auto-opened once
+    }
+    // Reset user cancelled flag if directory gets set (so modal can auto-open again if directory is cleared)
+    if ($systemStatus?.directory_set) {
+      userCancelledModal = false;
+    }
+  }
+  
     onMount(async () => {
     console.log(" Component mounted, testing connection...");
       await testConnection();
-    console.log(" Connection tested, loading chat history...");
+    console.log(" Connection tested, checking directory...");
     
-    // Auto-open directory input if no directory is set
+    // Show modal on startup if no directory is set
     if (!$systemStatus?.directory_set) {
-      showDirectoryInput = true;
+      showDirectoryModal = true;
     } else {
       await loadChatHistory();
+      await loadIndexedDocuments();
     }
     
+    isInitializing = false; // Mark initialization as complete
     console.log("🔍 Initialization complete");
     });
   
@@ -48,8 +69,10 @@
     }, "Backend connection test");
     }
   
-    async function setDirectory() {
-    console.log("🔍 Setting directory...");
+    async function handleDirectorySelect(event: CustomEvent<{ directoryPath: string }>) {
+    const directoryPath = event.detail.directoryPath;
+    console.log("🔍 Setting directory from modal...", directoryPath);
+      
       if (!directoryPath.trim()) return;
       
       isSettingDirectory = true;
@@ -62,8 +85,8 @@
         await loadChatHistory();
         await loadIndexedDocuments();
         
-        // Hide directory input after successful set
-        showDirectoryInput = false;
+        // Hide modal after successful set
+        showDirectoryModal = false;
         
         // Auto-refresh documents as they're being indexed in background
         // Check every 2 seconds for up to 30 seconds
@@ -92,6 +115,7 @@
         
       } catch (error) {
         console.error("❌ Failed to set directory:", error);
+        // Keep modal open on error so user can try again
       } finally {
         isSettingDirectory = false;
       }
@@ -306,8 +330,26 @@
   </svelte:head>
   
 <div class="min-h-screen bg-white font-['Inter']">
+  <!-- Directory Selection Modal -->
+  <DirectorySelectionModal
+    bind:isOpen={showDirectoryModal}
+    isSetting={isSettingDirectory}
+    allowCancel={$systemStatus?.directory_set || false}
+    on:select={handleDirectorySelect}
+    on:cancel={() => {
+      showDirectoryModal = false;
+      userCancelledModal = true; // Mark that user manually cancelled
+    }}
+  />
+
+  <!-- Block main content if no directory is set and modal is not open -->
+  <!-- Only show overlay after initialization is complete to avoid race conditions -->
+  {#if !isInitializing && !$systemStatus?.directory_set && !showDirectoryModal}
+    <div class="fixed inset-0 bg-black bg-opacity-20 z-40"></div>
+  {/if}
+
   <!-- Top Navigation -->
-  <div class="bg-white border-b border-gray-100 px-6 py-4">
+  <div class="bg-white border-b border-gray-100 px-6 py-4 relative z-10">
     <div class="flex items-center justify-between">
       <!-- Logo and Title -->
       <div class="flex items-center gap-3">
@@ -327,44 +369,22 @@
       {/if}
         </div>
 
-        <button
-          on:click={() => showDirectoryInput = !showDirectoryInput}
-          class="px-6 py-2.5 bg-[#443C68] text-white rounded-lg hover:bg-[#3A3457] transition-colors font-medium"
-        >
-          {showDirectoryInput ? 'Cancel' : 'Change Directory'}
-        </button>
+        {#if $systemStatus?.directory_set}
+          <button
+            type="button"
+            on:click={() => {
+              console.log('🔍 Change Directory button clicked');
+              showDirectoryModal = true;
+            }}
+            class="px-6 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={isSettingDirectory || isInitializing}
+            aria-label="Change document directory"
+          >
+            Change Directory
+          </button>
+        {/if}
           </div>
       </div>
-  
-    <!-- Directory Input Section (collapsible) -->
-    {#if showDirectoryInput}
-      <div class="bg-[#F7F7F7] border-b border-gray-200 px-6 py-4">
-        <div class="flex items-center gap-4 max-w-4xl">
-          <input
-            type="text"
-            bind:value={directoryPath}
-            placeholder="Enter directory path (e.g., C:\path\to\documents)"
-            class="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent"
-            disabled={isSettingDirectory}
-          />
-          <button
-            on:click={setDirectory}
-            disabled={isSettingDirectory || !directoryPath.trim()}
-            class="px-8 py-2.5 bg-[#443C68] text-white rounded-lg hover:bg-[#3A3457] transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 min-w-[140px] justify-center"
-          >
-            {#if isSettingDirectory}
-              <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              Setting...
-            {:else}
-            Set Directory
-            {/if}
-          </button>
-        </div>
-      </div>
-    {/if}
         </div>
   
   <div class="flex h-[calc(100vh-120px)]">

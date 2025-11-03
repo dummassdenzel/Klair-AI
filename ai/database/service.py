@@ -19,10 +19,14 @@ class DatabaseService:
     
     async def create_chat_session(self, directory_path: str, title: str = "New Chat") -> ChatSession:
         """Create a new chat session"""
+        import os
+        # Normalize directory path for consistent storage
+        normalized_path = os.path.normpath(os.path.abspath(directory_path)) if directory_path else directory_path
+        
         async for session in get_db():
             chat_session = ChatSession(
                 title=title,
-                directory_path=directory_path
+                directory_path=normalized_path
             )
             session.add(chat_session)
             await session.commit()
@@ -179,14 +183,28 @@ class DatabaseService:
     # NEW: Chat Session Management Methods
     
     async def get_chat_sessions_by_directory(self, directory_path: str) -> List[Dict[str, Any]]:
-        """Get all chat sessions for a specific directory"""
+        """Get all chat sessions for a specific directory (with path normalization)"""
+        import os
+        # Normalize directory path for comparison (handle different path formats)
+        normalized_path = os.path.normpath(os.path.abspath(directory_path)) if directory_path else ""
+        
         async for session in get_db():
-            stmt = select(ChatSession).where(
-                ChatSession.directory_path == directory_path
-            ).order_by(desc(ChatSession.updated_at))
+            # Normalize paths in database for comparison
+            stmt = select(ChatSession).order_by(desc(ChatSession.updated_at))
             
+            # Get all sessions and filter by normalized path (in-memory filtering for now)
+            # This handles path format differences (forward/backward slashes, case, etc.)
             result = await session.execute(stmt)
-            chat_sessions = result.scalars().all()
+            all_sessions = result.scalars().all()
+            
+            # Filter by normalized path
+            matching_sessions = []
+            for chat_session in all_sessions:
+                session_path = os.path.normpath(os.path.abspath(chat_session.directory_path)) if chat_session.directory_path else ""
+                if session_path == normalized_path:
+                    matching_sessions.append(chat_session)
+            
+            chat_sessions = matching_sessions
             
             # Convert to dictionaries with message count
             sessions_data = []

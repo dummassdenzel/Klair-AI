@@ -129,14 +129,89 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/api/select-directory")
+async def select_directory():
+    """
+    Open a native directory picker dialog on the server.
+    Returns the selected directory path and file count.
+    Runs in a thread to avoid blocking the async event loop.
+    """
+    def _open_picker():
+        """Open directory picker in a separate thread"""
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            from pathlib import Path
+            
+            # Create a root window (hidden)
+            root = tk.Tk()
+            root.withdraw()  # Hide the main window
+            root.attributes('-topmost', True)  # Bring to front
+            
+            # Open directory picker
+            directory_path = filedialog.askdirectory(
+                title="Select Documents Directory",
+                mustexist=True
+            )
+            
+            root.destroy()
+            
+            if not directory_path:
+                return None, 0
+            
+            # Count supported files in the directory
+            dir_path = Path(directory_path)
+            supported_extensions = {'.pdf', '.docx', '.txt'}
+            file_count = 0
+            
+            if dir_path.exists() and dir_path.is_dir():
+                for file_path in dir_path.rglob('*'):
+                    if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
+                        file_count += 1
+            
+            return directory_path, file_count
+            
+        except ImportError:
+            return None, 0
+        except Exception as e:
+            logger.error(f"Directory picker error: {e}")
+            return None, 0
+    
+    try:
+        # Run in thread to avoid blocking async event loop
+        directory_path, file_count = await asyncio.to_thread(_open_picker)
+        
+        if not directory_path:
+            # User cancelled or tkinter not available
+            raise HTTPException(
+                status_code=400,
+                detail="No directory selected or directory picker not available"
+            )
+        
+        return {
+            "status": "success",
+            "directory_path": directory_path,
+            "file_count": file_count
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to open directory picker: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to open directory picker: {str(e)}")
+
 @app.post("/api/set-directory")
 async def set_directory(request: dict):
     """Set the directory to monitor and process documents from"""
+    import os
     global doc_processor, file_monitor, current_directory
     
     directory_path = request.get("path")
     if not directory_path:
         raise HTTPException(status_code=400, detail="Directory path required")
+    
+    # Normalize directory path for consistent storage and comparison
+    directory_path = os.path.normpath(os.path.abspath(directory_path))
     
     try:
         # Stop existing file monitor

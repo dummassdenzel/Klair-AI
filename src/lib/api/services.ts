@@ -13,6 +13,11 @@ import type {
 // Core API Services
 export const apiService = {
   // Directory Management
+  async selectDirectory(): Promise<any> {
+    const response = await apiClient.get('/select-directory');
+    return response.data;
+  },
+
   async setDirectory(directoryPath: string): Promise<DirectoryResponse> {
     const response = await apiClient.post('/set-directory', { path: directoryPath });
     return response.data;
