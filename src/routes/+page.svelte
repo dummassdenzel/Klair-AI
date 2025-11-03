@@ -21,6 +21,7 @@
   let isIndexingInProgress = false;
   let isInitializing = true; // Track initialization state
   let hasAutoOpenedModal = false; // Track if we've auto-opened the modal on initial load
+  let openDropdownId: number | null = null; // Track which session's dropdown is open
   
   // Track expanded state for each message's sources
   let expandedSources: Record<number, boolean> = {};
@@ -42,21 +43,32 @@
     }
   }
   
-    onMount(async () => {
-    console.log(" Component mounted, testing connection...");
+    onMount(() => {
+    // Initialize async operations
+    (async () => {
+      console.log(" Component mounted, testing connection...");
       await testConnection();
-    console.log(" Connection tested, checking directory...");
+      console.log(" Connection tested, checking directory...");
+      
+      // Show modal on startup if no directory is set
+      if (!$systemStatus?.directory_set) {
+        showDirectoryModal = true;
+      } else {
+        await loadChatHistory();
+        await loadIndexedDocuments();
+      }
+      
+      isInitializing = false; // Mark initialization as complete
+      console.log("🔍 Initialization complete");
+    })();
     
-    // Show modal on startup if no directory is set
-    if (!$systemStatus?.directory_set) {
-      showDirectoryModal = true;
-    } else {
-      await loadChatHistory();
-      await loadIndexedDocuments();
-    }
+    // Add click outside handler for dropdowns
+    window.addEventListener('click', handleWindowClick);
     
-    isInitializing = false; // Mark initialization as complete
-    console.log("🔍 Initialization complete");
+    // Return cleanup function (synchronous)
+    return () => {
+      window.removeEventListener('click', handleWindowClick);
+    };
     });
   
     async function testConnection() {
@@ -270,16 +282,40 @@
     }, "Update session title");
   }
 
-  async function handleDeleteSession() {
-    if (!$currentChatSession) return;
+  async function handleDeleteSession(sessionId?: number) {
+    const idToDelete = sessionId || $currentChatSession?.id;
+    if (!idToDelete) return;
 
     await createApiRequest(async () => {
-      await apiService.deleteChatSession($currentChatSession.id);
-      currentChatSession.set(null);
-      messages = [];
+      await apiService.deleteChatSession(idToDelete);
+      
+      // If deleting the current session, clear it
+      if ($currentChatSession?.id === idToDelete) {
+        currentChatSession.set(null);
+        messages = [];
+      }
+      
       await loadChatHistory();
+      openDropdownId = null; // Close dropdown after deletion
       return true;
     }, "Delete session");
+  }
+
+  function toggleDropdown(sessionId: number, event: Event) {
+    event.stopPropagation(); // Prevent triggering the session click
+    openDropdownId = openDropdownId === sessionId ? null : sessionId;
+  }
+
+  function closeDropdown() {
+    openDropdownId = null;
+  }
+
+  // Close dropdown when clicking outside
+  function handleWindowClick(event: MouseEvent) {
+    const target = event.target as HTMLElement;
+    if (!target.closest('.dropdown-container')) {
+      closeDropdown();
+    }
   }
 
   async function startNewChat() {
@@ -329,7 +365,7 @@
   />
   </svelte:head>
   
-<div class="min-h-screen bg-white font-['Inter']">
+<div class="h-screen bg-white font-['Inter'] overflow-hidden flex flex-col">
   <!-- Directory Selection Modal -->
   <DirectorySelectionModal
     bind:isOpen={showDirectoryModal}
@@ -349,24 +385,22 @@
   {/if}
 
   <!-- Top Navigation -->
-  <div class="bg-white border-b border-gray-100 px-6 py-4 relative z-10">
-    <div class="flex items-center justify-between">
-      <!-- Logo and Title -->
-      <div class="flex items-center gap-3">
-        <div class="flex items-center space-x-2">
-          <img src="/klair.ai-sm.png" class="w-7 h-7" alt="User avatar" />
-          <span class="font-bold text-xl">klair.ai</span>
-        </div>
-      </div>
+  <div class="bg-white px-6 py-4 absolute top-3 right-5 z-10">
 
       <!-- Directory Status and Controls -->
-      <div class="flex items-center gap-4">
-        <div class="text-sm text-[#37352F] bg-[#F7F7F7] px-4 py-2 rounded-lg">
+        <div class="flex items-center gap-4">
+        <div class="text-sm text-[#37352F] bg-[#F7F7F7] px-4 py-2 rounded-lg flex items-center gap-2">
           {#if $systemStatus?.directory_set}
-            📁 {$systemStatus.current_directory?.split("\\").pop()}
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+          </svg>  
+          /{$systemStatus.current_directory?.split("\\").pop()}
           {:else}
-            📁 No directory set
-      {/if}
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+          </svg> 
+           No directory set
+          {/if}
         </div>
 
         {#if $systemStatus?.directory_set}
@@ -382,14 +416,22 @@
           >
             Change Directory
           </button>
-        {/if}
-          </div>
-      </div>
+      {/if}
         </div>
+      </div>
   
-  <div class="flex h-[calc(100vh-120px)]">
+  <div class="flex flex-1 overflow-hidden">
     <!-- Left Sidebar - Chat History -->
-    <div class="w-80 bg-[#F7F7F7] border-r border-gray-100 flex flex-col">
+    <div class="w-80 bg-[#F7F7F7] border-r border-gray-100 flex flex-col pt-10 overflow-hidden flex-shrink-0">
+      
+      <!-- Logo and Title -->
+      <div class="flex justify-center items-center gap-3">
+        <div class="flex items-center space-x-2">
+          <img src="/klair.ai-sm.png" class="w-7 h-7" alt="User avatar" />
+          <span class="font-bold text-xl text-gray-700">klair.ai</span>
+        </div>
+      </div>
+
       <!-- New Chat Button -->
       <div class="p-6 border-b border-gray-100">
         <button
@@ -422,29 +464,75 @@
         </h3>
         <div class="space-y-3">
           {#each $chatHistory as session}
-            <button
-              on:click={() => loadSession(session)}
-              class="w-full text-left p-4 rounded-xl hover:bg-white transition-all duration-200 {$currentChatSession?.id ===
+            <div
+              class="group relative w-full p-4 rounded-xl hover:bg-white transition-all duration-200 {$currentChatSession?.id ===
               session.id
                 ? 'bg-white shadow-sm border border-[#443C68]/20'
                 : ''}"
             >
-              <div class="text-sm font-medium text-[#37352F] truncate mb-2">
-                {session.title}
-              </div>
-              <div
-                class="flex items-center justify-between text-xs text-gray-500"
+              <button
+                on:click={() => {
+                  closeDropdown();
+                  loadSession(session);
+                }}
+                class="w-full text-left"
               >
-                <span>{new Date(session.created_at).toLocaleDateString()}</span>
-                <span
-                  class="bg-[#443C68]/10 text-[#443C68] px-2.5 py-1 rounded-full font-medium"
+                <div class="text-sm font-medium text-[#37352F] truncate mb-2">
+                  {session.title}
+                </div>
+                <div
+                  class="flex items-center justify-between text-xs text-gray-500"
                 >
-                  {session.message_count} message{session.message_count !== 1
-                    ? "s"
-                    : ""}
-              </span>
+                  <span>{new Date(session.created_at).toLocaleDateString()}</span>
+                  <span
+                    class="bg-[#443C68]/10 text-[#443C68] px-2.5 py-1 rounded-full font-medium"
+                  >
+                    {session.message_count} message{session.message_count !== 1
+                      ? "s"
+                      : ""}
+                  </span>
+                </div>
+              </button>
+              
+              <!-- Triple-dot dropdown button -->
+              <div class="absolute top-3 right-3 dropdown-container">
+                <button
+                  type="button"
+                  on:click={(e) => toggleDropdown(session.id, e)}
+                  class="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                  aria-label="Session options"
+                  aria-expanded={openDropdownId === session.id}
+                >
+                  <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />
+                  </svg>
+                </button>
+                
+                <!-- Dropdown menu -->
+                {#if openDropdownId === session.id}
+                  <div
+                    class="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50"
+                    role="menu"
+                    on:click|stopPropagation
+                  >
+                    <button
+                      type="button"
+                      on:click={(e) => {
+                        e.stopPropagation();
+                        handleDeleteSession(session.id);
+                      }}
+                      class="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors flex items-center gap-2"
+                      role="menuitem"
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                      Delete
+                    </button>
+                  </div>
+                {/if}
+              </div>
             </div>
-            </button>
           {/each}
         </div>
       </div>
@@ -562,26 +650,6 @@
                 ).toLocaleDateString()}
               </div>
             </div>
-
-            <button
-              on:click={handleDeleteSession}
-              class="p-3 text-red-500 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
-              title="Delete session"
-            >
-              <svg
-                class="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                ></path>
-              </svg>
-            </button>
           </div>
         </div>
       {:else}

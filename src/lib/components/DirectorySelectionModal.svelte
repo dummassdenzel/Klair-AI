@@ -222,7 +222,7 @@
             <!-- No directory selected -->
             <div class="mb-6">
               <div class="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <svg class="w-10 h-10 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg class="w-10 h-10 text-[#443C68]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                 </svg>
               </div>
@@ -234,7 +234,7 @@
                 type="button"
                 on:click={handleSelectDirectory}
                 disabled={isSetting || isSelecting}
-                class="px-8 py-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center gap-3 mx-auto text-lg shadow-lg hover:shadow-xl"
+                class="px-8 py-4 bg-[#443C68] text-white rounded-lg hover:bg-[#3A3457] disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center gap-3 mx-auto text-lg shadow-lg hover:shadow-xl"
               >
                 {#if isSelecting}
                   <div class="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
