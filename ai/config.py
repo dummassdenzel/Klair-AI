@@ -31,6 +31,8 @@ class Settings:
     
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_FORMAT: str = os.getenv("LOG_FORMAT", "human")  # 'json' or 'human'
+    LOG_FILE: str = os.getenv("LOG_FILE", "")  # Optional log file path
     SQLALCHEMY_ECHO: bool = os.getenv("SQLALCHEMY_ECHO", "false").lower() in ("1", "true", "yes")
 
 settings = Settings()

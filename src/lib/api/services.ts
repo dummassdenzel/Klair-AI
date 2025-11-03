@@ -92,4 +92,83 @@ export const apiService = {
     const response = await apiClient.post('/update-configuration', config);
     return response.data;
   },
+
+  // Metrics Dashboard
+  async getMetricsSummary(timeWindowMinutes: number = 60): Promise<any> {
+    const response = await apiClient.get('/metrics/summary', {
+      params: { time_window_minutes: timeWindowMinutes }
+    });
+    return response.data;
+  },
+
+  async getRetrievalStats(timeWindowMinutes: number = 60): Promise<any> {
+    const response = await apiClient.get('/metrics/retrieval-stats', {
+      params: { time_window_minutes: timeWindowMinutes }
+    });
+    return response.data;
+  },
+
+  async getTimeSeries(
+    metricType: string = 'response_time',
+    timeWindowMinutes: number = 60,
+    bucketMinutes: number = 5
+  ): Promise<any> {
+    const response = await apiClient.get('/metrics/time-series', {
+      params: {
+        metric_type: metricType,
+        time_window_minutes: timeWindowMinutes,
+        bucket_minutes: bucketMinutes
+      }
+    });
+    return response.data;
+  },
+
+  async getRecentQueries(limit: number = 20): Promise<any> {
+    const response = await apiClient.get('/metrics/recent-queries', {
+      params: { limit }
+    });
+    return response.data;
+  },
+
+  async getCounters(): Promise<any> {
+    const response = await apiClient.get('/metrics/counters');
+    return response.data;
+  },
+
+  // RAG Analytics
+  async getQueryPatterns(timeWindowMinutes: number = 60): Promise<any> {
+    const response = await apiClient.get('/analytics/query-patterns', {
+      params: { time_window_minutes: timeWindowMinutes }
+    });
+    return response.data;
+  },
+
+  async getDocumentUsage(): Promise<any> {
+    const response = await apiClient.get('/analytics/document-usage');
+    return response.data;
+  },
+
+  async getRetrievalEffectiveness(timeWindowMinutes: number = 60): Promise<any> {
+    const response = await apiClient.get('/analytics/retrieval-effectiveness', {
+      params: { time_window_minutes: timeWindowMinutes }
+    });
+    return response.data;
+  },
+
+  async getPerformanceTrends(timeWindowMinutes: number = 60, buckets: number = 6): Promise<any> {
+    const response = await apiClient.get('/analytics/performance-trends', {
+      params: {
+        time_window_minutes: timeWindowMinutes,
+        buckets
+      }
+    });
+    return response.data;
+  },
+
+  async getQuerySuccess(timeWindowMinutes: number = 60): Promise<any> {
+    const response = await apiClient.get('/analytics/query-success', {
+      params: { time_window_minutes: timeWindowMinutes }
+    });
+    return response.data;
+  },
 };

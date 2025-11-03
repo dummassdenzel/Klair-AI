@@ -20,6 +20,9 @@ class QueryResult:
     message: str
     sources: List[Dict]
     response_time: float
+    query_type: Optional[str] = None  # greeting, general, document
+    retrieval_count: Optional[int] = None  # Number of chunks retrieved
+    rerank_count: Optional[int] = None  # Number of chunks re-ranked
 
 
 @dataclass

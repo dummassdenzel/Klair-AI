@@ -16,21 +16,25 @@ from database.models import ChatSession, ChatMessage, IndexedDocument
 from datetime import datetime
 from sqlalchemy import select, func, or_, and_, desc
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-for noisy in [
-    "sqlalchemy.engine",
-    "httpx",
-    "chromadb",
-    "watchdog.observers.inotify",
-]:
-    logging.getLogger(noisy).setLevel(logging.WARNING)
+# Configure structured logging
+from services.logging_config import setup_logging, log_query_metrics, MetricsLogger
+from services.metrics_service import MetricsService
+from services.rag_analytics import RAGAnalytics
+
+setup_logging(
+    json_format=(settings.LOG_FORMAT.lower() == "json"),
+    log_level=settings.LOG_LEVEL,
+    log_file=settings.LOG_FILE if settings.LOG_FILE else None
+)
+
 logger = logging.getLogger(__name__)
 
 # Global state
 doc_processor: Optional[DocumentProcessorOrchestrator] = None
 file_monitor: Optional[FileMonitorService] = None
 current_directory: Optional[str] = None
+metrics_service = MetricsService(max_history=1000)  # Store last 1000 queries
+rag_analytics = RAGAnalytics(metrics_service)
 prewarming_complete = False
 prewarming_task = None
  
@@ -289,7 +293,29 @@ async def chat(request: ChatRequest):
                     logger.error(f"Error linking document {file_path} to chat: {e}")
                     # Continue with other documents - don't fail the entire chat
         
-        logger.info(f"Query completed in {response.response_time}s with {len(response.sources)} sources")
+        # Log structured query metrics
+        query_type = response.query_type or "unknown"
+        log_query_metrics(
+            logger=logger,
+            query=request.message,
+            query_type=query_type,
+            response_time=response.response_time,
+            sources_count=len(response.sources),
+            retrieval_count=response.retrieval_count,
+            rerank_count=response.rerank_count,
+            session_id=chat_session.id
+        )
+        
+        # Record metrics for dashboard
+        metrics_service.record_query(
+            query_type=query_type,
+            response_time_ms=response.response_time * 1000,  # Convert to ms
+            sources_count=len(response.sources),
+            retrieval_count=response.retrieval_count or 0,
+            rerank_count=response.rerank_count or 0,
+            session_id=chat_session.id,
+            query_preview=request.message[:100]  # First 100 chars
+        )
         
         return ChatResponse(
             message=response.message,
@@ -298,6 +324,18 @@ async def chat(request: ChatRequest):
         
     except Exception as e:
         logger.error(f"Query failed: {e}")
+        
+        # Record error metric
+        metrics_service.record_query(
+            query_type="error",
+            response_time_ms=0,
+            sources_count=0,
+            retrieval_count=0,
+            rerank_count=0,
+            error=True,
+            error_message=str(e)
+        )
+        
         raise HTTPException(status_code=500, detail="Query failed: {str(e)}")
 
 @app.get("/api/status")
@@ -551,6 +589,150 @@ async def get_document_stats():
     except Exception as e:
         logger.error(f"Failed to get document stats: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get document stats: {str(e)}")
+
+# Metrics Dashboard API Endpoints
+@app.get("/api/metrics/summary")
+async def get_metrics_summary(time_window_minutes: int = 60):
+    """Get aggregated metrics summary for a time window"""
+    try:
+        summary = metrics_service.get_metrics_summary(time_window_minutes=time_window_minutes)
+        return {
+            "status": "success",
+            "metrics": summary
+        }
+    except Exception as e:
+        logger.error(f"Failed to get metrics summary: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get metrics summary: {str(e)}")
+
+@app.get("/api/metrics/retrieval-stats")
+async def get_retrieval_stats(time_window_minutes: int = 60):
+    """Get retrieval operation statistics"""
+    try:
+        stats = metrics_service.get_retrieval_stats(time_window_minutes=time_window_minutes)
+        return {
+            "status": "success",
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Failed to get retrieval stats: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get retrieval stats: {str(e)}")
+
+@app.get("/api/metrics/time-series")
+async def get_time_series(
+    metric_type: str = "response_time",
+    time_window_minutes: int = 60,
+    bucket_minutes: int = 5
+):
+    """Get time series data for a metric"""
+    try:
+        time_series = metrics_service.get_time_series(
+            metric_type=metric_type,
+            time_window_minutes=time_window_minutes,
+            bucket_minutes=bucket_minutes
+        )
+        return {
+            "status": "success",
+            "metric_type": metric_type,
+            "time_series": time_series
+        }
+    except Exception as e:
+        logger.error(f"Failed to get time series: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get time series: {str(e)}")
+
+@app.get("/api/metrics/recent-queries")
+async def get_recent_queries(limit: int = 20):
+    """Get recent query metrics"""
+    try:
+        queries = metrics_service.get_recent_queries(limit=limit)
+        return {
+            "status": "success",
+            "queries": queries
+        }
+    except Exception as e:
+        logger.error(f"Failed to get recent queries: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get recent queries: {str(e)}")
+
+@app.get("/api/metrics/counters")
+async def get_counters():
+    """Get all counter metrics"""
+    try:
+        counters = metrics_service.get_counters()
+        return {
+            "status": "success",
+            "counters": counters
+        }
+    except Exception as e:
+        logger.error(f"Failed to get counters: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get counters: {str(e)}")
+
+# RAG Analytics API Endpoints
+@app.get("/api/analytics/query-patterns")
+async def get_query_patterns(time_window_minutes: int = 60):
+    """Get query pattern analytics"""
+    try:
+        patterns = rag_analytics.get_query_patterns(time_window_minutes=time_window_minutes)
+        return {
+            "status": "success",
+            "patterns": patterns
+        }
+    except Exception as e:
+        logger.error(f"Failed to get query patterns: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get query patterns: {str(e)}")
+
+@app.get("/api/analytics/document-usage")
+async def get_document_usage():
+    """Get document usage statistics"""
+    try:
+        usage = rag_analytics.get_document_usage_stats()
+        return {
+            "status": "success",
+            "usage": usage
+        }
+    except Exception as e:
+        logger.error(f"Failed to get document usage: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get document usage: {str(e)}")
+
+@app.get("/api/analytics/retrieval-effectiveness")
+async def get_retrieval_effectiveness(time_window_minutes: int = 60):
+    """Get retrieval effectiveness metrics"""
+    try:
+        effectiveness = rag_analytics.get_retrieval_effectiveness(time_window_minutes=time_window_minutes)
+        return {
+            "status": "success",
+            "effectiveness": effectiveness
+        }
+    except Exception as e:
+        logger.error(f"Failed to get retrieval effectiveness: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get retrieval effectiveness: {str(e)}")
+
+@app.get("/api/analytics/performance-trends")
+async def get_performance_trends(time_window_minutes: int = 60, buckets: int = 6):
+    """Get performance trend analysis"""
+    try:
+        trends = rag_analytics.get_performance_trends(
+            time_window_minutes=time_window_minutes,
+            buckets=buckets
+        )
+        return {
+            "status": "success",
+            "trends": trends
+        }
+    except Exception as e:
+        logger.error(f"Failed to get performance trends: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get performance trends: {str(e)}")
+
+@app.get("/api/analytics/query-success")
+async def get_query_success(time_window_minutes: int = 60):
+    """Get query success analysis"""
+    try:
+        success = rag_analytics.get_query_success_analysis(time_window_minutes=time_window_minutes)
+        return {
+            "status": "success",
+            "success": success
+        }
+    except Exception as e:
+        logger.error(f"Failed to get query success: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get query success: {str(e)}")
 
 @app.get("/api/documents/search")
 async def search_documents(

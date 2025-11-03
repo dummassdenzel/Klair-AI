@@ -615,11 +615,18 @@ Your response:"""
                 return QueryResult(
                     message=response_text,
                     sources=[],  # No document sources for greetings/general
-                    response_time=round(response_time, 3)
+                    response_time=round(response_time, 3),
+                    query_type=query_type,
+                    retrieval_count=0,
+                    rerank_count=0
                 )
             
             # Document query - proceed with RAG pipeline
             logger.info(f"📚 Document query detected, starting RAG pipeline...")
+            
+            # Track metrics for structured logging
+            retrieval_count = 0
+            rerank_count = 0
             
             # Step 0.5: Rewrite ambiguous queries using conversation context
             rewritten_question = await self._rewrite_query(question, conversation_history)
@@ -657,7 +664,10 @@ Your response:"""
                         return QueryResult(
                             message="No documents are currently indexed.",
                             sources=[],
-                            response_time=asyncio.get_event_loop().time() - start_time
+                            response_time=asyncio.get_event_loop().time() - start_time,
+                            query_type=query_type,
+                            retrieval_count=0,
+                            rerank_count=0
                         )
                     
                     # Build sources from database records
@@ -687,7 +697,10 @@ Your response:"""
                     return QueryResult(
                         message=response_text,
                         sources=sources,
-                        response_time=asyncio.get_event_loop().time() - start_time
+                        response_time=asyncio.get_event_loop().time() - start_time,
+                        query_type=query_type,
+                        retrieval_count=len(all_docs),  # Number of documents from DB
+                        rerank_count=0  # Listing queries don't use re-ranking
                     )
                     
                 except Exception as e:
@@ -717,7 +730,10 @@ Your response:"""
                 return QueryResult(
                     message="I don't have information about that in the current documents.",
                     sources=[],
-                    response_time=asyncio.get_event_loop().time() - start_time
+                    response_time=asyncio.get_event_loop().time() - start_time,
+                    query_type=query_type,
+                    retrieval_count=0,
+                    rerank_count=0
                 )
             
             # 5b. Keyword search (BM25) - used only to BOOST semantic results (use rewritten query)
@@ -728,7 +744,19 @@ Your response:"""
                 cid = meta.get('chunk_id')
                 if fp is not None and cid is not None:
                     bm25_hits.add((fp, cid))
-            logger.info(f"🔎 BM25 hits for boosting: {len(bm25_hits)}")
+            
+            semantic_count = len(semantic_results['documents'][0]) if semantic_results['documents'] else 0
+            keyword_count = len(bm25_results_raw) if bm25_results_raw else 0
+            
+            logger.info(
+                f"🔍 Hybrid search: {semantic_count} semantic, {len(bm25_hits)} BM25 boosts",
+                extra={'extra_fields': {
+                    'event_type': 'retrieval',
+                    'semantic_results': semantic_count,
+                    'keyword_results': keyword_count,
+                    'bm25_boosts': len(bm25_hits)
+                }}
+            )
             
             # Build boosted semantic results; do NOT include BM25-only items
             documents = []
@@ -762,6 +790,9 @@ Your response:"""
                 metadatas = semantic_results['metadatas'][0]
                 boosted_scores = [max(0.0, 1.0 - float(d)) for d in semantic_results['distances'][0]]
                 logger.warning("Boosting produced no usable chunks, falling back to semantic-only results")
+            
+            # Track retrieval count
+            retrieval_count = len(documents)
             
             # Wrap in results structure
             results = {
@@ -832,7 +863,18 @@ Your response:"""
                 metadatas = reranked_metas + remaining_metas
                 distances = reranked_scores + remaining_scores
                 
-                logger.info(f"✅ Re-ranked {len(documents_to_rerank)} → top {len(reranked_docs)} (kept {len(remaining_docs)} lower-ranked)")
+                # Track re-ranking count
+                rerank_count = len(documents_to_rerank)
+                
+                logger.info(
+                    f"✅ Re-ranked {len(documents_to_rerank)} → top {len(reranked_docs)} (kept {len(remaining_docs)} lower-ranked)",
+                    extra={'extra_fields': {
+                        'event_type': 'rerank',
+                        'input_count': len(documents_to_rerank),
+                        'output_count': len(reranked_docs),
+                        'rerank_top_k': final_top_k
+                    }}
+                )
             elif not is_listing_query:
                 logger.debug(f"Skipping re-ranking: only {len(documents)} results (need > {final_top_k})")
             
@@ -917,7 +959,10 @@ Your response:"""
             return QueryResult(
                 message=response_text,
                 sources=sources,
-                response_time=round(response_time, 3)
+                response_time=round(response_time, 3),
+                query_type=query_type,
+                retrieval_count=retrieval_count,
+                rerank_count=rerank_count
             )
             
         except Exception as e:
@@ -926,7 +971,10 @@ Your response:"""
             return QueryResult(
                 message=f"Sorry, I encountered an error while processing your query: {str(e)}",
                 sources=[],
-                response_time=round(response_time, 3)
+                response_time=round(response_time, 3),
+                query_type="error",
+                retrieval_count=retrieval_count if 'retrieval_count' in locals() else 0,
+                rerank_count=rerank_count if 'rerank_count' in locals() else 0
             )
     
     def get_stats(self) -> Dict:
