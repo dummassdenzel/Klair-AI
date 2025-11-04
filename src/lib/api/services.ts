@@ -50,6 +50,18 @@ export const apiService = {
     return response.data;
   },
 
+  async getDocumentMetadata(documentId: number): Promise<any> {
+    const response = await apiClient.get(`/documents/${documentId}`);
+    return response.data;
+  },
+
+  async getDocumentFile(documentId: number): Promise<Blob> {
+    const response = await apiClient.get(`/documents/${documentId}/file`, {
+      responseType: 'blob'
+    });
+    return response.data;
+  },
+
   async clearIndex(): Promise<{ status: string; message: string }> {
     const response = await apiClient.post('/clear-index');
     return response.data;

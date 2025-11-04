@@ -1,10 +1,13 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
 import asyncio
 import logging
+import os
+from pathlib import Path
 from services.document_processor import DocumentProcessorOrchestrator, config
 from config import settings
 from services.file_monitor import FileMonitorService
@@ -831,6 +834,130 @@ async def search_documents(
         return {"status": "success", "documents": documents}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/documents/{document_id}/file")
+async def get_document_file(document_id: int):
+    """
+    Serve a document file by its ID.
+    Returns the file content with appropriate content-type headers.
+    """
+    try:
+        # Get document from database
+        async for db_session in get_db():
+            stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
+            result = await db_session.execute(stmt)
+            document = result.scalar_one_or_none()
+            
+            if not document:
+                raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
+            
+            file_path = document.file_path
+            file_type = document.file_type.lower()
+            
+            # Validate file exists
+            path_obj = Path(file_path)
+            if not path_obj.exists() or not path_obj.is_file():
+                logger.error(f"Document file not found on disk: {file_path}")
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Document file not found on disk: {path_obj.name}"
+                )
+            
+            # Determine content type based on file extension
+            content_type_map = {
+                'pdf': 'application/pdf',
+                'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                'txt': 'text/plain'
+            }
+            
+            content_type = content_type_map.get(file_type, 'application/octet-stream')
+            
+            # For TXT files, read and return as text response
+            if file_type == 'txt':
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    return Response(
+                        content=content,
+                        media_type=content_type,
+                        headers={
+                            "Content-Disposition": f'inline; filename="{path_obj.name}"',
+                            "X-Document-Id": str(document_id),
+                            "X-File-Type": file_type
+                        }
+                    )
+                except UnicodeDecodeError:
+                    # Try with different encoding if UTF-8 fails
+                    try:
+                        with open(file_path, 'r', encoding='latin-1') as f:
+                            content = f.read()
+                        return Response(
+                            content=content,
+                            media_type=content_type,
+                            headers={
+                                "Content-Disposition": f'inline; filename="{path_obj.name}"',
+                                "X-Document-Id": str(document_id),
+                                "X-File-Type": file_type
+                            }
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to read TXT file {file_path}: {e}")
+                        raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+            
+            # For PDF and DOCX files, return file response
+            return FileResponse(
+                path=file_path,
+                media_type=content_type,
+                filename=path_obj.name,
+                headers={
+                    "X-Document-Id": str(document_id),
+                    "X-File-Type": file_type,
+                    "X-File-Size": str(document.file_size) if document.file_size else "0"
+                }
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to serve document file {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to serve document file: {str(e)}")
+
+@app.get("/api/documents/{document_id}")
+async def get_document_metadata(document_id: int):
+    """
+    Get document metadata by ID.
+    Returns document information without the file content.
+    """
+    try:
+        async for db_session in get_db():
+            stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
+            result = await db_session.execute(stmt)
+            document = result.scalar_one_or_none()
+            
+            if not document:
+                raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
+            
+            return {
+                "status": "success",
+                "document": {
+                    "id": document.id,
+                    "file_path": document.file_path,
+                    "file_type": document.file_type,
+                    "file_size": document.file_size,
+                    "last_modified": document.last_modified.isoformat() if document.last_modified else None,
+                    "content_preview": document.content_preview,
+                    "chunks_count": document.chunks_count,
+                    "processing_status": document.processing_status,
+                    "indexed_at": document.indexed_at.isoformat() if document.indexed_at else None
+                }
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get document metadata {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get document metadata: {str(e)}")
 
 @app.get("/api/analytics/usage")
 async def get_usage_analytics():

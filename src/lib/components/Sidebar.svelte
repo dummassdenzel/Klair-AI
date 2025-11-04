@@ -17,6 +17,7 @@
   export let onLoadSession: (session: ChatSession) => void = () => {};
   export let onDeleteSession: (sessionId: number) => void = () => {};
   export let onToggleDropdown: (sessionId: number, event: MouseEvent) => void = () => {};
+  export let onDocumentClick: (document: IndexedDocument) => void = () => {};
 
   let sidebarView: 'menu' | 'chat' | 'documents' = 'menu';
   let isSidebarHovered = false;
@@ -35,8 +36,8 @@
 <!-- Left Sidebar -->
 <div 
   class="bg-[#F7F7F7] border-r border-gray-100 flex flex-col overflow-hidden overflow-x-hidden flex-shrink-0 transition-all duration-300 {(isSidebarHovered || sidebarView !== 'menu') ? 'w-80' : 'w-20'}"
-  on:mouseenter={() => isSidebarHovered = true}
-  on:mouseleave={() => {
+  onmouseenter={() => isSidebarHovered = true}
+  onmouseleave={() => {
     // Only collapse if we're in menu view
     if (sidebarView === 'menu') {
       isSidebarHovered = false;
@@ -60,7 +61,7 @@
       <div class="space-y-2">
         <!-- New Chat Button -->
         <button
-          on:click={onNewChat}
+          onclick={onNewChat}
           class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-[#443C68] text-white rounded-xl hover:bg-[#3A3457] transition-all duration-300 flex items-center justify-center border border-[#443C68] shadow-sm mb-4 h-[48px]"
           title="New Chat"
         >
@@ -70,7 +71,7 @@
             </svg>
             <span class="font-medium whitespace-nowrap">New Chat</span>
           {:else}
-            <div class="w-8 h-8 rounded-full bg-white/20 flex items-center justify-center flex-shrink-0">
+            <div class="w-8 h-8 flex items-center justify-center flex-shrink-0">
               <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
               </svg>
@@ -80,7 +81,7 @@
 
         <!-- Chat Button -->
         <button
-          on:click={handleChatClick}
+          onclick={handleChatClick}
           class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white rounded-xl hover:bg-gray-50 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
           title="Chat"
         >
@@ -103,7 +104,7 @@
 
         <!-- Indexed Documents Button -->
         <button
-          on:click={handleDocumentsClick}
+          onclick={handleDocumentsClick}
           class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white rounded-xl hover:bg-gray-50 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
           title="Indexed Documents"
         >
@@ -131,29 +132,15 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
             </svg>
           {:else}
-            <div class="relative">
-              <svg class="w-5 h-5 text-[#443C68] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              {#if isIndexingInProgress || indexedDocuments.length > 0}
-                <span class="absolute -top-1 -right-1 bg-[#443C68] text-white text-[0.625rem] px-1.5 py-0.5 rounded-full font-medium min-w-[1.25rem] flex items-center justify-center {isIndexingInProgress ? 'animate-pulse' : ''}">
-                  {#if isIndexingInProgress}
-                    <svg class="animate-spin h-2.5 w-2.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                  {:else}
-                    {indexedDocuments.length}
-                  {/if}
-                </span>
-              {/if}
-            </div>
+            <svg class="w-5 h-5 text-[#443C68] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
           {/if}
         </button>
 
         <!-- Metrics Button -->
         <button
-          on:click={() => goto('/metrics')}
+          onclick={() => goto('/metrics')}
           class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white rounded-xl hover:bg-gray-50 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 hover:border-[#443C68]/30 shadow-sm group h-[48px] {(currentRoute === '/metrics') ? 'bg-[#443C68]/10 border-[#443C68]/30' : ''}"
           title="Metrics"
         >
@@ -176,7 +163,7 @@
 
         <!-- Analytics Button -->
         <button
-          on:click={() => goto('/analytics')}
+          onclick={() => goto('/analytics')}
           class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white rounded-xl hover:bg-gray-50 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 hover:border-[#443C68]/30 shadow-sm group h-[48px] {(currentRoute === '/analytics') ? 'bg-[#443C68]/10 border-[#443C68]/30' : ''}"
           title="Analytics"
         >
@@ -204,7 +191,7 @@
       <!-- Back Button and Header -->
       <div class="px-6 pt-4 pb-2 border-b border-gray-200">
         <button
-          on:click={() => sidebarView = 'menu'}
+          onclick={() => sidebarView = 'menu'}
           class="flex items-center gap-2 text-sm text-gray-600 hover:text-[#443C68] transition-colors mb-4"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -220,7 +207,7 @@
       <!-- New Chat Button -->
       <div class="p-6 border-b border-gray-100">
         <button
-          on:click={onNewChat}
+          onclick={onNewChat}
           class="w-full px-6 py-3 bg-[#443C68] text-white rounded-xl hover:bg-[#3A3457] transition-colors flex items-center justify-center gap-3 font-medium"
         >
           <svg
@@ -251,7 +238,7 @@
             : ''}"
         >
           <button
-            on:click={() => {
+            onclick={() => {
               onToggleDropdown(-1, new MouseEvent('click'));
               onLoadSession(session);
             }}
@@ -278,7 +265,7 @@
           <div class="absolute top-3 right-3 dropdown-container">
             <button
               type="button"
-              on:click={(e) => onToggleDropdown(session.id, e)}
+              onclick={(e) => onToggleDropdown(session.id, e)}
               class="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
               aria-label="Session options"
               aria-expanded={openDropdownId === session.id}
@@ -293,11 +280,11 @@
               <div
                 class="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50"
                 role="menu"
-                on:click|stopPropagation
+                onclick={(e) => e.stopPropagation()}
               >
                 <button
                   type="button"
-                  on:click={(e) => {
+                  onclick={(e) => {
                     e.stopPropagation();
                     onDeleteSession(session.id);
                   }}
@@ -323,7 +310,7 @@
       <!-- Back Button and Header -->
       <div class="px-6 pt-4 pb-2 border-b border-gray-200">
         <button
-          on:click={() => sidebarView = 'menu'}
+          onclick={() => sidebarView = 'menu'}
           class="flex items-center gap-2 text-sm text-gray-600 hover:text-[#443C68] transition-colors mb-4"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -367,7 +354,10 @@
         {:else}
           <div class="space-y-2">
             {#each indexedDocuments as doc}
-              <div class="bg-white p-3 rounded-lg border border-gray-200 hover:border-[#443C68] transition-colors">
+              <button
+                onclick={() => onDocumentClick(doc)}
+                class="w-full text-left bg-white p-3 rounded-lg border border-gray-200 hover:border-[#443C68] transition-colors cursor-pointer"
+              >
                 <div class="flex items-start gap-3">
                   <div class="flex-shrink-0">
                     {#if doc.file_type === 'pdf'}
@@ -399,7 +389,7 @@
                     </div>
                   </div>
                 </div>
-              </div>
+              </button>
             {/each}
           </div>
         {/if}

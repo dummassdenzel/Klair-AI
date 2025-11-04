@@ -533,14 +533,14 @@
             Send
           </button>
         </div>
-    
+  
         <div class="text-xs text-gray-400 mt-3 text-center">
           {#if $isIndexingInProgress}
             Indexing in progress... Chat will be available shortly
           {:else}
             Press Enter to send, Shift+Enter for new line
           {/if}
-        </div>
+      </div>
       </div>
     </div>
   </div>

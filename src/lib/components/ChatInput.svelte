@@ -54,7 +54,4 @@
       </button>
     </div>
     
-    <div class="text-xs text-gray-500 mt-2">
-      Press Enter to send, Shift+Enter for new line
-    </div>
   </div>
