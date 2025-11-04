@@ -473,14 +473,14 @@
           </div>
         {/if}
         
-        <div class="flex items-end gap-4">
+        <div class="flex items-center gap-4">
           <div class="flex-1">
             <textarea
               id="chat-input"
               placeholder={$isIndexingInProgress ? "Please wait while documents are being indexed..." : "Ask me anything about your documents..."}
               rows="1"
               disabled={$isIndexingInProgress}
-              class="w-full px-6 py-4 border border-gray-200 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent text-[#37352F] placeholder-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+              class="w-full h-full px-6 py-4 border border-gray-200 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent text-[#37352F] placeholder-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
               style="min-height: 56px; max-height: 120px;"
               onkeydown={(e) => {
                 if ($isIndexingInProgress) {
@@ -515,7 +515,7 @@
               }
             }}
             disabled={$isChatLoading || $isIndexingInProgress}
-            class="px-8 py-4 bg-[#443C68] text-white rounded-2xl hover:bg-[#3A3457] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-3 font-medium"
+            class="px-8 h-[56px] bg-[#443C68] text-white rounded-2xl hover:bg-[#3A3457] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-3 font-medium flex-shrink-0"
           >
             <svg
               class="w-5 h-5"

@@ -58,18 +58,7 @@
   }
 
   function getQueryTypeColor(type: string): string {
-    switch (type) {
-      case 'document':
-        return 'bg-blue-100 text-blue-800';
-      case 'general':
-        return 'bg-green-100 text-green-800';
-      case 'greeting':
-        return 'bg-purple-100 text-purple-800';
-      case 'error':
-        return 'bg-red-100 text-red-800';
-      default:
-        return 'bg-gray-100 text-gray-800';
-    }
+    return 'bg-[#443C68] text-white';
   }
 </script>
 
@@ -92,7 +81,7 @@
         <button
           on:click={loadMetrics}
           disabled={loading}
-          class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
+          class="px-4 py-2 bg-[#443C68] text-white rounded-lg hover:bg-[#3A3457] disabled:opacity-50 text-sm"
         >
           {loading ? 'Loading...' : 'Refresh'}
         </button>
@@ -107,23 +96,23 @@
 
     {#if loading && !metricsSummary}
       <div class="text-center py-12">
-        <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#443C68]"></div>
         <p class="mt-2 text-gray-600">Loading metrics...</p>
       </div>
     {:else if metricsSummary}
       <!-- Summary Cards -->
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <!-- Total Queries -->
-        <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div class="bg-[#443C68] p-6 rounded-xl shadow-sm">
           <div class="flex items-center justify-between">
             <div>
-              <p class="text-sm font-medium text-gray-600">Total Queries</p>
-              <p class="text-3xl font-bold text-gray-900 mt-2">
+              <p class="text-sm font-medium text-white/80">Total Queries</p>
+              <p class="text-3xl font-bold text-white mt-2">
                 {metricsSummary.total_queries || 0}
               </p>
             </div>
-            <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
-              <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div class="w-12 h-12 bg-white/20 rounded-lg flex items-center justify-center">
+              <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
               </svg>
             </div>
@@ -131,19 +120,19 @@
         </div>
 
         <!-- Average Response Time -->
-        <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div class="bg-[#443C68] p-6 rounded-xl shadow-sm">
           <div class="flex items-center justify-between">
             <div>
-              <p class="text-sm font-medium text-gray-600">Avg Response Time</p>
-              <p class="text-3xl font-bold text-gray-900 mt-2">
+              <p class="text-sm font-medium text-white/80">Avg Response Time</p>
+              <p class="text-3xl font-bold text-white mt-2">
                 {formatTime(metricsSummary.average_response_time_ms || 0)}
               </p>
-              <p class="text-xs text-gray-500 mt-1">
+              <p class="text-xs text-white/60 mt-1">
                 Min: {formatTime(metricsSummary.min_response_time_ms || 0)} • Max: {formatTime(metricsSummary.max_response_time_ms || 0)}
               </p>
             </div>
-            <div class="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
-              <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div class="w-12 h-12 bg-white/20 rounded-lg flex items-center justify-center">
+              <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             </div>
@@ -151,19 +140,19 @@
         </div>
 
         <!-- Error Rate -->
-        <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div class="bg-[#443C68] p-6 rounded-xl shadow-sm">
           <div class="flex items-center justify-between">
             <div>
-              <p class="text-sm font-medium text-gray-600">Error Rate</p>
-              <p class="text-3xl font-bold text-gray-900 mt-2">
+              <p class="text-sm font-medium text-white/80">Error Rate</p>
+              <p class="text-3xl font-bold text-white mt-2">
                 {formatPercent(metricsSummary.error_rate || 0)}
               </p>
-              <p class="text-xs text-gray-500 mt-1">
+              <p class="text-xs text-white/60 mt-1">
                 {metricsSummary.error_count || 0} errors
               </p>
             </div>
-            <div class="w-12 h-12 bg-red-100 rounded-lg flex items-center justify-center">
-              <svg class="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div class="w-12 h-12 bg-white/20 rounded-lg flex items-center justify-center">
+              <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
             </div>
@@ -171,19 +160,19 @@
         </div>
 
         <!-- Avg Sources -->
-        <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div class="bg-[#443C68] p-6 rounded-xl shadow-sm">
           <div class="flex items-center justify-between">
             <div>
-              <p class="text-sm font-medium text-gray-600">Avg Sources</p>
-              <p class="text-3xl font-bold text-gray-900 mt-2">
+              <p class="text-sm font-medium text-white/80">Avg Sources</p>
+              <p class="text-3xl font-bold text-white mt-2">
                 {(metricsSummary.average_sources_count || 0).toFixed(1)}
               </p>
-              <p class="text-xs text-gray-500 mt-1">
+              <p class="text-xs text-white/60 mt-1">
                 Retrieval: {(metricsSummary.average_retrieval_count || 0).toFixed(0)} chunks
               </p>
             </div>
-            <div class="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
-              <svg class="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div class="w-12 h-12 bg-white/20 rounded-lg flex items-center justify-center">
+              <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
             </div>

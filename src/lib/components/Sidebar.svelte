@@ -1,26 +1,49 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { onMount, onDestroy } from 'svelte';
   import type { ChatSession, IndexedDocument } from '$lib/api/types';
 
-  export let currentRoute: string = '/'; // Current route path
-  export let chatHistory: ChatSession[] = [];
-  export let indexedDocuments: IndexedDocument[] = [];
-  export let currentChatSession: ChatSession | null = null;
-  export let isLoadingDocuments: boolean = false;
-  export let isIndexingInProgress: boolean = false;
-  export let openDropdownId: number | null = null;
+  let {
+    currentRoute = '/',
+    chatHistory = [],
+    indexedDocuments = [],
+    currentChatSession = null,
+    isLoadingDocuments = false,
+    isIndexingInProgress = false,
+    openDropdownId = null,
+    onNewChat = () => {},
+    onChatClick = () => {},
+    onDocumentsClick = () => {},
+    onLoadSession = () => {},
+    onDeleteSession = () => {},
+    onToggleDropdown = () => {},
+    onDocumentClick = () => {}
+  } = $props<{
+    currentRoute?: string;
+    chatHistory?: ChatSession[];
+    indexedDocuments?: IndexedDocument[];
+    currentChatSession?: ChatSession | null;
+    isLoadingDocuments?: boolean;
+    isIndexingInProgress?: boolean;
+    openDropdownId?: number | null;
+    onNewChat?: () => void;
+    onChatClick?: () => void;
+    onDocumentsClick?: () => void;
+    onLoadSession?: (session: ChatSession) => void;
+    onDeleteSession?: (sessionId: number) => void;
+    onToggleDropdown?: (sessionId: number, event: MouseEvent) => void;
+    onDocumentClick?: (document: IndexedDocument) => void;
+  }>();
 
-  // Callbacks
-  export let onNewChat: () => void = () => {};
-  export let onChatClick: () => void = () => {};
-  export let onDocumentsClick: () => void = () => {};
-  export let onLoadSession: (session: ChatSession) => void = () => {};
-  export let onDeleteSession: (sessionId: number) => void = () => {};
-  export let onToggleDropdown: (sessionId: number, event: MouseEvent) => void = () => {};
-  export let onDocumentClick: (document: IndexedDocument) => void = () => {};
+  let sidebarView = $state<'menu' | 'chat' | 'documents'>('menu');
+  let isSidebarHovered = $state(false);
 
-  let sidebarView: 'menu' | 'chat' | 'documents' = 'menu';
-  let isSidebarHovered = false;
+  // Filtering and sorting state
+  let searchQuery = $state('');
+  let filterType = $state<string>('all');
+  let sortBy = $state<'name' | 'type' | 'size' | 'date' | 'chunks'>('name');
+  let sortOrder = $state<'asc' | 'desc'>('asc');
+  let showFilterDropdown = $state(false);
 
   function handleChatClick() {
     sidebarView = 'chat';
@@ -31,6 +54,69 @@
     sidebarView = 'documents';
     onDocumentsClick();
   }
+
+  // Get unique file types for filter
+  let fileTypes = $derived(Array.from(new Set(indexedDocuments.map((doc: IndexedDocument) => doc.file_type).filter(Boolean))).sort());
+
+  // Filter and sort documents
+  let filteredAndSortedDocuments = $derived.by(() => {
+    let filtered = indexedDocuments.filter((doc: IndexedDocument) => {
+      // Filter by search query
+      const fileName = doc.file_path?.split('\\').pop() || doc.file_path?.split('/').pop() || '';
+      const matchesSearch = !searchQuery || fileName.toLowerCase().includes(searchQuery.toLowerCase());
+      
+      // Filter by type
+      const matchesType = filterType === 'all' || doc.file_type === filterType;
+      
+      return matchesSearch && matchesType;
+    });
+
+    // Sort documents
+    filtered.sort((a: IndexedDocument, b: IndexedDocument) => {
+      let comparison = 0;
+      
+      switch (sortBy) {
+        case 'name':
+          const nameA = (a.file_path?.split('\\').pop() || a.file_path?.split('/').pop() || '').toLowerCase();
+          const nameB = (b.file_path?.split('\\').pop() || b.file_path?.split('/').pop() || '').toLowerCase();
+          comparison = nameA.localeCompare(nameB);
+          break;
+        case 'type':
+          comparison = (a.file_type || '').localeCompare(b.file_type || '');
+          break;
+        case 'size':
+          comparison = (a.file_size || 0) - (b.file_size || 0);
+          break;
+        case 'date':
+          const dateA = new Date(a.last_modified || a.indexed_at || 0).getTime();
+          const dateB = new Date(b.last_modified || b.indexed_at || 0).getTime();
+          comparison = dateA - dateB;
+          break;
+        case 'chunks':
+          comparison = (a.chunks_count || 0) - (b.chunks_count || 0);
+          break;
+      }
+      
+      return sortOrder === 'asc' ? comparison : -comparison;
+    });
+
+    return filtered;
+  });
+
+  // Close dropdown when clicking outside
+  function handleClickOutside(event: MouseEvent) {
+    const target = event.target as HTMLElement;
+    if (!target.closest('.filter-dropdown-container')) {
+      showFilterDropdown = false;
+    }
+  }
+
+  onMount(() => {
+    window.addEventListener('click', handleClickOutside);
+    return () => {
+      window.removeEventListener('click', handleClickOutside);
+    };
+  });
 </script>
 
 <!-- Left Sidebar -->
@@ -339,8 +425,199 @@
       </div>
 
       <!-- Documents List -->
-      <div class="flex-1 overflow-y-auto p-6">
-        {#if isLoadingDocuments}
+      <div class="flex-1 flex flex-col overflow-hidden">
+        <!-- Search and Filter Controls -->
+        {#if indexedDocuments.length > 0}
+          <div class="px-6 pt-4 pb-3 border-b border-gray-200">
+            <!-- Single line: Search, Filter dropdown, Sort order -->
+            <div class="flex items-center gap-2">
+              <!-- Search Input -->
+              <div class="relative flex-1">
+                <input
+                  type="text"
+                  placeholder="Search"
+                  bind:value={searchQuery}
+                  class="w-full px-3 py-2 pl-9 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent"
+                />
+                <svg class="absolute left-3 top-2.5 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+              </div>
+
+              <!-- Filter Dropdown Button -->
+              <div class="relative filter-dropdown-container">
+                <button
+                  type="button"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    showFilterDropdown = !showFilterDropdown;
+                  }}
+                  class="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center justify-center"
+                  title="Filter & Sort"
+                  aria-label="Filter and sort options"
+                >
+                  <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+                  </svg>
+                </button>
+
+                <!-- Filter Dropdown Menu -->
+                {#if showFilterDropdown}
+                  <div
+                    class="absolute right-0 mt-1 w-56 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50"
+                    role="menu"
+                    onclick={(e) => e.stopPropagation()}
+                  >
+                    <!-- Filter by Type Section -->
+                    <div class="px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-100">
+                      Filter by Type
+                    </div>
+                    <button
+                      type="button"
+                      onclick={() => {
+                        filterType = 'all';
+                        showFilterDropdown = false;
+                      }}
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {filterType === 'all' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      role="menuitem"
+                    >
+                      <span>All Types</span>
+                      {#if filterType === 'all'}
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                        </svg>
+                      {/if}
+                    </button>
+                    {#each fileTypes as type (type)}
+                      <button
+                        type="button"
+                        onclick={() => {
+                          filterType = String(type);
+                          showFilterDropdown = false;
+                        }}
+                        class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {filterType === String(type) ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                        role="menuitem"
+                      >
+                        <span>{String(type).toUpperCase()}</span>
+                        {#if filterType === String(type)}
+                          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                          </svg>
+                        {/if}
+                      </button>
+                    {/each}
+
+                    <!-- Sort by Section -->
+                    <div class="px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide border-t border-gray-100 mt-1">
+                      Sort by
+                    </div>
+                    <button
+                      type="button"
+                      onclick={() => {
+                        sortBy = 'name';
+                        showFilterDropdown = false;
+                      }}
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {sortBy === 'name' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      role="menuitem"
+                    >
+                      <span>Name</span>
+                      {#if sortBy === 'name'}
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                        </svg>
+                      {/if}
+                    </button>
+                    <button
+                      type="button"
+                      onclick={() => {
+                        sortBy = 'type';
+                        showFilterDropdown = false;
+                      }}
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {sortBy === 'type' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      role="menuitem"
+                    >
+                      <span>Type</span>
+                      {#if sortBy === 'type'}
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                        </svg>
+                      {/if}
+                    </button>
+                    <button
+                      type="button"
+                      onclick={() => {
+                        sortBy = 'size';
+                        showFilterDropdown = false;
+                      }}
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {sortBy === 'size' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      role="menuitem"
+                    >
+                      <span>Size</span>
+                      {#if sortBy === 'size'}
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                        </svg>
+                      {/if}
+                    </button>
+                    <button
+                      type="button"
+                      onclick={() => {
+                        sortBy = 'date';
+                        showFilterDropdown = false;
+                      }}
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {sortBy === 'date' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      role="menuitem"
+                    >
+                      <span>Date</span>
+                      {#if sortBy === 'date'}
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                        </svg>
+                      {/if}
+                    </button>
+                    <button
+                      type="button"
+                      onclick={() => {
+                        sortBy = 'chunks';
+                        showFilterDropdown = false;
+                      }}
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {sortBy === 'chunks' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      role="menuitem"
+                    >
+                      <span>Chunks</span>
+                      {#if sortBy === 'chunks'}
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
+                        </svg>
+                      {/if}
+                    </button>
+                  </div>
+                {/if}
+              </div>
+
+              <!-- Sort Order Toggle -->
+              <button
+                onclick={() => sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'}
+                class="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center justify-center"
+                title={sortOrder === 'asc' ? 'Ascending' : 'Descending'}
+              >
+                {#if sortOrder === 'asc'}
+                  <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
+                  </svg>
+                {:else}
+                  <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h13M3 8h9m-9 4h9m5 4v-6m0 0l-4 4m4-4l4 4" />
+                  </svg>
+                {/if}
+              </button>
+            </div>
+          </div>
+        {/if}
+
+        <!-- Documents List -->
+        <div class="flex-1 overflow-y-auto p-6">
+          {#if isLoadingDocuments}
           <div class="flex items-center justify-center py-8">
             <svg class="animate-spin h-6 w-6 text-[#443C68]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -351,9 +628,13 @@
           <div class="text-center py-8 text-gray-500 text-sm">
             No documents indexed yet
           </div>
+        {:else if filteredAndSortedDocuments.length === 0}
+          <div class="text-center py-8 text-gray-500 text-sm">
+            No documents match your filters
+          </div>
         {:else}
           <div class="space-y-2">
-            {#each indexedDocuments as doc}
+            {#each filteredAndSortedDocuments as doc}
               <button
                 onclick={() => onDocumentClick(doc)}
                 class="w-full text-left bg-white p-3 rounded-lg border border-gray-200 hover:border-[#443C68] transition-colors cursor-pointer"
@@ -392,7 +673,8 @@
               </button>
             {/each}
           </div>
-        {/if}
+          {/if}
+        </div>
       </div>
     </div>
   {/if}

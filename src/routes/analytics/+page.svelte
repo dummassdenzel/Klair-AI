@@ -12,6 +12,14 @@
   let refreshInterval: any = null;
   let timeWindow = 60; // minutes
 
+  // Type definition for success stats
+  type SuccessStats = {
+    success_rate: number;
+    total: number;
+    success: number;
+    failed: number;
+  };
+
   async function loadAnalytics() {
     try {
       loading = true;
@@ -111,7 +119,7 @@
         <button
           on:click={loadAnalytics}
           disabled={loading}
-          class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
+          class="px-4 py-2 bg-[#443C68] text-white rounded-lg hover:bg-[#3A3457] disabled:opacity-50 text-sm"
         >
           {loading ? 'Loading...' : 'Refresh'}
         </button>
@@ -126,7 +134,7 @@
 
     {#if loading && !queryPatterns}
       <div class="text-center py-12">
-        <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#443C68]"></div>
         <p class="mt-2 text-gray-600">Loading analytics...</p>
       </div>
     {:else if queryPatterns}
@@ -141,7 +149,7 @@
               <h3 class="text-sm font-medium text-gray-700 mb-3">Top Keywords</h3>
               <div class="flex flex-wrap gap-2">
                 {#each queryPatterns.common_keywords.slice(0, 15) as item}
-                  <div class="px-3 py-1 bg-blue-50 text-blue-700 rounded-full text-sm font-medium">
+                  <div class="px-3 py-1 bg-[#443C68] text-white rounded-full text-sm font-medium">
                     {item.keyword} ({item.count})
                   </div>
                 {/each}
@@ -196,9 +204,9 @@
             <h3 class="text-sm font-medium text-gray-700 mb-3">Peak Query Hours</h3>
             <div class="flex flex-wrap gap-3">
               {#each Object.entries(queryPatterns.peak_hours).slice(0, 5) as [hour, count]}
-                <div class="px-4 py-2 bg-purple-50 rounded-lg">
-                  <span class="text-sm text-purple-700 font-medium">{hour}:00</span>
-                  <span class="ml-2 text-sm font-semibold text-purple-900">{count} queries</span>
+                <div class="px-4 py-2 bg-[#443C68] rounded-lg">
+                  <span class="text-sm text-white font-medium">{hour}:00</span>
+                  <span class="ml-2 text-sm font-semibold text-white">{count} queries</span>
                 </div>
               {/each}
             </div>
@@ -212,28 +220,28 @@
           <h2 class="text-xl font-semibold text-gray-900 mb-4">Retrieval Effectiveness</h2>
           
           <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div class="p-4 bg-blue-50 rounded-lg">
-              <p class="text-sm text-gray-600 mb-1">Avg Retrieval Count</p>
-              <p class="text-2xl font-bold text-blue-900">
+            <div class="p-4 bg-[#443C68] rounded-lg">
+              <p class="text-sm text-white/80 mb-1">Avg Retrieval Count</p>
+              <p class="text-2xl font-bold text-white">
                 {retrievalEffectiveness.average_retrieval_count?.toFixed(1) || 0}
               </p>
-              <p class="text-xs text-gray-500 mt-1">chunks per query</p>
+              <p class="text-xs text-white/60 mt-1">chunks per query</p>
             </div>
             
-            <div class="p-4 bg-green-50 rounded-lg">
-              <p class="text-sm text-gray-600 mb-1">Avg Sources</p>
-              <p class="text-2xl font-bold text-green-900">
+            <div class="p-4 bg-[#443C68] rounded-lg">
+              <p class="text-sm text-white/80 mb-1">Avg Sources</p>
+              <p class="text-2xl font-bold text-white">
                 {retrievalEffectiveness.average_sources_count?.toFixed(1) || 0}
               </p>
-              <p class="text-xs text-gray-500 mt-1">sources shown</p>
+              <p class="text-xs text-white/60 mt-1">sources shown</p>
             </div>
             
-            <div class="p-4 bg-purple-50 rounded-lg">
-              <p class="text-sm text-gray-600 mb-1">Re-rank Usage</p>
-              <p class="text-2xl font-bold text-purple-900">
+            <div class="p-4 bg-[#443C68] rounded-lg">
+              <p class="text-sm text-white/80 mb-1">Re-rank Usage</p>
+              <p class="text-2xl font-bold text-white">
                 {formatPercent(retrievalEffectiveness.rerank_usage_rate || 0)}
               </p>
-              <p class="text-xs text-gray-500 mt-1">of queries</p>
+              <p class="text-xs text-white/60 mt-1">of queries</p>
             </div>
           </div>
 
@@ -243,7 +251,7 @@
               <div class="flex items-center gap-2">
                 <div class="flex-1 bg-gray-200 rounded-full h-2">
                   <div
-                    class="bg-blue-600 h-2 rounded-full"
+                    class="bg-[#443C68] h-2 rounded-full"
                     style="width: {Math.min(retrievalEffectiveness.retrieval_to_sources_ratio, 100)}%"
                   ></div>
                 </div>
@@ -333,23 +341,24 @@
               <h3 class="text-sm font-medium text-gray-700 mb-3">Success Rate by Query Type</h3>
               <div class="space-y-3">
                 {#each Object.entries(querySuccess.success_by_type) as [type, stats]}
+                  {@const typedStats = stats as SuccessStats}
                   <div>
                     <div class="flex items-center justify-between mb-1">
                       <span class="text-sm text-gray-700 capitalize">{type}</span>
-                      <span class="text-sm font-semibold {stats.success_rate >= 95 ? 'text-green-600' : stats.success_rate >= 80 ? 'text-yellow-600' : 'text-red-600'}">
-                        {formatPercent(stats.success_rate)}
+                      <span class="text-sm font-semibold {typedStats.success_rate >= 95 ? 'text-green-600' : typedStats.success_rate >= 80 ? 'text-yellow-600' : 'text-red-600'}">
+                        {formatPercent(typedStats.success_rate)}
                       </span>
                     </div>
                     <div class="flex-1 bg-gray-200 rounded-full h-2">
                       <div
-                        class="{stats.success_rate >= 95 ? 'bg-green-600' : stats.success_rate >= 80 ? 'bg-yellow-600' : 'bg-red-600'} h-2 rounded-full"
-                        style="width: {stats.success_rate}%"
+                        class="{typedStats.success_rate >= 95 ? 'bg-green-600' : typedStats.success_rate >= 80 ? 'bg-yellow-600' : 'bg-red-600'} h-2 rounded-full"
+                        style="width: {typedStats.success_rate}%"
                       ></div>
                     </div>
                     <div class="flex items-center gap-4 mt-1 text-xs text-gray-500">
-                      <span>Total: {stats.total}</span>
-                      <span>Success: {stats.success}</span>
-                      <span>Failed: {stats.failed}</span>
+                      <span>Total: {typedStats.total}</span>
+                      <span>Success: {typedStats.success}</span>
+                      <span>Failed: {typedStats.failed}</span>
                     </div>
                   </div>
                 {/each}
@@ -378,23 +387,23 @@
           <h2 class="text-xl font-semibold text-gray-900 mb-4">Document Usage</h2>
           
           <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div class="p-4 bg-indigo-50 rounded-lg">
-              <p class="text-sm text-gray-600 mb-1">Document Queries</p>
-              <p class="text-2xl font-bold text-indigo-900">
+            <div class="p-4 bg-[#443C68] rounded-lg">
+              <p class="text-sm text-white/80 mb-1">Document Queries</p>
+              <p class="text-2xl font-bold text-white">
                 {documentUsage.total_document_queries || 0}
               </p>
             </div>
             
-            <div class="p-4 bg-teal-50 rounded-lg">
-              <p class="text-sm text-gray-600 mb-1">Unique Sessions</p>
-              <p class="text-2xl font-bold text-teal-900">
+            <div class="p-4 bg-[#443C68] rounded-lg">
+              <p class="text-sm text-white/80 mb-1">Unique Sessions</p>
+              <p class="text-2xl font-bold text-white">
                 {documentUsage.unique_sessions_using_documents || 0}
               </p>
             </div>
             
-            <div class="p-4 bg-amber-50 rounded-lg">
-              <p class="text-sm text-gray-600 mb-1">Avg Response Time</p>
-              <p class="text-2xl font-bold text-amber-900">
+            <div class="p-4 bg-[#443C68] rounded-lg">
+              <p class="text-sm text-white/80 mb-1">Avg Response Time</p>
+              <p class="text-2xl font-bold text-white">
                 {formatTime(documentUsage.average_response_time_for_document_queries || 0)}
               </p>
             </div>
