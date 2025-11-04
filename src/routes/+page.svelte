@@ -155,6 +155,39 @@
   <title>Klair AI - Chat Interface</title>
 </svelte:head>
 
+<!-- Top Navigation -->
+<div class="bg-white px-6 py-4 absolute top-3 right-5 z-10">
+  <div class="flex items-center gap-4">
+    <div class="text-sm text-[#37352F] bg-[#F7F7F7] px-4 py-2 rounded-lg flex items-center gap-2">
+      {#if $systemStatus?.directory_set}
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+        </svg>  
+        /{$systemStatus.current_directory?.split("\\").pop()}
+      {:else}
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+        </svg> 
+        No directory set
+      {/if}
+    </div>
+
+    {#if $systemStatus?.directory_set}
+      <button
+        type="button"
+        onclick={() => {
+          // Dispatch event to layout to open modal
+          window.dispatchEvent(new CustomEvent('openDirectoryModalFromLayout'));
+        }}
+        class="px-6 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+        aria-label="Change document directory"
+      >
+        Change Directory
+      </button>
+    {/if}
+  </div>
+</div>
+
 <!-- Main Chat Area -->
 <div class="flex-1 flex flex-col bg-white min-h-0">
   {#if $currentChatSession}
@@ -257,7 +290,7 @@
                   <!-- Header - only interactive if there are more than 3 sources -->
                   {#if hasMoreSources}
                     <button
-                      on:click={() => {
+                      onclick={() => {
                         expandedSources[message.id] = !isExpanded;
                         expandedSources = { ...expandedSources };
                       }}
@@ -366,7 +399,7 @@
                         <!-- Show more button as inline chip -->
                         {#if hasMoreSources && !isExpanded}
                           <button
-                            on:click={() => {
+                            onclick={() => {
                               expandedSources[message.id] = true;
                               expandedSources = { ...expandedSources };
                             }}
@@ -422,7 +455,7 @@
               rows="1"
               class="w-full px-6 py-4 border border-gray-200 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent text-[#37352F] placeholder-gray-400"
               style="min-height: 56px; max-height: 120px;"
-              on:keydown={(e) => {
+              onkeydown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   const input = e.target as HTMLTextAreaElement;
@@ -438,7 +471,7 @@
           </div>
     
           <button
-            on:click={() => {
+            onclick={() => {
               const input = document.getElementById(
                 "chat-input",
               ) as HTMLTextAreaElement;

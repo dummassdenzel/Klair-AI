@@ -89,8 +89,8 @@
   }
 </script>
 
-<div class="rag-analytics-dashboard p-6 bg-gray-50 min-h-screen">
-  <div class="max-w-7xl mx-auto">
+<div class="rag-analytics-dashboard p-6 bg-white min-h-screen">
+  <div class="m-10">
     <!-- Header -->
     <div class="mb-6 flex items-center justify-between">
       <div>
