@@ -7,6 +7,7 @@
     chatHistory,
     isChatLoading,
     apiActions,
+    isIndexingInProgress,
   } from "$lib/stores/api";
   import type { ChatMessage } from "$lib/api/types";
 
@@ -50,6 +51,11 @@
   async function handleSendMessage(event: CustomEvent<{ message: string }>) {
     const { message } = event.detail;
     if (!message.trim()) return;
+
+    // Don't allow sending messages while indexing
+    if ($isIndexingInProgress) {
+      return;
+    }
 
     // Create or get current chat session
     let session = $currentChatSession;
@@ -148,13 +154,13 @@
   // Watch for session changes
   $: if (!$currentChatSession && messages.length > 0) {
     messages = [];
-  }
-</script>
-
-<svelte:head>
+    }
+  </script>
+  
+  <svelte:head>
   <title>Klair AI - Chat Interface</title>
-</svelte:head>
-
+  </svelte:head>
+  
 <!-- Top Navigation -->
 <div class="bg-white px-6 py-4 absolute top-3 right-5 z-10">
   <div class="flex items-center gap-4">
@@ -212,9 +218,9 @@
       <p class="text-gray-600">
         Start a new conversation about your documents
       </p>
-    </div>
-  {/if}
-
+        </div>
+      {/if}
+  
   <!-- Messages Container -->
   <div class="flex-1 overflow-y-auto p-8 space-y-6">
     {#if messages.length === 0}
@@ -246,9 +252,9 @@
                 {new Date(message.timestamp).toLocaleTimeString()}
               </div>
             </div>
-          </div>
-        {/if}
-
+        </div>
+      {/if}
+  
         <!-- AI Response -->
         {#if message.ai_response}
           <div class="flex justify-start">
@@ -355,8 +361,8 @@
                               class="text-xs font-bold text-[#443C68] uppercase"
                             >
                               {source.file_type || "DOC"}
-                            </span>
-                          </div>
+              </span>
+            </div>
                           <div class="flex-1 min-w-0">
                             <div
                               class="text-sm font-medium text-[#37352F] truncate mb-1"
@@ -392,8 +398,8 @@
                           </span>
                           <span class="text-gray-500">
                             {(source.relevance_score * 100).toFixed(0)}%
-                          </span>
-                        </div>
+              </span>
+            </div>
                       {/each}
                       
                         <!-- Show more button as inline chip -->
@@ -441,21 +447,46 @@
             </div>
           </div>
         {/if}
-      {/if}
-    </div>
+        {/if}
+      </div>
   
     <!-- Chat Input -->
     <div class="border-t border-gray-100 bg-white p-8 flex-shrink-0">
       <div class="max-w-4xl mx-auto">
+        {#if $isIndexingInProgress}
+          <!-- Indexing Message -->
+          <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4">
+            <div class="flex items-center gap-3">
+              <svg class="animate-spin h-5 w-5 text-blue-600 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <div class="flex-1">
+                <p class="text-sm font-medium text-blue-900">
+                  Documents are being indexed...
+                </p>
+                <p class="text-xs text-blue-700 mt-1">
+                  Please wait while we process your documents. Chat will be available once indexing is complete.
+                </p>
+              </div>
+            </div>
+          </div>
+        {/if}
+        
         <div class="flex items-end gap-4">
           <div class="flex-1">
             <textarea
               id="chat-input"
-              placeholder="Ask me anything about your documents..."
+              placeholder={$isIndexingInProgress ? "Please wait while documents are being indexed..." : "Ask me anything about your documents..."}
               rows="1"
-              class="w-full px-6 py-4 border border-gray-200 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent text-[#37352F] placeholder-gray-400"
+              disabled={$isIndexingInProgress}
+              class="w-full px-6 py-4 border border-gray-200 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent text-[#37352F] placeholder-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
               style="min-height: 56px; max-height: 120px;"
               onkeydown={(e) => {
+                if ($isIndexingInProgress) {
+                  e.preventDefault();
+                  return;
+                }
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   const input = e.target as HTMLTextAreaElement;
@@ -472,6 +503,7 @@
     
           <button
             onclick={() => {
+              if ($isIndexingInProgress) return;
               const input = document.getElementById(
                 "chat-input",
               ) as HTMLTextAreaElement;
@@ -482,7 +514,7 @@
                 input.value = "";
               }
             }}
-            disabled={$isChatLoading}
+            disabled={$isChatLoading || $isIndexingInProgress}
             class="px-8 py-4 bg-[#443C68] text-white rounded-2xl hover:bg-[#3A3457] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-3 font-medium"
           >
             <svg
@@ -503,7 +535,11 @@
         </div>
     
         <div class="text-xs text-gray-400 mt-3 text-center">
-          Press Enter to send, Shift+Enter for new line
+          {#if $isIndexingInProgress}
+            Indexing in progress... Chat will be available shortly
+          {:else}
+            Press Enter to send, Shift+Enter for new line
+          {/if}
         </div>
       </div>
     </div>

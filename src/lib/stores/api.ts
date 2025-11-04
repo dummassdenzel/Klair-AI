@@ -10,6 +10,7 @@ export const error = writable<string | null>(null);
 export const currentChatSession = writable<ChatSession | null>(null);
 export const chatHistory = writable<ChatSession[]>([]);
 export const isChatLoading = writable(false);
+export const isIndexingInProgress = writable(false);
 
 // Document State Store
 export const documentStats = writable<DocumentStats | null>(null);

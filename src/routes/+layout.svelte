@@ -10,6 +10,7 @@
     systemStatus,
     currentChatSession,
     chatHistory,
+    isIndexingInProgress as isIndexingInProgressStore,
   } from '$lib/stores/api';
   import DirectorySelectionModal from '$lib/components/DirectorySelectionModal.svelte';
 
@@ -84,6 +85,7 @@
       
       // Auto-refresh documents as they're being indexed
       isIndexingInProgress = true;
+      isIndexingInProgressStore.set(true);
       let refreshCount = 0;
       const maxRefreshes = 15;
       let previousCount = indexedDocuments.length;
@@ -99,6 +101,7 @@
         
         if (refreshCount >= maxRefreshes || (!hasNewDocs && refreshCount > 3)) {
           isIndexingInProgress = false;
+          isIndexingInProgressStore.set(false);
           clearInterval(refreshInterval);
         }
       }, 2000);
