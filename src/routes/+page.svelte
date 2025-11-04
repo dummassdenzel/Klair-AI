@@ -8,181 +8,59 @@
     isChatLoading,
     apiActions,
   } from "$lib/stores/api";
-  import { createApiRequest } from "$lib/utils/api";
-  import type { ChatRequest, ChatMessage } from "$lib/api/types";
-  import DirectorySelectionModal from "$lib/components/DirectorySelectionModal.svelte";
+  import type { ChatMessage } from "$lib/api/types";
 
   let messages: ChatMessage[] = [];
-  let isSettingDirectory = false;
-  let showDirectoryModal = false;
-  let indexedDocuments: any[] = [];
-  let isLoadingDocuments = false;
-  let showDocumentsPanel = false;
-  let isIndexingInProgress = false;
-  let isInitializing = true; // Track initialization state
-  let hasAutoOpenedModal = false; // Track if we've auto-opened the modal on initial load
-  let openDropdownId: number | null = null; // Track which session's dropdown is open
-  
-  // Track expanded state for each message's sources
   let expandedSources: Record<number, boolean> = {};
-  
-  let userCancelledModal = false; // Track if user manually cancelled the modal
-  
-  // Reactive statement to ensure modal shows when needed (only on initial load)
-  $: {
-    // If system status is loaded and no directory is set, auto-open modal once on initial load
-    // But don't auto-open if user has manually cancelled
-    // After that, let user control the modal manually
-    if (!isInitializing && !hasAutoOpenedModal && !userCancelledModal && $systemStatus && !$systemStatus.directory_set && !showDirectoryModal) {
-      showDirectoryModal = true;
-      hasAutoOpenedModal = true; // Mark that we've auto-opened once
+
+  onMount(() => {
+    // Load messages if session exists
+    if ($currentChatSession) {
+      loadSession($currentChatSession);
     }
-    // Reset user cancelled flag if directory gets set (so modal can auto-open again if directory is cleared)
-    if ($systemStatus?.directory_set) {
-      userCancelledModal = false;
-    }
-  }
-  
-    onMount(() => {
-    // Initialize async operations
-    (async () => {
-      console.log(" Component mounted, testing connection...");
-      await testConnection();
-      console.log(" Connection tested, checking directory...");
-      
-      // Show modal on startup if no directory is set
-      if (!$systemStatus?.directory_set) {
-        showDirectoryModal = true;
-      } else {
-        await loadChatHistory();
-        await loadIndexedDocuments();
-      }
-      
-      isInitializing = false; // Mark initialization as complete
-      console.log("🔍 Initialization complete");
-    })();
     
-    // Add click outside handler for dropdowns
-    window.addEventListener('click', handleWindowClick);
+    // Listen for session load events from layout
+    window.addEventListener('loadSession', handleSessionLoad as EventListener);
     
-    // Return cleanup function (synchronous)
     return () => {
-      window.removeEventListener('click', handleWindowClick);
+      window.removeEventListener('loadSession', handleSessionLoad as EventListener);
     };
-    });
-  
-    async function testConnection() {
-    console.log(" Testing connection...");
-    await createApiRequest(async () => {
-          const status = await apiService.getStatus();
-      console.log("🔍 Status:", status);
-          systemStatus.set(status);
-          return status;
-    }, "Backend connection test");
-    }
-  
-    async function handleDirectorySelect(event: CustomEvent<{ directoryPath: string }>) {
-    const directoryPath = event.detail.directoryPath;
-    console.log("🔍 Setting directory from modal...", directoryPath);
-      
-      if (!directoryPath.trim()) return;
-      
-      isSettingDirectory = true;
-      try {
-          const result = await apiService.setDirectory(directoryPath);
-        console.log("🔍 Directory set:", result);
-        
-        // Refresh status, reload chat history, and load indexed documents
-          await testConnection();
-        await loadChatHistory();
-        await loadIndexedDocuments();
-        
-        // Hide modal after successful set
-        showDirectoryModal = false;
-        
-        // Auto-refresh documents as they're being indexed in background
-        // Check every 2 seconds for up to 30 seconds
-        isIndexingInProgress = true;
-        let refreshCount = 0;
-        const maxRefreshes = 15;
-        let previousCount = indexedDocuments.length;
-        
-        const refreshInterval = setInterval(async () => {
-          refreshCount++;
-          console.log(`🔄 Auto-refreshing documents (${refreshCount}/${maxRefreshes})...`);
-          await loadIndexedDocuments();
-          
-          // Stop if no new documents for 2 consecutive checks, or max reached
-          const hasNewDocs = indexedDocuments.length > previousCount;
-          if (hasNewDocs) {
-            previousCount = indexedDocuments.length;
-          }
-          
-          if (refreshCount >= maxRefreshes || (!hasNewDocs && refreshCount > 3)) {
-            console.log(`✅ Auto-refresh complete. Found ${indexedDocuments.length} documents.`);
-            isIndexingInProgress = false;
-            clearInterval(refreshInterval);
-          }
-        }, 2000);
-        
-      } catch (error) {
-        console.error("❌ Failed to set directory:", error);
-        // Keep modal open on error so user can try again
-      } finally {
-        isSettingDirectory = false;
+  });
+
+  function handleSessionLoad(event: CustomEvent) {
+    loadSession(event.detail);
+  }
+
+  async function loadSession(session: any) {
+    try {
+      currentChatSession.set(session);
+      const response = await apiService.getChatMessages(session.id);
+      const sessionMessages = response.messages || [];
+      if (Array.isArray(sessionMessages)) {
+        messages = sessionMessages;
+      } else {
+        messages = [];
       }
-  }
-
-  async function loadChatHistory() {
-    console.log("🔍 Loading chat history...");
-    try {
-      const sessions = await apiService.getChatSessions();
-      console.log("🔍 Chat sessions loaded:", sessions);
-      chatHistory.set(sessions);
     } catch (error) {
-      console.error("❌ Failed to load chat history:", error);
-    }
-  }
-
-  async function loadIndexedDocuments() {
-    console.log("🔍 Loading indexed documents...");
-    isLoadingDocuments = true;
-    try {
-      const response = await apiService.searchDocuments({ limit: 100 });
-      console.log("🔍 Documents response:", response);
-      // Backend returns nested structure: response.documents.documents
-      indexedDocuments = response.documents?.documents || [];
-      console.log("🔍 Indexed documents:", indexedDocuments);
-    } catch (error) {
-      console.error("❌ Failed to load documents:", error);
-      indexedDocuments = [];
-    } finally {
-      isLoadingDocuments = false;
+      console.error("❌ Failed to load session:", error);
+      messages = [];
     }
   }
 
   async function handleSendMessage(event: CustomEvent<{ message: string }>) {
-    console.log("🔍 handleSendMessage called with:", event.detail);
     const { message } = event.detail;
-
     if (!message.trim()) return;
-
-    console.log("🔍 Creating/checking chat session...");
 
     // Create or get current chat session
     let session = $currentChatSession;
     if (!session) {
-      console.log("🔍 No existing session, creating new one...");
       session = await apiService.createChatSession(
         $systemStatus?.current_directory || "",
         `Chat about: ${message.substring(0, 50)}...`,
       );
-      console.log("🔍 New session created:", session);
       currentChatSession.set(session);
       await loadChatHistory();
     }
-
-    console.log("🔍 Adding user message to UI...");
 
     // Add user message to UI immediately
     const userMessage: ChatMessage = {
@@ -196,33 +74,25 @@
     };
 
     messages = [...messages, userMessage];
-    console.log("🔍 Messages updated:", messages);
-
-    // Set loading state
     apiActions.setChatLoading(true);
 
     try {
-      console.log(" Sending message to backend...");
       const response = await apiService.sendChatMessage({
         session_id: session.id,
         message: message,
       });
-      console.log("🔍 Backend response:", response);
 
-      // Check if the AI response is an error message
       if (
         response.message &&
         response.message.includes(
           "couldn't generate a response due to an error",
         )
       ) {
-        console.warn("⚠️ AI returned error response, treating as failure");
         throw new Error(
           "AI service temporarily unavailable. Please try again.",
         );
       }
 
-      // Update the user message with AI response
       const updatedMessage: ChatMessage = {
         ...userMessage,
         ai_response: response.message,
@@ -234,21 +104,16 @@
         msg.id === userMessage.id ? updatedMessage : msg,
       );
 
-      // Update session title if it's the first message
       if (messages.length === 2) {
-        // User message + AI response
         const newTitle = `Chat about: ${message.substring(0, 50)}...`;
         await apiService.updateChatSessionTitle(session.id, newTitle);
         session.title = newTitle;
         currentChatSession.set(session);
       }
       
-      // Always reload chat history to update message counts
       await loadChatHistory();
     } catch (error) {
       console.error("❌ Failed to send message:", error);
-
-      // Show user-friendly error message
       const errorMessage: ChatMessage = {
         id: Date.now(),
         session_id: session.id,
@@ -258,8 +123,6 @@
         response_time: 0,
         timestamp: new Date().toISOString(),
       };
-
-      // Replace the user message with error message
       messages = messages.map((msg) =>
         msg.id === userMessage.id ? errorMessage : msg,
       );
@@ -268,679 +131,347 @@
     }
   }
 
-  async function handleUpdateTitle(event: CustomEvent<{ title: string }>) {
-    if (!$currentChatSession) return;
-
-    await createApiRequest(async () => {
-      const updatedSession = await apiService.updateChatSessionTitle(
-        $currentChatSession.id,
-        event.detail.title,
-      );
-      currentChatSession.set(updatedSession);
-      await loadChatHistory();
-      return updatedSession;
-    }, "Update session title");
-  }
-
-  async function handleDeleteSession(sessionId?: number) {
-    const idToDelete = sessionId || $currentChatSession?.id;
-    if (!idToDelete) return;
-
-    await createApiRequest(async () => {
-      await apiService.deleteChatSession(idToDelete);
-      
-      // If deleting the current session, clear it
-      if ($currentChatSession?.id === idToDelete) {
-        currentChatSession.set(null);
-        messages = [];
-      }
-      
-      await loadChatHistory();
-      openDropdownId = null; // Close dropdown after deletion
-      return true;
-    }, "Delete session");
-  }
-
-  function toggleDropdown(sessionId: number, event: Event) {
-    event.stopPropagation(); // Prevent triggering the session click
-    openDropdownId = openDropdownId === sessionId ? null : sessionId;
-  }
-
-  function closeDropdown() {
-    openDropdownId = null;
-  }
-
-  // Close dropdown when clicking outside
-  function handleWindowClick(event: MouseEvent) {
-    const target = event.target as HTMLElement;
-    if (!target.closest('.dropdown-container')) {
-      closeDropdown();
+  async function loadChatHistory() {
+    try {
+      const sessions = await apiService.getChatSessions();
+      chatHistory.set(sessions);
+    } catch (error) {
+      console.error("❌ Failed to load chat history:", error);
     }
   }
 
-  async function startNewChat() {
-    console.log("🔍 Starting new chat...");
+  function startNewChat() {
     currentChatSession.set(null);
     messages = [];
   }
 
-  async function loadSession(session: any) {
-    console.log(" Loading session:", session);
-    try {
-      currentChatSession.set(session);
-      console.log("🔍 Current session set, loading messages...");
+  // Watch for session changes
+  $: if (!$currentChatSession && messages.length > 0) {
+    messages = [];
+  }
+</script>
 
-      const response = await apiService.getChatMessages(session.id);
-      console.log("🔍 Raw API response:", response);
-
-      // Extract messages from nested response structure
-      const sessionMessages = response.messages || [];
-      console.log(" Extracted messages:", sessionMessages);
-      console.log("🔍 Messages count:", sessionMessages.length);
-
-      // Validate and filter messages before updating UI
-      if (Array.isArray(sessionMessages)) {
-        console.log(" Messages is array, updating UI...");
-        messages = sessionMessages;
-        console.log(
-          "🔍 Messages updated successfully, count:",
-          messages.length,
-        );
-      } else {
-        console.error("❌ Messages is not an array:", sessionMessages);
-        messages = [];
-      }
-    } catch (error) {
-      console.error("❌ Failed to load session:", error);
-      messages = [];
-    }
-    }
-  </script>
-  
-  <svelte:head>
+<svelte:head>
   <title>Klair AI - Chat Interface</title>
-  <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
-    rel="stylesheet"
-  />
-  </svelte:head>
-  
-<div class="h-screen bg-white font-['Inter'] overflow-hidden flex flex-col">
-  <!-- Directory Selection Modal -->
-  <DirectorySelectionModal
-    bind:isOpen={showDirectoryModal}
-    isSetting={isSettingDirectory}
-    allowCancel={$systemStatus?.directory_set || false}
-    on:select={handleDirectorySelect}
-    on:cancel={() => {
-      showDirectoryModal = false;
-      userCancelledModal = true; // Mark that user manually cancelled
-    }}
-  />
+</svelte:head>
 
-  <!-- Block main content if no directory is set and modal is not open -->
-  <!-- Only show overlay after initialization is complete to avoid race conditions -->
-  {#if !isInitializing && !$systemStatus?.directory_set && !showDirectoryModal}
-    <div class="fixed inset-0 bg-black bg-opacity-20 z-40"></div>
+<!-- Main Chat Area -->
+<div class="flex-1 flex flex-col bg-white min-h-0">
+  {#if $currentChatSession}
+    <!-- Session Header -->
+    <div class="bg-white px-8 py-6 flex-shrink-0">
+      <div class="flex items-center justify-between">
+        <div class="flex-1 min-w-0">
+          <h2 class="text-xl font-semibold text-[#37352F] truncate">
+            {$currentChatSession.title}
+          </h2>
+          <div class="text-sm text-gray-500 mt-1">
+            Created {new Date(
+              $currentChatSession.created_at,
+            ).toLocaleDateString()}
+          </div>
+        </div>
+      </div>
+    </div>
+  {:else}
+    <div class="bg-white px-8 py-6 flex-shrink-0">
+      <h2 class="text-xl font-semibold text-[#37352F]">New Chat</h2>
+      <p class="text-gray-600">
+        Start a new conversation about your documents
+      </p>
+    </div>
   {/if}
 
-  <!-- Top Navigation -->
-  <div class="bg-white px-6 py-4 absolute top-3 right-5 z-10">
-
-      <!-- Directory Status and Controls -->
-        <div class="flex items-center gap-4">
-        <div class="text-sm text-[#37352F] bg-[#F7F7F7] px-4 py-2 rounded-lg flex items-center gap-2">
-          {#if $systemStatus?.directory_set}
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-          </svg>  
-          /{$systemStatus.current_directory?.split("\\").pop()}
-          {:else}
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-          </svg> 
-           No directory set
-          {/if}
+  <!-- Messages Container -->
+  <div class="flex-1 overflow-y-auto p-8 space-y-6">
+    {#if messages.length === 0}
+      <div class="text-center text-gray-500 mt-20">
+        <div class="flex items-center justify-center mx-auto mb-6">
+          <img src="/klair.ai-sm.png" class="w-16 h-16" alt="User avatar" />
         </div>
-
-        {#if $systemStatus?.directory_set}
-          <button
-            type="button"
-            on:click={() => {
-              console.log('🔍 Change Directory button clicked');
-              showDirectoryModal = true;
-            }}
-            class="px-6 py-2.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={isSettingDirectory || isInitializing}
-            aria-label="Change document directory"
-          >
-            Change Directory
-          </button>
-      {/if}
-        </div>
-      </div>
-  
-  <div class="flex flex-1 overflow-hidden">
-    <!-- Left Sidebar - Chat History -->
-    <div class="w-80 bg-[#F7F7F7] border-r border-gray-100 flex flex-col pt-10 overflow-hidden flex-shrink-0">
-      
-      <!-- Logo and Title -->
-      <div class="flex justify-center items-center gap-3">
-        <div class="flex items-center space-x-2">
-          <img src="/klair.ai-sm.png" class="w-7 h-7" alt="User avatar" />
-          <span class="font-bold text-xl text-gray-700">klair.ai</span>
-        </div>
-      </div>
-
-      <!-- New Chat Button -->
-      <div class="p-6 border-b border-gray-100">
-        <button
-          on:click={startNewChat}
-          class="w-full px-6 py-3 bg-[#443C68] text-white rounded-xl hover:bg-[#3A3457] transition-colors flex items-center justify-center gap-3 font-medium"
-        >
-          <svg
-            class="w-5 h-5"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              d="M12 4v16m8-8H4"
-            ></path>
-          </svg>
-          New Chat
-        </button>
-      </div>
-  
-      <!-- Chat History -->
-      <div class="flex-1 overflow-y-auto p-6">
-        <h3
-          class="text-sm font-semibold text-[#37352F] mb-4 uppercase tracking-wide"
-        >
-          Recent Chats
+        <h3 class="text-2xl font-semibold text-[#37352F] mb-3">
+          Welcome to Klair AI!
         </h3>
-        <div class="space-y-3">
-          {#each $chatHistory as session}
-            <div
-              class="group relative w-full p-4 rounded-xl hover:bg-white transition-all duration-200 {$currentChatSession?.id ===
-              session.id
-                ? 'bg-white shadow-sm border border-[#443C68]/20'
-                : ''}"
-            >
-              <button
-                on:click={() => {
-                  closeDropdown();
-                  loadSession(session);
-                }}
-                class="w-full text-left"
+        <p class="text-gray-600 text-lg">
+          Start a conversation by asking questions about your documents.
+        </p>
+      </div>
+    {:else}
+      {#each messages as message}
+        <!-- User Message -->
+        {#if message.user_message}
+          <div class="flex justify-end">
+            <div class="max-w-2xl">
+              <div
+                class="bg-[#443C68] text-white px-6 py-4 rounded-2xl rounded-br-md shadow-sm"
               >
-                <div class="text-sm font-medium text-[#37352F] truncate mb-2">
-                  {session.title}
+                <div class="whitespace-pre-wrap text-sm leading-relaxed">
+                  {message.user_message}
                 </div>
-                <div
-                  class="flex items-center justify-between text-xs text-gray-500"
+              </div>
+              <div class="text-xs text-gray-400 mt-2 text-right">
+                {new Date(message.timestamp).toLocaleTimeString()}
+              </div>
+            </div>
+          </div>
+        {/if}
+
+        <!-- AI Response -->
+        {#if message.ai_response}
+          <div class="flex justify-start">
+            <div class="max-w-2xl">
+              <div
+                class="bg-[#F7F7F7] text-[#37352F] px-6 py-4 rounded-2xl rounded-bl-md shadow-sm"
+              >
+                <div class="whitespace-pre-wrap text-sm leading-relaxed">
+                  {message.ai_response}
+                </div>
+              </div>
+
+              <!-- Message Metadata -->
+              <div
+                class="flex items-center gap-4 mt-3 text-xs text-gray-500"
+              >
+                <span
+                  >{new Date(message.timestamp).toLocaleTimeString()}</span
                 >
-                  <span>{new Date(session.created_at).toLocaleDateString()}</span>
+                {#if message.response_time}
                   <span
-                    class="bg-[#443C68]/10 text-[#443C68] px-2.5 py-1 rounded-full font-medium"
+                    class="bg-[#443C68]/10 text-[#443C68] px-2 py-1 rounded-full"
                   >
-                    {session.message_count} message{session.message_count !== 1
-                      ? "s"
-                      : ""}
+                    {message.response_time}s
                   </span>
-                </div>
-              </button>
-              
-              <!-- Triple-dot dropdown button -->
-              <div class="absolute top-3 right-3 dropdown-container">
-                <button
-                  type="button"
-                  on:click={(e) => toggleDropdown(session.id, e)}
-                  class="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                  aria-label="Session options"
-                  aria-expanded={openDropdownId === session.id}
-                >
-                  <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z" />
-                  </svg>
-                </button>
+                {/if}
+              </div>
+
+              <!-- Sources Display -->
+              {#if message.sources && message.sources.length > 0}
+                {@const isExpanded = expandedSources[message.id] ?? false}
+                {@const previewLimit = 3}
+                {@const hasMoreSources = message.sources.length > previewLimit}
+                {@const displayedSources = isExpanded ? message.sources : message.sources.slice(0, previewLimit)}
                 
-                <!-- Dropdown menu -->
-                {#if openDropdownId === session.id}
-                  <div
-                    class="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50"
-                    role="menu"
-                    on:click|stopPropagation
-                  >
+                <div
+                  class="mt-4 p-4 bg-[#443C68]/5 rounded-xl "
+                >
+                  <!-- Header - only interactive if there are more than 3 sources -->
+                  {#if hasMoreSources}
                     <button
-                      type="button"
-                      on:click={(e) => {
-                        e.stopPropagation();
-                        handleDeleteSession(session.id);
+                      on:click={() => {
+                        expandedSources[message.id] = !isExpanded;
+                        expandedSources = { ...expandedSources };
                       }}
-                      class="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors flex items-center gap-2"
-                      role="menuitem"
+                      class="w-full text-sm font-semibold text-[#443C68] mb-3 flex items-center justify-between hover:text-[#3A3457] transition-colors"
                     >
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      <div class="flex text-xs items-center gap-2">
+                        <svg
+                          class="w-4 h-4"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="2"
+                            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                          ></path>
+                        </svg>
+                        <span>Sources ({message.sources.length})</span>
+                      </div>
+                      <svg
+                        class="w-4 h-4 transition-transform {isExpanded ? 'rotate-180' : ''}"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
                       </svg>
-                      Delete
                     </button>
+                  {:else}
+                    <div class="text-sm font-semibold text-[#443C68] mb-3 flex items-center gap-2">
+                      <svg
+                        class="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                        ></path>
+                      </svg>
+                      <span>Sources ({message.sources.length})</span>
+                    </div>
+                  {/if}
+                  
+                  <!-- Sources list -->
+                  {#if hasMoreSources && isExpanded}
+                    <!-- Expanded: Vertical cards with full details -->
+                    <div class="space-y-3">
+                      {#each displayedSources as source}
+                        <div
+                          class="flex items-start gap-3 p-3 bg-white rounded-lg border border-gray-100"
+                        >
+                          <div
+                            class="w-8 h-8 bg-[#443C68]/10 rounded-lg flex items-center justify-center flex-shrink-0"
+                          >
+                            <span
+                              class="text-xs font-bold text-[#443C68] uppercase"
+                            >
+                              {source.file_type || "DOC"}
+                            </span>
+                          </div>
+                          <div class="flex-1 min-w-0">
+                            <div
+                              class="text-sm font-medium text-[#37352F] truncate mb-1"
+                            >
+                              {source.file_path?.split("\\").pop() ||
+                                "Unknown file"}
+                            </div>
+                            <div class="text-xs text-gray-600 mb-2">
+                              Relevance: {(
+                                source.relevance_score * 100
+                              ).toFixed(1)}%
+                            </div>
+                            <div class="text-xs text-gray-500 line-clamp-2">
+                              {source.content_snippet || "No content preview"}
+                            </div>
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  {:else}
+                    <!-- Collapsed or ≤3 sources: Horizontal chips (minimal space) -->
+                    <div class="flex flex-wrap gap-2">
+                      {#each displayedSources as source}
+                        <div
+                          class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white rounded-full border border-gray-200 text-[0.625rem] hover:border-[#443C68] transition-colors cursor-default"
+                          title="{source.file_path?.split('\\').pop()} - {(source.relevance_score * 100).toFixed(1)}% relevance"
+                        >
+                          <span class="font-bold text-[#443C68] uppercase">
+                            {source.file_type || "DOC"}
+                          </span>
+                          <span class="text-[#37352F] font-medium truncate max-w-[200px]">
+                            {source.file_path?.split("\\").pop() || "Unknown"}
+                          </span>
+                          <span class="text-gray-500">
+                            {(source.relevance_score * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                      {/each}
+                      
+                        <!-- Show more button as inline chip -->
+                        {#if hasMoreSources && !isExpanded}
+                          <button
+                            on:click={() => {
+                              expandedSources[message.id] = true;
+                              expandedSources = { ...expandedSources };
+                            }}
+                            class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#443C68] text-white rounded-full border border-[#443C68] text-[0.625rem] hover:bg-[#3A3457] transition-colors font-medium"
+                          >
+                            + {message.sources.length - previewLimit} more
+                          </button>
+                        {/if}
+                      </div>
+                    {/if}
                   </div>
                 {/if}
               </div>
             </div>
-          {/each}
-        </div>
-      </div>
-
-      <!-- Indexed Documents Section -->
-      <div class="border-t border-gray-200 bg-[#F7F7F7]">
-        <button
-          on:click={() => {
-            showDocumentsPanel = !showDocumentsPanel;
-            if (showDocumentsPanel && indexedDocuments.length === 0) {
-              loadIndexedDocuments();
-            }
-          }}
-          class="w-full px-6 py-4 flex items-center justify-between text-sm font-semibold text-[#37352F] hover:bg-gray-100 transition-colors"
-        >
-          <div class="flex items-center gap-2">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-            </svg>
-            <span>INDEXED DOCUMENTS</span>
-            {#if isIndexingInProgress}
-              <span class="flex items-center gap-1 bg-blue-100 text-blue-600 text-xs px-2 py-0.5 rounded-full">
-                <svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                Indexing...
-              </span>
-            {:else if indexedDocuments.length > 0}
-              <span class="bg-[#443C68] text-white text-xs px-2 py-0.5 rounded-full">
-                {indexedDocuments.length}
-              </span>
-            {/if}
-          </div>
-          <svg
-            class="w-4 h-4 transition-transform {showDocumentsPanel ? 'rotate-180' : ''}"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-          </svg>
-        </button>
-
-        {#if showDocumentsPanel}
-          <div class="px-6 pb-6 max-h-80 overflow-y-auto">
-            {#if isLoadingDocuments}
-              <div class="flex items-center justify-center py-8">
-                <svg class="animate-spin h-6 w-6 text-[#443C68]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-              </div>
-            {:else if indexedDocuments.length === 0}
-              <div class="text-center py-8 text-gray-500 text-sm">
-                No documents indexed yet
-              </div>
-            {:else}
-              <div class="space-y-2">
-                {#each indexedDocuments as doc}
-                  <div class="bg-white p-3 rounded-lg border border-gray-200 hover:border-[#443C68] transition-colors">
-                    <div class="flex items-start gap-3">
-                      <div class="flex-shrink-0">
-                        {#if doc.file_type === 'pdf'}
-                          <svg class="w-5 h-5 text-red-500" fill="currentColor" viewBox="0 0 20 20">
-                            <path d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z"></path>
-                          </svg>
-                        {:else if doc.file_type === 'docx'}
-                          <svg class="w-5 h-5 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
-                            <path d="M9 2a2 2 0 00-2 2v8a2 2 0 002 2h6a2 2 0 002-2V6.414A2 2 0 0016.414 5L14 2.586A2 2 0 0012.586 2H9z"></path>
-                          </svg>
-                        {:else}
-                          <svg class="w-5 h-5 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
-                            <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"></path>
-                          </svg>
-                        {/if}
-                      </div>
-                      <div class="flex-1 min-w-0">
-                        <div class="text-sm font-medium text-[#37352F] truncate" title={doc.file_path}>
-                          {doc.file_path?.split('\\').pop() || doc.file_path?.split('/').pop() || 'Unknown'}
-                        </div>
-                        <div class="flex items-center gap-2 mt-1 text-xs text-gray-500">
-                          <span class="uppercase">{doc.file_type}</span>
-                          <span>•</span>
-                          <span>{doc.chunks_count || 0} chunks</span>
-                          {#if doc.file_size}
-                            <span>•</span>
-                            <span>{(doc.file_size / 1024).toFixed(1)} KB</span>
-                          {/if}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </div>
-    </div>
-
-    <!-- Main Chat Area -->
-    <div class="flex-1 flex flex-col bg-white">
-      {#if $currentChatSession}
-        <!-- Session Header -->
-        <div class="bg-white border-b border-gray-100 px-8 py-6">
-          <div class="flex items-center justify-between">
-            <div class="flex-1 min-w-0">
-              <h2 class="text-xl font-semibold text-[#37352F] truncate">
-                {$currentChatSession.title}
-              </h2>
-              <div class="text-sm text-gray-500 mt-1">
-                Created {new Date(
-                  $currentChatSession.created_at,
-                ).toLocaleDateString()}
-              </div>
-            </div>
-          </div>
-        </div>
-      {:else}
-        <div class="bg-white border-b border-gray-100 px-8 py-6">
-          <h2 class="text-xl font-semibold text-[#37352F]">New Chat</h2>
-          <p class="text-gray-600">
-            Start a new conversation about your documents
-          </p>
-            </div>
-      {/if}
-
-      <!-- Messages Container -->
-      <div class="flex-1 overflow-y-auto p-8 space-y-6">
-        {#if messages.length === 0}
-          <div class="text-center text-gray-500 mt-20">
-            <div class="  flex items-center justify-center mx-auto mb-6">
-              <img src="/klair.ai-sm.png" class="w-16 h-16" alt="User avatar" />
-            </div>
-            <h3 class="text-2xl font-semibold text-[#37352F] mb-3">
-              Welcome to Klair AI!
-            </h3>
-            <p class="text-gray-600 text-lg">
-              Start a conversation by asking questions about your documents.
-            </p>
-          </div>
-        {:else}
-          {#each messages as message}
-            <!-- User Message -->
-            {#if message.user_message}
-              <div class="flex justify-end">
-                <div class="max-w-2xl">
-                  <div
-                    class="bg-[#443C68] text-white px-6 py-4 rounded-2xl rounded-br-md shadow-sm"
-                  >
-                    <div class="whitespace-pre-wrap text-sm leading-relaxed">
-                      {message.user_message}
-                    </div>
-                  </div>
-                  <div class="text-xs text-gray-400 mt-2 text-right">
-                    {new Date(message.timestamp).toLocaleTimeString()}
-                  </div>
-                </div>
-              </div>
-            {/if}
-
-            <!-- AI Response -->
-            {#if message.ai_response}
-              <div class="flex justify-start">
-                <div class="max-w-2xl">
-                  <div
-                    class="bg-[#F7F7F7] text-[#37352F] px-6 py-4 rounded-2xl rounded-bl-md shadow-sm"
-                  >
-                    <div class="whitespace-pre-wrap text-sm leading-relaxed">
-                      {message.ai_response}
-                    </div>
-                  </div>
-
-                  <!-- Message Metadata -->
-                  <div
-                    class="flex items-center gap-4 mt-3 text-xs text-gray-500"
-                  >
-                    <span
-                      >{new Date(message.timestamp).toLocaleTimeString()}</span
-                    >
-                    {#if message.response_time}
-                      <span
-                        class="bg-[#443C68]/10 text-[#443C68] px-2 py-1 rounded-full"
-                      >
-                        {message.response_time}s
-                      </span>
-                    {/if}
-                  </div>
-
-                  <!-- Sources Display -->
-                  {#if message.sources && message.sources.length > 0}
-                    {@const isExpanded = expandedSources[message.id] ?? false}
-                    {@const previewLimit = 3}
-                    {@const hasMoreSources = message.sources.length > previewLimit}
-                    {@const displayedSources = isExpanded ? message.sources : message.sources.slice(0, previewLimit)}
-                    
-                    <div
-                      class="mt-4 p-4 bg-[#443C68]/5 rounded-xl "
-                    >
-                      <!-- Header - only interactive if there are more than 3 sources -->
-                      {#if hasMoreSources}
-                        <button
-                          on:click={() => {
-                            expandedSources[message.id] = !isExpanded;
-                            expandedSources = { ...expandedSources };
-                          }}
-                          class="w-full text-sm font-semibold text-[#443C68] mb-3 flex items-center justify-between hover:text-[#3A3457] transition-colors"
-                        >
-                          <div class="flex text-xs items-center gap-2">
-                            <svg
-                              class="w-4 h-4"
-                              fill="none"
-                              stroke="currentColor"
-                              viewBox="0 0 24 24"
-                            >
-                              <path
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                stroke-width="2"
-                                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                              ></path>
-                            </svg>
-                            <span>Sources ({message.sources.length})</span>
-                          </div>
-                          <svg
-                            class="w-4 h-4 transition-transform {isExpanded ? 'rotate-180' : ''}"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-                          </svg>
-                        </button>
-                      {:else}
-                        <div class="text-sm font-semibold text-[#443C68] mb-3 flex items-center gap-2">
-                          <svg
-                            class="w-4 h-4"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              stroke-linecap="round"
-                              stroke-linejoin="round"
-                              stroke-width="2"
-                              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                            ></path>
-                          </svg>
-                          <span>Sources ({message.sources.length})</span>
-                        </div>
-                      {/if}
-                      
-                      <!-- Sources list -->
-                      {#if hasMoreSources && isExpanded}
-                        <!-- Expanded: Vertical cards with full details -->
-                        <div class="space-y-3">
-                          {#each displayedSources as source}
-                            <div
-                              class="flex items-start gap-3 p-3 bg-white rounded-lg border border-gray-100"
-                            >
-                              <div
-                                class="w-8 h-8 bg-[#443C68]/10 rounded-lg flex items-center justify-center flex-shrink-0"
-                              >
-                                <span
-                                  class="text-xs font-bold text-[#443C68] uppercase"
-                                >
-                                  {source.file_type || "DOC"}
-                                </span>
-                              </div>
-                              <div class="flex-1 min-w-0">
-                                <div
-                                  class="text-sm font-medium text-[#37352F] truncate mb-1"
-                                >
-                                  {source.file_path?.split("\\").pop() ||
-                                    "Unknown file"}
-                                </div>
-                                <div class="text-xs text-gray-600 mb-2">
-                                  Relevance: {(
-                                    source.relevance_score * 100
-                                  ).toFixed(1)}%
-                                </div>
-                                <div class="text-xs text-gray-500 line-clamp-2">
-                                  {source.content_snippet || "No content preview"}
-                                </div>
-                              </div>
-                            </div>
-                          {/each}
-                        </div>
-                      {:else}
-                        <!-- Collapsed or ≤3 sources: Horizontal chips (minimal space) -->
-                        <div class="flex flex-wrap gap-2">
-                          {#each displayedSources as source}
-                            <div
-                              class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white rounded-full border border-gray-200 text-[0.625rem] hover:border-[#443C68] transition-colors cursor-default"
-                              title="{source.file_path?.split('\\').pop()} - {(source.relevance_score * 100).toFixed(1)}% relevance"
-                            >
-                              <span class="font-bold text-[#443C68] uppercase">
-                                {source.file_type || "DOC"}
-                              </span>
-                              <span class="text-[#37352F] font-medium truncate max-w-[200px]">
-                                {source.file_path?.split("\\").pop() || "Unknown"}
-                              </span>
-                              <span class="text-gray-500">
-                                {(source.relevance_score * 100).toFixed(0)}%
-                              </span>
-                            </div>
-                          {/each}
-                          
-                          <!-- Show more button as inline chip -->
-                          {#if hasMoreSources && !isExpanded}
-                            <button
-                              on:click={() => {
-                                expandedSources[message.id] = true;
-                                expandedSources = { ...expandedSources };
-                              }}
-                              class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#443C68] text-white rounded-full border border-[#443C68] text-[0.625rem] hover:bg-[#3A3457] transition-colors font-medium"
-                            >
-                              + {message.sources.length - previewLimit} more
-                            </button>
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
-              </div>
-            {/if}
-          {/each}
-
-          <!-- Loading indicator for new message -->
-          {#if $isChatLoading}
-            <div class="flex justify-start">
-              <div class="max-w-2xl">
-                <div
-                  class="bg-[#F7F7F7] text-[#37352F] px-6 py-4 rounded-2xl rounded-bl-md shadow-sm"
-                >
-                  <div class="flex items-center gap-2">
-                    <div
-                      class="w-2 h-2 bg-[#443C68] rounded-full animate-bounce"
-                    ></div>
-                    <div
-                      class="w-2 h-2 bg-[#443C68] rounded-full animate-bounce"
-                      style="animation-delay: 0.1s"
-                    ></div>
-                    <div
-                      class="w-2 h-2 bg-[#443C68] rounded-full animate-bounce"
-                      style="animation-delay: 0.2s"
-                    ></div>
-                  </div>
-                </div>
-              </div>
-            </div>
           {/if}
+        {/each}
+
+        <!-- Loading indicator for new message -->
+        {#if $isChatLoading}
+          <div class="flex justify-start">
+            <div class="max-w-2xl">
+              <div
+                class="bg-[#F7F7F7] text-[#37352F] px-6 py-4 rounded-2xl rounded-bl-md shadow-sm"
+              >
+                <div class="flex items-center gap-2">
+                  <div
+                    class="w-2 h-2 bg-[#443C68] rounded-full animate-bounce"
+                  ></div>
+                  <div
+                    class="w-2 h-2 bg-[#443C68] rounded-full animate-bounce"
+                    style="animation-delay: 0.1s"
+                  ></div>
+                  <div
+                    class="w-2 h-2 bg-[#443C68] rounded-full animate-bounce"
+                    style="animation-delay: 0.2s"
+                  ></div>
+                </div>
+              </div>
+            </div>
+          </div>
         {/if}
-      </div>
+      {/if}
+    </div>
   
-      <!-- Chat Input -->
-      <div class="border-t border-gray-100 bg-white p-8">
-        <div class="max-w-4xl mx-auto">
-          <div class="flex items-end gap-4">
-            <div class="flex-1">
-              <textarea
-                id="chat-input"
-                placeholder="Ask me anything about your documents..."
-                rows="1"
-                class="w-full px-6 py-4 border border-gray-200 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent text-[#37352F] placeholder-gray-400"
-                style="min-height: 56px; max-height: 120px;"
-              />
-        </div>
-  
-        <button
-              on:click={() => {
-                const input = document.getElementById(
-                  "chat-input",
-                ) as HTMLTextAreaElement;
-                if (input && input.value.trim()) {
-                  handleSendMessage({
-                    detail: { message: input.value.trim() },
-                  } as any);
-                  input.value = "";
+    <!-- Chat Input -->
+    <div class="border-t border-gray-100 bg-white p-8 flex-shrink-0">
+      <div class="max-w-4xl mx-auto">
+        <div class="flex items-end gap-4">
+          <div class="flex-1">
+            <textarea
+              id="chat-input"
+              placeholder="Ask me anything about your documents..."
+              rows="1"
+              class="w-full px-6 py-4 border border-gray-200 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent text-[#37352F] placeholder-gray-400"
+              style="min-height: 56px; max-height: 120px;"
+              on:keydown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  const input = e.target as HTMLTextAreaElement;
+                  if (input && input.value.trim()) {
+                    handleSendMessage({
+                      detail: { message: input.value.trim() },
+                    } as any);
+                    input.value = "";
+                  }
                 }
               }}
-              disabled={$isChatLoading}
-              class="px-8 py-4 bg-[#443C68] text-white rounded-2xl hover:bg-[#3A3457] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-3 font-medium"
-            >
-              <svg
-                class="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
-                ></path>
-              </svg>
-              Send
-        </button>
-      </div>
-  
-          <div class="text-xs text-gray-400 mt-3 text-center">
-            Press Enter to send, Shift+Enter for new line
+            ></textarea>
           </div>
+    
+          <button
+            on:click={() => {
+              const input = document.getElementById(
+                "chat-input",
+              ) as HTMLTextAreaElement;
+              if (input && input.value.trim()) {
+                handleSendMessage({
+                  detail: { message: input.value.trim() },
+                } as any);
+                input.value = "";
+              }
+            }}
+            disabled={$isChatLoading}
+            class="px-8 py-4 bg-[#443C68] text-white rounded-2xl hover:bg-[#3A3457] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-3 font-medium"
+          >
+            <svg
+              class="w-5 h-5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+              ></path>
+            </svg>
+            Send
+          </button>
+        </div>
+    
+        <div class="text-xs text-gray-400 mt-3 text-center">
+          Press Enter to send, Shift+Enter for new line
         </div>
       </div>
     </div>
   </div>
-</div>
