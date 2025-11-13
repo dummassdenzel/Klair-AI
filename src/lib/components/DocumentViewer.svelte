@@ -200,7 +200,7 @@
           max-width: 900px;
           margin: 0 auto;
           background: white;
-          font-family: 'Inter', sans-serif;
+          font-family: 'Poppins', sans-serif;
           line-height: 1.6;
           color: #37352F;
         ">
@@ -229,7 +229,7 @@
           max-width: 900px;
           margin: 0 auto;
           background: white;
-          font-family: 'Inter', monospace;
+          font-family: 'Poppins', sans-serif;
           line-height: 1.8;
           color: #37352F;
           white-space: pre-wrap;
