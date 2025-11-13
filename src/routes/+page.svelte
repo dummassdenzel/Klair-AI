@@ -286,20 +286,7 @@
               </div>
 
               <!-- Message Metadata -->
-              <div
-                class="flex items-center gap-4 mt-3 text-xs text-gray-500"
-              >
-                <span
-                  >{new Date(message.timestamp).toLocaleTimeString()}</span
-                >
-                {#if message.response_time}
-                  <span
-                    class="bg-[#443C68]/10 text-[#443C68] px-2 py-1 rounded-full"
-                  >
-                    {message.response_time}s
-                  </span>
-                {/if}
-              </div>
+              
 
               <!-- Sources Display -->
               {#if message.sources && message.sources.length > 0}
@@ -309,7 +296,7 @@
                 {@const displayedSources = isExpanded ? message.sources : message.sources.slice(0, previewLimit)}
                 
                 <div
-                  class="mt-4 p-4 bg-[#443C68]/5 rounded-xl "
+                  class="mt-3 p-4 bg-[#443C68]/5 rounded-xl "
                 >
                   <!-- Header - only interactive if there are more than 3 sources -->
                   {#if hasMoreSources}
@@ -436,6 +423,20 @@
                     {/if}
                   </div>
                 {/if}
+                <div
+                class="flex items-center gap-4 mt-3 text-xs text-gray-500"
+              >
+                <span
+                  >{new Date(message.timestamp).toLocaleTimeString()}</span
+                >
+                {#if message.response_time}
+                  <span
+                    class="bg-[#443C68]/10 text-[#443C68] px-2 py-1 rounded-full"
+                  >
+                    {message.response_time}s
+                  </span>
+                {/if}
+              </div>
               </div>
             </div>
           {/if}
