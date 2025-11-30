@@ -15,6 +15,7 @@ from .file_validator import FileValidator
 from .bm25_service import BM25Service
 from .hybrid_search import HybridSearchService
 from .reranker_service import ReRankingService
+from .filename_trie import FilenameTrie
 from database import DatabaseService
 
 
@@ -59,6 +60,9 @@ class DocumentProcessorOrchestrator:
         # Re-ranking service (cross-encoder for improved relevance)
         self.reranker = ReRankingService(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
         
+        # Filename Trie for fast O(m) filename search
+        self.filename_trie = FilenameTrie()
+        
         # State tracking
         self.file_hashes: Dict[str, str] = {}
         self.file_metadata: Dict[str, FileMetadata] = {}
@@ -95,11 +99,16 @@ class DocumentProcessorOrchestrator:
                         "processing_status": doc.processing_status
                     }
                     self.file_hashes[doc.file_path] = doc.file_hash
+                    
+                    # Rebuild Filename Trie from existing documents
+                    filename = Path(doc.file_path).name
+                    self.filename_trie.add(filename, doc.file_path)
                 
                 indexed_count = sum(1 for doc in docs if doc.processing_status == "indexed")
                 metadata_only_count = sum(1 for doc in docs if doc.processing_status == "metadata_only")
                 logger.info(f"📚 Loaded {len(docs)} documents into memory "
                           f"({indexed_count} indexed, {metadata_only_count} metadata-only)")
+                logger.info(f"📊 Filename Trie rebuilt with {len(docs)} files")
                 break
                 
         except Exception as e:
@@ -124,6 +133,10 @@ class DocumentProcessorOrchestrator:
         # Clear BM25 index
         self.bm25_service.clear()
         logger.info("BM25 index cleared")
+        
+        # Clear Filename Trie
+        self.filename_trie.clear()
+        logger.info("Filename Trie cleared")
         
         # Clear database records
         try:
@@ -219,6 +232,10 @@ class DocumentProcessorOrchestrator:
                     file_size=stat_info.st_size,
                     last_modified=datetime.fromtimestamp(stat_info.st_mtime)
                 )
+                
+                # Add to Filename Trie for fast search
+                filename = path_obj.name
+                self.filename_trie.add(filename, str(file_path))
                 
                 supported_files.append(str(file_path))
                 
@@ -429,6 +446,10 @@ class DocumentProcessorOrchestrator:
         try:
             await self.vector_store.remove_document_chunks(file_path)
             
+            # Remove from Filename Trie
+            filename = Path(file_path).name
+            self.filename_trie.remove(filename, file_path)
+            
             # Clean up tracking
             self.file_hashes.pop(file_path, None)
             self.file_metadata.pop(file_path, None)
@@ -438,9 +459,134 @@ class DocumentProcessorOrchestrator:
         except Exception as e:
             logger.error(f"Error removing document {file_path}: {e}")
     
+    def _is_simple_filename_query(self, question: str) -> bool:
+        """
+        Detect if query is a simple filename-based query that can use Trie.
+        
+        Simple queries:
+        - Contains filename patterns: "TCO", "sales", "invoice"
+        - Contains file type: "PDF files", "DOCX files"
+        - Contains prefix indicators: "files starting with", "files containing"
+        - Simple patterns: "show me X files"
+        
+        Complex queries (need LLM):
+        - Content-based: "files about sales", "documents mentioning revenue"
+        - Negation: "files NOT receipts"
+        - Semantic: "documents from October"
+        """
+        question_lower = question.lower()
+        
+        # Simple filename query indicators
+        filename_indicators = [
+            'files starting with',
+            'files containing',
+            'files with',
+            'show me',
+            'list',
+            'how many',
+            'what files',
+            'which files',
+            'all files',
+            'files ending with',
+            'files that start',
+        ]
+        
+        # File type queries
+        file_type_patterns = [
+            r'\bpdf\s+files?\b',
+            r'\bdocx?\s+files?\b',
+            r'\bexcel\s+files?\b',
+            r'\btext\s+files?\b',
+            r'\b\.pdf\b',
+            r'\b\.docx?\b',
+            r'\b\.txt\b',
+            r'\b\.xlsx?\b',
+        ]
+        
+        # Check for simple indicators
+        has_filename_indicator = any(indicator in question_lower for indicator in filename_indicators)
+        has_file_type = any(re.search(pattern, question_lower) for pattern in file_type_patterns)
+        
+        # Check for complex query indicators (need LLM)
+        complex_indicators = [
+            'about',
+            'mentioning',
+            'containing',
+            'related to',
+            'not',
+            'except',
+            'excluding',
+            'without',
+            'from',
+            'to',
+            'between',
+            'after',
+            'before',
+        ]
+        
+        # If it has complex indicators, it's likely content-based
+        has_complex_indicator = any(indicator in question_lower for indicator in complex_indicators)
+        
+        # Simple query if it has filename/file type indicators but NOT complex content indicators
+        is_simple = (has_filename_indicator or has_file_type) and not has_complex_indicator
+        
+        logger.debug(f"Query '{question}' → simple_filename_query: {is_simple}")
+        return is_simple
+    
+    def _extract_filename_patterns(self, question: str) -> List[str]:
+        """
+        Extract filename patterns from query for Trie search.
+        
+        Examples:
+        - "TCO files" → ["tco"]
+        - "PDF files" → ["pdf"] (file type)
+        - "files starting with SAL" → ["sal"]
+        - "show me sales and invoice files" → ["sales", "invoice"]
+        """
+        patterns = []
+        question_lower = question.lower()
+        
+        # Extract file types
+        file_types = ['pdf', 'docx', 'doc', 'txt', 'xlsx', 'xls']
+        for file_type in file_types:
+            if file_type in question_lower:
+                patterns.append(file_type)
+        
+        # Extract "starting with X" patterns
+        match = re.search(r'(?:starting with|containing|with)\s+([a-z0-9]+)', question_lower)
+        if match:
+            patterns.append(match.group(1))
+        
+        # Extract potential filename keywords (2+ character words that might be filenames)
+        # Look for capitalized words or common filename patterns
+        words = re.findall(r'\b[A-Z][A-Z0-9]{1,}\b', question)  # TCO, SALES, etc.
+        patterns.extend([w.lower() for w in words])
+        
+        # Extract quoted strings (likely filenames)
+        quoted = re.findall(r'"([^"]+)"', question)
+        patterns.extend([q.lower() for q in quoted])
+        
+        # Also extract common filename patterns from the query
+        # Look for words that appear to be filenames (not common words)
+        common_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 
+                       'do', 'does', 'did', 'will', 'would', 'should', 'could', 'may', 'might', 'can',
+                       'show', 'me', 'all', 'files', 'file', 'document', 'documents', 'list', 'what',
+                       'which', 'how', 'many', 'about', 'with', 'from', 'to', 'in', 'on', 'at', 'for'}
+        
+        # Extract meaningful words (not common words, 2+ chars)
+        query_words = re.findall(r'\b[a-z]{2,}\b', question_lower)
+        meaningful_words = [w for w in query_words if w not in common_words and len(w) >= 2]
+        patterns.extend(meaningful_words[:3])  # Limit to top 3 to avoid noise
+        
+        # Remove duplicates and empty strings
+        patterns = list(set([p.lower().strip() for p in patterns if len(p.strip()) >= 2]))
+        
+        logger.debug(f"Extracted filename patterns from '{question}': {patterns}")
+        return patterns
+    
     async def _select_relevant_files(self, question: str) -> Optional[List[str]]:
         """
-        Use LLM to intelligently select which files are relevant to the query.
+        Intelligently select relevant files using Trie (fast) or LLM (semantic).
         Returns None if all files should be considered (general query).
         Returns list of file paths if specific files are relevant.
         """
@@ -450,10 +596,69 @@ class DocumentProcessorOrchestrator:
                 logger.info("No files indexed, skipping file selection")
                 return None
             
+            # Check if this is a simple filename query (use Trie)
+            if self._is_simple_filename_query(question):
+                logger.info(f"🔍 Detected simple filename query, using Trie search")
+                
+                # Extract filename patterns from query
+                patterns = self._extract_filename_patterns(question)
+                
+                if patterns:
+                    # Search Trie for each pattern
+                    matching_files = set()
+                    for pattern in patterns:
+                        trie_results = self.filename_trie.search(pattern)
+                        matching_files.update(trie_results)
+                    
+                    # Also check for file type queries
+                    question_lower = question.lower()
+                    file_type_map = {
+                        'pdf': 'pdf',
+                        'docx': 'docx',
+                        'doc': 'doc',
+                        'txt': 'txt',
+                        'text': 'txt',
+                        'excel': 'xlsx',
+                        'xlsx': 'xlsx',
+                    }
+                    
+                    for query_word, file_type in file_type_map.items():
+                        if query_word in question_lower:
+                            type_results = self.filename_trie.search_by_file_type('', file_type)
+                            matching_files.update(type_results)
+                    
+                    if matching_files:
+                        file_list = list(matching_files)
+                        logger.info(f"✅ Trie found {len(file_list)} matching files (instant, $0)")
+                        return file_list
+                    else:
+                        logger.info(f"⚠️ Trie found no matches, falling back to LLM")
+                        # Fall through to LLM
+                else:
+                    logger.info(f"⚠️ No filename patterns extracted, using LLM")
+                    # Fall through to LLM
+            
+            # Complex query or Trie found nothing - use LLM
+            logger.info(f"🤖 Using LLM for file selection (complex query or no Trie matches)")
+            return await self._llm_select_files(question)
+            
+        except Exception as e:
+            logger.error(f"File selection failed: {e}, falling back to all files")
+            return None
+    
+    async def _llm_select_files(self, question: str) -> Optional[List[str]]:
+        """
+        Use LLM to intelligently select which files are relevant to the query.
+        This is the original LLM-based file selection method.
+        """
+        try:
+            
             # Build file list for LLM
             file_list = []
-            for idx, (file_path, metadata) in enumerate(self.file_metadata.items(), 1):
+            file_paths_list = list(self.file_metadata.keys())
+            for idx, file_path in enumerate(file_paths_list, 1):
                 filename = Path(file_path).name
+                metadata = self.file_metadata[file_path]
                 file_type = metadata.get("file_type", "unknown")
                 file_list.append(f"{idx}. {filename} (type: {file_type})")
             
@@ -794,7 +999,7 @@ Your response:"""
             ]
             is_listing_query = any(pattern in question.lower() for pattern in listing_query_patterns)
             
-            # Step 2: Use LLM to intelligently select relevant files (use rewritten query for better selection)
+            # Step 2: Intelligently select relevant files using Trie (fast) or LLM (semantic)
             selected_files = await self._select_relevant_files(retrieval_query)
             
             # Step 3: Special handling for listing queries (use database, not semantic search)
@@ -996,7 +1201,7 @@ Your response:"""
                 metadatas = prioritized_metas + other_metas
                 distances = prioritized_dists + other_dists
                 
-                logger.info(f"✅ Prioritized {len(prioritized_docs)} chunks from {len(selected_files)} LLM-selected files")
+                logger.info(f"✅ Prioritized {len(prioritized_docs)} chunks from {len(selected_files)} selected files")
             
             # Step 6.5: Re-rank top results for improved relevance (skip for listing queries)
             rerank_top_k = 15  # Re-rank top 15, then take top 5
@@ -1060,14 +1265,14 @@ Your response:"""
             sources = []
             context_parts = []
             
-            # Filter files based on LLM selection
+            # Filter files based on file selection (Trie or LLM)
             files_to_process = file_chunks.items()
             if selected_files:
-                # Only include LLM-selected files - NO additional context files for specific queries
+                # Only include selected files - NO additional context files for specific queries
                 selected_file_chunks = {fp: chunks for fp, chunks in file_chunks.items() if any(sf in fp for sf in selected_files)}
                 
                 files_to_process = list(selected_file_chunks.items())
-                logger.info(f"🎯 Focusing exclusively on {len(selected_file_chunks)} LLM-selected file(s)")
+                logger.info(f"🎯 Focusing exclusively on {len(selected_file_chunks)} selected file(s)")
             
             for file_path, chunks in files_to_process:
                 # Sort chunks by chunk_id for proper order
@@ -1108,8 +1313,8 @@ Your response:"""
                 logger.info(f"📊 General query: limiting to top 10 of {len(sources)} sources")
                 sources = sources[:10]
             else:
-                # Specific files query - show only LLM-selected files (no arbitrary limit)
-                logger.info(f"📊 Specific query: showing {len(sources)} LLM-selected file sources")
+                # Specific files query - show only selected files (no arbitrary limit)
+                logger.info(f"📊 Specific query: showing {len(sources)} selected file sources")
             
             # Step 9: Generate final response using LLM with document context and conversation history
             context = "\n\n---\n\n".join(context_parts)

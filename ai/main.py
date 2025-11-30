@@ -835,6 +835,32 @@ async def search_documents(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/documents/autocomplete")
+async def autocomplete_filenames(q: str = "", limit: int = 10):
+    """
+    Get autocomplete suggestions for filenames using Trie.
+    Fast O(m) search where m = query length.
+    """
+    if not doc_processor:
+        raise HTTPException(status_code=400, detail="No directory set")
+    
+    if not q or len(q.strip()) < 1:
+        return {"status": "success", "suggestions": []}
+    
+    try:
+        # Use Trie for instant autocomplete
+        suggestions = doc_processor.filename_trie.autocomplete(q.strip(), max_suggestions=limit)
+        
+        return {
+            "status": "success",
+            "query": q,
+            "suggestions": suggestions,
+            "count": len(suggestions)
+        }
+    except Exception as e:
+        logger.error(f"Autocomplete failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/documents/{document_id}/file")
 async def get_document_file(document_id: int):
     """
