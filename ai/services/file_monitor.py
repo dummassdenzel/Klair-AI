@@ -185,6 +185,12 @@ class FileMonitorService:
         file_path = event["file_path"]
         event_type = event["event_type"]
         
+        # Skip events during initial directory indexing to prevent duplicate processing
+        if hasattr(self.document_processor, 'is_initializing'):
+            if self.document_processor.is_initializing:
+                logger.debug(f"Skipping {event_type} event for {file_path} during initial indexing")
+                return
+        
         # NEW: Check if file is currently being processed by the orchestrator
         if hasattr(self.document_processor, 'files_being_processed'):
             if file_path in self.document_processor.files_being_processed:

@@ -218,6 +218,20 @@ async def set_directory(request: dict):
     directory_path = os.path.normpath(os.path.abspath(directory_path))
     
     try:
+        # Normalize both paths for comparison (case-insensitive on Windows)
+        normalized_new_path = os.path.normpath(os.path.abspath(directory_path))
+        normalized_current_path = os.path.normpath(os.path.abspath(current_directory)) if current_directory else None
+        
+        # Check if it's the same directory - if so, skip re-initialization
+        if normalized_current_path and normalized_current_path.lower() == normalized_new_path.lower():
+            logger.info(f"Directory {directory_path} is already set, skipping re-initialization")
+            return {
+                "status": "success",
+                "message": "Directory is already set. No re-initialization needed.",
+                "directory": directory_path,
+                "processing_status": "already_initialized"
+            }
+        
         # Stop existing file monitor
         if file_monitor:
             await file_monitor.stop_monitoring()
@@ -243,16 +257,17 @@ async def set_directory(request: dict):
         await doc_processor.clear_all_data()
         logger.info("Previous directory data cleared successfully")
         
-        # Start file monitoring immediately
-        file_monitor = FileMonitorService(doc_processor)
-        await file_monitor.start_monitoring(directory_path)
-        
         current_directory = directory_path
         
-        # Process existing documents in background
-        asyncio.create_task(
-            doc_processor.initialize_from_directory(directory_path)
-        )
+        # Process existing documents first (before starting file monitor to avoid duplicate events)
+        # Wait for metadata indexing to complete before starting file monitor
+        logger.info("Starting initial directory indexing...")
+        await doc_processor.initialize_from_directory(directory_path)
+        logger.info("Initial directory indexing complete, starting file monitor...")
+        
+        # Start file monitoring after initial indexing is complete
+        file_monitor = FileMonitorService(doc_processor)
+        await file_monitor.start_monitoring(directory_path)
         
         return {
             "status": "success",

@@ -94,6 +94,7 @@ class DocumentProcessorOrchestrator:
         self.file_hashes: Dict[str, str] = {}
         self.file_metadata: Dict[str, FileMetadata] = {}
         self.current_directory: Optional[str] = None
+        self.is_initializing: bool = False  # Flag to prevent file monitor events during initial indexing
         self.files_being_processed: set = set()  # Track files currently being indexed to prevent duplicate processing
         
         logger.info("DocumentProcessorOrchestrator initialized with hybrid search (semantic + keyword) and incremental updates")
@@ -154,6 +155,11 @@ class DocumentProcessorOrchestrator:
         """Clear all indexed data (vector store, BM25, and database records)"""
         logger.info("Clearing all indexed data...")
         
+        # Clear update queue first to prevent processing stale updates
+        if hasattr(self, 'update_queue'):
+            await self.update_queue.clear()
+            logger.info("Update queue cleared")
+        
         # Clear vector store
         await self.vector_store.clear_collection()
         self.file_hashes.clear()
@@ -195,8 +201,18 @@ class DocumentProcessorOrchestrator:
             if not dir_path.is_dir():
                 raise ValueError(f"Path is not a directory: {directory_path}")
             
+            # Check if already initializing or already initialized for this directory
+            if self.is_initializing:
+                logger.warning(f"Already initializing directory, skipping duplicate initialization")
+                return
+            
+            if self.current_directory == directory_path and len(self.file_hashes) > 0:
+                logger.info(f"Directory {directory_path} already initialized with {len(self.file_hashes)} files, skipping re-initialization")
+                return
+            
             logger.info(f"Initializing from directory: {directory_path}")
             self.current_directory = directory_path
+            self.is_initializing = True  # Set flag to prevent file monitor events
             
             # PHASE 1: Build metadata index (FAST - < 1 second for most directories)
             metadata_start = asyncio.get_event_loop().time()
@@ -220,8 +236,15 @@ class DocumentProcessorOrchestrator:
             logger.info(f"Initialization complete: {len(metadata_files)} files metadata-indexed in {elapsed:.2f}s")
             logger.info(f"Content indexing running in background (non-blocking)")
             
+            # Clear initialization flag after metadata indexing completes
+            # File monitor can now process events (content indexing happens in background)
+            self.is_initializing = False
+            logger.debug("Initialization flag cleared, file monitor events now enabled")
+            
         except Exception as e:
             logger.error(f"Failed to initialize from directory: {e}")
+            # Clear flag even on error
+            self.is_initializing = False
             raise
     
     async def _build_metadata_index(self, directory_path: str) -> List[str]:
