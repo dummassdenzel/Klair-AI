@@ -63,6 +63,7 @@ class DocumentProcessorOrchestrator:
         self.file_hashes: Dict[str, str] = {}
         self.file_metadata: Dict[str, FileMetadata] = {}
         self.current_directory: Optional[str] = None
+        self.files_being_processed: set = set()  # Track files currently being indexed to prevent duplicate processing
         
         logger.info("DocumentProcessorOrchestrator initialized with hybrid search (semantic + keyword)")
         
@@ -77,7 +78,10 @@ class DocumentProcessorOrchestrator:
             from sqlalchemy import select
             
             async for db_session in get_db():
-                stmt = select(IndexedDocument).where(IndexedDocument.processing_status == "indexed")
+                # Load both indexed and metadata_only documents
+                stmt = select(IndexedDocument).where(
+                    IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
+                )
                 result = await db_session.execute(stmt)
                 docs = result.scalars().all()
                 
@@ -87,11 +91,15 @@ class DocumentProcessorOrchestrator:
                         "file_type": doc.file_type,
                         "size_bytes": doc.file_size,
                         "modified_at": doc.last_modified,
-                        "chunks": doc.chunks_count
+                        "chunks": doc.chunks_count,
+                        "processing_status": doc.processing_status
                     }
                     self.file_hashes[doc.file_path] = doc.file_hash
                 
-                logger.info(f"📚 Loaded {len(docs)} existing indexed documents into memory")
+                indexed_count = sum(1 for doc in docs if doc.processing_status == "indexed")
+                metadata_only_count = sum(1 for doc in docs if doc.processing_status == "metadata_only")
+                logger.info(f"📚 Loaded {len(docs)} documents into memory "
+                          f"({indexed_count} indexed, {metadata_only_count} metadata-only)")
                 break
                 
         except Exception as e:
@@ -133,7 +141,7 @@ class DocumentProcessorOrchestrator:
             logger.warning(f"Failed to clear database records: {e}")
     
     async def initialize_from_directory(self, directory_path: str):
-        """Initialize processor with documents from directory"""
+        """Initialize processor with documents from directory using metadata-first indexing"""
         start_time = asyncio.get_event_loop().time()
         
         try:
@@ -147,29 +155,93 @@ class DocumentProcessorOrchestrator:
             logger.info(f"Initializing from directory: {directory_path}")
             self.current_directory = directory_path
             
-            # Find all supported files
-            supported_files = []
-            for file_path in dir_path.rglob("*"):
-                if file_path.is_file():
-                    is_valid, error = self.file_validator.validate_file(str(file_path))
-                    if is_valid:
-                        supported_files.append(str(file_path))
-                    elif error and "Unsupported file type" not in error:
-                        logger.warning(f"Skipping {file_path}: {error}")
+            # PHASE 1: Build metadata index (FAST - < 1 second for most directories)
+            metadata_start = asyncio.get_event_loop().time()
+            metadata_files = await self._build_metadata_index(directory_path)
+            metadata_elapsed = asyncio.get_event_loop().time() - metadata_start
             
-            if not supported_files:
+            if not metadata_files:
                 logger.warning(f"No supported files found in {directory_path}")
                 return
             
-            logger.info(f"Found {len(supported_files)} files to process")
+            logger.info(f"✅ Metadata index built: {len(metadata_files)} files in {metadata_elapsed:.2f}s")
+            logger.info(f"📁 Files are now queryable by filename/metadata")
             
-            # Process files in batches for better memory management
-            batch_size = 10
-            processed = 0
-            failed = 0
+            # PHASE 2: Background content indexing (non-blocking)
+            logger.info(f"🔄 Starting background content indexing for {len(metadata_files)} files...")
+            asyncio.create_task(
+                self._index_content_background(metadata_files, directory_path)
+            )
             
-            for i in range(0, len(supported_files), batch_size):
-                batch = supported_files[i:i + batch_size]
+            elapsed = asyncio.get_event_loop().time() - start_time
+            logger.info(f"Initialization complete: {len(metadata_files)} files metadata-indexed in {elapsed:.2f}s")
+            logger.info(f"Content indexing running in background (non-blocking)")
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize from directory: {e}")
+            raise
+    
+    async def _build_metadata_index(self, directory_path: str) -> List[str]:
+        """
+        Build metadata index quickly (< 1 second for most directories).
+        Stores file metadata in database immediately, allowing filename queries.
+        Returns list of file paths that need content indexing.
+        """
+        dir_path = Path(directory_path)
+        supported_files = []
+        
+        # Fast scan: only check file existence and basic metadata
+        for file_path in dir_path.rglob("*"):
+            if not file_path.is_file():
+                continue
+            
+            # Quick validation (no hash calculation yet - that's expensive)
+            is_valid, error = self.file_validator.validate_file(str(file_path))
+            if not is_valid:
+                if error and "Unsupported file type" not in error:
+                    logger.debug(f"Skipping {file_path}: {error}")
+                continue
+            
+            try:
+                # Extract lightweight metadata (no content reading, no hashing)
+                path_obj = Path(file_path)
+                stat_info = path_obj.stat()
+                
+                # Calculate hash only for metadata (we'll recalculate during content indexing)
+                # For now, use a placeholder hash based on path + mtime for quick comparison
+                quick_hash = f"{file_path}:{stat_info.st_mtime}"
+                
+                # Store metadata immediately in database
+                await self.database_service.store_metadata_only(
+                    file_path=str(file_path),
+                    file_hash=quick_hash,  # Placeholder, will be updated during content indexing
+                    file_type=path_obj.suffix.lower(),
+                    file_size=stat_info.st_size,
+                    last_modified=datetime.fromtimestamp(stat_info.st_mtime)
+                )
+                
+                supported_files.append(str(file_path))
+                
+            except Exception as e:
+                logger.warning(f"Failed to index metadata for {file_path}: {e}")
+                continue
+        
+        return supported_files
+    
+    async def _index_content_background(self, file_paths: List[str], directory_path: str):
+        """
+        Background content indexing. Processes files in batches without blocking.
+        Updates documents from 'metadata_only' to 'indexed' status.
+        """
+        logger.info(f"🔄 Background content indexing started for {len(file_paths)} files")
+        
+        batch_size = 10
+        processed = 0
+        failed = 0
+        
+        try:
+            for i in range(0, len(file_paths), batch_size):
+                batch = file_paths[i:i + batch_size]
                 
                 # Process batch concurrently
                 tasks = [self._process_single_file(file_path) for file_path in batch]
@@ -179,18 +251,23 @@ class DocumentProcessorOrchestrator:
                 for result in results:
                     if isinstance(result, Exception):
                         failed += 1
+                        logger.error(f"Background indexing failed: {result}")
                     else:
                         processed += 1
                 
-                logger.info(f"Processed {processed + failed}/{len(supported_files)} files")
-            
-            elapsed = asyncio.get_event_loop().time() - start_time
-            logger.info(f"Initialization complete: {processed} files processed, "
-                       f"{failed} failed in {elapsed:.2f}s")
+                # Log progress every batch
+                if (i + batch_size) % 50 == 0 or i + batch_size >= len(file_paths):
+                    logger.info(f"📊 Background indexing progress: {processed + failed}/{len(file_paths)} files "
+                              f"({processed} indexed, {failed} failed)")
                 
+                # Small delay between batches to avoid overwhelming the system
+                if i + batch_size < len(file_paths):
+                    await asyncio.sleep(0.1)
+            
+            logger.info(f"✅ Background content indexing complete: {processed} indexed, {failed} failed")
+            
         except Exception as e:
-            logger.error(f"Failed to initialize from directory: {e}")
-            raise
+            logger.error(f"Background content indexing error: {e}")
     
     async def _process_single_file(self, file_path: str) -> ProcessingResult:
         """Process a single file (used in batch processing)"""
@@ -219,17 +296,75 @@ class DocumentProcessorOrchestrator:
                 processing_time=processing_time
             )
     
-    async def add_document(self, file_path: str):
-        """Add or update a document"""
+    async def add_document(self, file_path: str, force_reindex: bool = False):
+        """
+        Add or update a document with incremental indexing.
+        
+        Args:
+            file_path: Path to the file to index
+            force_reindex: If True, re-index even if file hasn't changed
+        """
+        # Prevent duplicate processing
+        if file_path in self.files_being_processed:
+            logger.debug(f"File {file_path} is already being processed, skipping duplicate")
+            return
+        
+        self.files_being_processed.add(file_path)
+        
         try:
             # Get real file metadata
             file_metadata = self.file_validator.extract_file_metadata(file_path)
             current_hash = self.file_validator.calculate_file_hash(file_path)
             
-            # Process document...
+            # Check if file has changed (incremental update)
+            stored_hash = self.file_hashes.get(file_path)
+            if not force_reindex and stored_hash == current_hash:
+                logger.debug(f"File {file_path} unchanged, skipping re-index")
+                return
+            
+            # Check if document exists in database and get current status
+            from database.database import get_db
+            from database.models import IndexedDocument
+            from sqlalchemy import select
+            
+            async for db_session in get_db():
+                stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
+                result = await db_session.execute(stmt)
+                existing_doc = result.scalar_one_or_none()
+                
+                # If document exists and is already fully indexed with same hash, skip
+                if existing_doc and existing_doc.processing_status == "indexed" and existing_doc.file_hash == current_hash:
+                    if not force_reindex:
+                        logger.debug(f"File {file_path} already fully indexed, skipping")
+                        # Update in-memory tracking
+                        self.file_hashes[file_path] = current_hash
+                        self.file_metadata[file_path] = file_metadata
+                        return
+                
+                break
+            
+            # Remove old chunks if re-indexing
+            if stored_hash and stored_hash != current_hash:
+                logger.info(f"File {file_path} changed, removing old chunks")
+                await self.vector_store.remove_document_chunks(file_path)
+                # Also remove from BM25 (we'll re-add below)
+                # Note: BM25 doesn't have a remove method, so we'll just re-add
+            
+            # Process document content...
             text = await self.text_extractor.extract_text_async(file_path)
             if not text or not text.strip():
                 logger.warning(f"No text extracted from {file_path}")
+                # Update status to indicate extraction failed
+                await self.database_service.store_document_metadata(
+                    file_path=file_path,
+                    file_hash=current_hash,
+                    file_type=file_metadata["file_type"],
+                    file_size=file_metadata["size_bytes"],
+                    last_modified=file_metadata["modified_at"],
+                    content_preview="",
+                    chunks_count=0,
+                    processing_status="error"
+                )
                 return
             
             chunks = self.chunker.create_chunks(text, file_path)
@@ -252,7 +387,7 @@ class DocumentProcessorOrchestrator:
             self.bm25_service.add_documents(bm25_documents)
             logger.debug(f"Added {len(chunks)} chunks to BM25 index for {file_path}")
             
-            # Store complete metadata in database
+            # Store complete metadata in database (updates from metadata_only to indexed)
             await self.database_service.store_document_metadata(
                 file_path=file_path,
                 file_hash=current_hash,
@@ -260,7 +395,8 @@ class DocumentProcessorOrchestrator:
                 file_size=file_metadata["size_bytes"],
                 last_modified=file_metadata["modified_at"],
                 content_preview=text[:500],
-                chunks_count=len(chunks)
+                chunks_count=len(chunks),
+                processing_status="indexed"  # Mark as fully indexed
             )
             
             # Update tracking
@@ -269,7 +405,24 @@ class DocumentProcessorOrchestrator:
             
         except Exception as e:
             logger.error(f"Error processing document {file_path}: {e}")
+            # Update status to error
+            try:
+                await self.database_service.store_document_metadata(
+                    file_path=file_path,
+                    file_hash="",
+                    file_type=Path(file_path).suffix.lower(),
+                    file_size=0,
+                    last_modified=datetime.utcnow(),
+                    content_preview="",
+                    chunks_count=0,
+                    processing_status="error"
+                )
+            except:
+                pass
             raise
+        finally:
+            # Always remove from processing set, even on error
+            self.files_being_processed.discard(file_path)
     
     async def remove_document(self, file_path: str):
         """Remove document and clean up tracking"""
@@ -652,10 +805,12 @@ Your response:"""
                     from database.models import IndexedDocument
                     from sqlalchemy import select
                     
-                    # Get all indexed documents from database
+                    # Get all documents from database (both indexed and metadata-only for listing)
                     all_docs = []
                     async for db_session in get_db():
-                        stmt = select(IndexedDocument).where(IndexedDocument.processing_status == "indexed")
+                        stmt = select(IndexedDocument).where(
+                            IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
+                        )
                         result = await db_session.execute(stmt)
                         all_docs = result.scalars().all()
                         break
@@ -675,13 +830,23 @@ Your response:"""
                     context_parts = []
                     for doc in all_docs:
                         filename = Path(doc.file_path).name
-                        context_parts.append(f"[Document: {filename}]\n{doc.content_preview}")
+                        
+                        # Handle metadata-only documents (still being indexed)
+                        if doc.processing_status == "metadata_only":
+                            preview = f"[Indexing in progress...] {filename}"
+                            content_snippet = "Content is being indexed in the background."
+                        else:
+                            preview = doc.content_preview if doc.content_preview else ""
+                            content_snippet = preview[:300] + "..." if len(preview) > 300 else preview
+                            context_parts.append(f"[Document: {filename}]\n{preview}")
+                        
                         sources.append({
                             "file_path": doc.file_path,
                             "relevance_score": 1.0,  # All equally relevant for listing
-                            "content_snippet": doc.content_preview[:300] + "..." if len(doc.content_preview) > 300 else doc.content_preview,
+                            "content_snippet": content_snippet,
                             "chunks_found": doc.chunks_count,
-                            "file_type": doc.file_type
+                            "file_type": doc.file_type,
+                            "processing_status": doc.processing_status  # Include status
                         })
                     
                     logger.info(f"📋 Found {len(all_docs)} indexed documents in database")

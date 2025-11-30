@@ -1,0 +1,167 @@
+Production scalability blockers
+
+Critical issues (must fix)
+
+1. Single global state — blocks multi-user
+# ai/main.py:36-38
+global doc_processor, file_monitor, current_directory
+
+Problem: Only one directory can be active at a time. User B switching directories overwrites User A's session.
+Impact: Cannot support multiple users or multiple directories per user.
+Fix: Multi-tenant architecture:
+Session-based document processors (one per user/directory)
+Isolated vector stores per directory
+Session management with cleanup
+
+
+2. Shared vector store — data leakage risk
+# All documents go to same ChromaDB instance
+persist_dir=config.persist_dir  # "./chroma_db" - SHARED!
+
+Problem: All users' documents share the same vector store. Queries can leak data across users.
+Impact: Security risk, incorrect results, privacy violations.
+Fix: Per-directory isolation:
+./chroma_db/{user_id}/{directory_hash}/
+Or use ChromaDB collections with proper isolation
+
+
+3. No rate limiting — cost explosion
+No rate limiting on LLM calls. Each query makes 2-4 LLM calls:
+Query classification
+File selection
+Query rewriting
+Final response generation
+
+Impact: At scale, costs can spike. One user can exhaust quotas.
+Fix: Add rate limiting:
+from slowapi import Limiter
+limiter = Limiter(key_func=get_remote_address)
+@limiter.limit("10/minute")  # Per user
+
+
+4. No caching — redundant expensive calls
+Every query runs the full pipeline, even for identical queries.
+Impact: Unnecessary LLM calls, slower responses, higher costs.
+Fix: Add caching:
+Query result cache (Redis/Memcached)
+Embedding cache for similar queries
+File selection cache for common patterns
+
+
+5. Memory issues — won't scale
+# All embeddings loaded in memory
+self.file_hashes: Dict[str, str] = {}  # Grows unbounded
+self.file_metadata: Dict[str, FileMetadata] = {}  # Grows unbounded
+
+Impact: Memory grows with document count. Will crash with large directories.
+Fix: Pagination and lazy loading:
+Load metadata on demand
+Use database queries instead of in-memory dicts
+Implement LRU cache for frequently accessed files
+
+
+6. No horizontal scaling — single instance only
+Architecture assumes a single process. Cannot run multiple instances behind a load balancer.
+Impact: Cannot scale beyond one server.
+Fix: Stateless design:
+Remove global state
+Use external storage (Redis for sessions)
+Database-backed state
+Message queue for file processing
+
+
+7. File processing bottleneck
+# Background task without queue
+asyncio.create_task(doc_processor.initialize_from_directory(directory_path))
+
+Problem: No queue, no retries, no prioritization. Large directories can overwhelm the system.
+Impact: Slow indexing, timeouts, lost files.
+Fix: Job queue system:
+Celery or RQ for background jobs
+Priority queues for urgent files
+Retry logic with exponential backoff
+Progress tracking
+
+
+8. No cost controls
+No limits on:
+Number of documents per user
+File size limits (only per-file, not total)
+LLM API calls per user/day
+Storage per user
+
+Impact: One user can consume all resources.
+Fix: Quota system:
+Per-user document limits
+Per-user storage limits
+Per-user API call limits
+Billing/usage tracking
+
+
+Major gaps vs Cursor
+
+Feature           Cursor                          Your System                   Production Impact
+Multi-user        ✅ Isolated workspaces           ❌ Single global state         BLOCKER
+Horizontal scaling ✅ Multiple instances           ❌ Single instance only        BLOCKER
+Rate limiting     ✅ Built-in                      ❌ None                        HIGH RISK
+Caching           ✅ Aggressive caching            ❌ No caching                 PERFORMANCE
+Cost controls     ✅ Usage limits                  ❌ None                       COST RISK
+Queue system      ✅ Background jobs               ❌ Async tasks only           RELIABILITY
+Memory management ✅ Efficient                     ❌ Unbounded growth           STABILITY
+
+
+What you have that's good
+Hybrid search — solid approach
+Query classification — good optimization
+Re-ranking — improves relevance
+File monitoring — real-time updates
+Database persistence — good foundation
+
+
+Realistic production readiness: 40%
+
+What works:
+✅ Single-user, single-directory use case
+✅ Good RAG pipeline
+✅ Real-time file monitoring
+
+What breaks at scale:
+❌ Multiple users (global state conflict)
+❌ Multiple directories (data leakage)
+❌ High traffic (no rate limiting)
+❌ Large document sets (memory issues)
+❌ Cost control (unlimited API calls)
+
+
+Path to production (priority order)
+
+Phase 1: Multi-tenancy (critical)
+Remove global state
+Session-based processors
+Isolated vector stores per directory
+User/directory authentication
+
+Phase 2: Scalability
+Add Redis for session management
+Implement job queue (Celery/RQ)
+Add caching layer
+Database-backed state
+
+Phase 3: Cost & reliability
+Rate limiting
+Quota system
+Monitoring & alerts
+Error recovery & retries
+
+Phase 4: Performance
+Query result caching
+Embedding caching
+Lazy loading
+Connection pooling
+
+
+Honest assessment
+Current state: Good prototype, not production-ready for multi-user.
+Time to production: 4-6 weeks of focused work on the above.
+Biggest risk: The global state pattern. It needs a full refactor before supporting multiple users.
+Recommendation: Start with Phase 1 (multi-tenancy). Without it, you cannot safely support multiple users.

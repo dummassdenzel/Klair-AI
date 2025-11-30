@@ -62,8 +62,9 @@ class DatabaseService:
         file_type: str, 
         file_size: int, 
         last_modified: datetime,
-        content_preview: str,
-        chunks_count: int
+        content_preview: str = "",
+        chunks_count: int = 0,
+        processing_status: str = "indexed"
     ) -> IndexedDocument:
         """Store or update document metadata"""
         async for session in get_db():
@@ -83,7 +84,7 @@ class DatabaseService:
                     content_preview=content_preview,
                     chunks_count=chunks_count,
                     last_processed=datetime.utcnow(),
-                    processing_status="indexed"
+                    processing_status=processing_status
                 )
                 await session.execute(stmt)
                 await session.commit()
@@ -98,12 +99,33 @@ class DatabaseService:
                     file_size=file_size,
                     last_modified=last_modified,
                     content_preview=content_preview,
-                    chunks_count=chunks_count
+                    chunks_count=chunks_count,
+                    processing_status=processing_status
                 )
                 session.add(doc)
                 await session.commit()
                 await session.refresh(doc)
                 return doc
+    
+    async def store_metadata_only(
+        self,
+        file_path: str,
+        file_hash: str,
+        file_type: str,
+        file_size: int,
+        last_modified: datetime
+    ) -> IndexedDocument:
+        """Store only metadata (fast, for metadata-first indexing)"""
+        return await self.store_document_metadata(
+            file_path=file_path,
+            file_hash=file_hash,
+            file_type=file_type,
+            file_size=file_size,
+            last_modified=last_modified,
+            content_preview="",  # Empty until content is indexed
+            chunks_count=0,  # Zero until content is indexed
+            processing_status="metadata_only"  # Indicates content not yet indexed
+        )
     
     async def link_document_to_chat(
         self, 

@@ -11,6 +11,8 @@
     currentChatSession,
     chatHistory,
     isIndexingInProgress as isIndexingInProgressStore,
+    contentIndexingInProgress,
+    metadataIndexed,
   } from '$lib/stores/api';
   import DirectorySelectionModal from '$lib/components/DirectorySelectionModal.svelte';
   import DocumentViewer from '$lib/components/DocumentViewer.svelte';
@@ -65,6 +67,29 @@
     try {
       const response = await apiService.searchDocuments({ limit: 100 });
       indexedDocuments = response.documents?.documents || [];
+      
+      // Check indexing status
+      const metadataOnlyCount = indexedDocuments.filter(
+        (doc: any) => doc.processing_status === 'metadata_only'
+      ).length;
+      const indexedCount = indexedDocuments.filter(
+        (doc: any) => doc.processing_status === 'indexed'
+      ).length;
+      
+      // Metadata is indexed if we have any documents
+      if (indexedDocuments.length > 0) {
+        metadataIndexed.set(true);
+      }
+      
+      // Content indexing is in progress if we have metadata_only documents
+      if (metadataOnlyCount > 0) {
+        contentIndexingInProgress.set(true);
+      } else if (indexedCount > 0) {
+        // All documents are fully indexed
+        contentIndexingInProgress.set(false);
+        isIndexingInProgressStore.set(false);
+      }
+      
     } catch (error) {
       console.error('Failed to load documents:', error);
       indexedDocuments = [];
@@ -82,31 +107,49 @@
       await apiService.setDirectory(directoryPath);
       await testConnection();
       await loadChatHistory();
+      
+      // Metadata indexing happens instantly (< 1 second)
+      // Wait a moment for metadata to be indexed
+      await new Promise(resolve => setTimeout(resolve, 500));
       await loadIndexedDocuments();
+      
       showDirectoryModal = false;
       
-      // Auto-refresh documents as they're being indexed
-      isIndexingInProgress = true;
-      isIndexingInProgressStore.set(true);
+      // Metadata is now indexed - allow queries immediately
+      metadataIndexed.set(true);
+      isIndexingInProgress = false; // Don't block queries
+      isIndexingInProgressStore.set(false);
+      
+      // Monitor content indexing progress in background
       let refreshCount = 0;
-      const maxRefreshes = 15;
-      let previousCount = indexedDocuments.length;
+      const maxRefreshes = 30; // Monitor longer for content indexing
+      let previousIndexedCount = indexedDocuments.filter(
+        (doc: any) => doc.processing_status === 'indexed'
+      ).length;
       
       const refreshInterval = setInterval(async () => {
         refreshCount++;
         await loadIndexedDocuments();
         
-        const hasNewDocs = indexedDocuments.length > previousCount;
-        if (hasNewDocs) {
-          previousCount = indexedDocuments.length;
+        const currentIndexedCount = indexedDocuments.filter(
+          (doc: any) => doc.processing_status === 'indexed'
+        ).length;
+        
+        const hasNewIndexed = currentIndexedCount > previousIndexedCount;
+        if (hasNewIndexed) {
+          previousIndexedCount = currentIndexedCount;
         }
         
-        if (refreshCount >= maxRefreshes || (!hasNewDocs && refreshCount > 3)) {
-          isIndexingInProgress = false;
-          isIndexingInProgressStore.set(false);
+        // Stop monitoring if all documents are indexed or max refreshes reached
+        const metadataOnlyCount = indexedDocuments.filter(
+          (doc: any) => doc.processing_status === 'metadata_only'
+        ).length;
+        
+        if (metadataOnlyCount === 0 || refreshCount >= maxRefreshes) {
+          contentIndexingInProgress.set(false);
           clearInterval(refreshInterval);
         }
-      }, 2000);
+      }, 3000); // Check every 3 seconds for content indexing progress
     } catch (error) {
       console.error('Failed to set directory:', error);
     } finally {
@@ -219,6 +262,8 @@
       currentChatSession={$currentChatSession}
       isLoadingDocuments={isLoadingDocuments}
       isIndexingInProgress={isIndexingInProgress}
+      contentIndexingInProgress={$contentIndexingInProgress}
+      metadataIndexed={$metadataIndexed}
       openDropdownId={openDropdownId}
       onNewChat={startNewChat}
       onChatClick={handleChatClick}

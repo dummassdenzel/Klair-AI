@@ -11,6 +11,8 @@ export const currentChatSession = writable<ChatSession | null>(null);
 export const chatHistory = writable<ChatSession[]>([]);
 export const isChatLoading = writable(false);
 export const isIndexingInProgress = writable(false);
+export const contentIndexingInProgress = writable(false); // Separate flag for content indexing
+export const metadataIndexed = writable(false); // Flag for metadata completion
 
 // Document State Store
 export const documentStats = writable<DocumentStats | null>(null);
