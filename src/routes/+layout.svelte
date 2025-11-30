@@ -51,16 +51,60 @@
   // Phase 3: Real-time update queue status via Server-Sent Events (SSE)
   // No polling - uses push-based SSE for efficient real-time updates
   let updateEventSource: EventSource | null = null;
+  let lastCompletedCount = 0; // Track completed updates to detect new documents
+  let lastProcessingCount = 0; // Track processing to detect when updates finish
+  let refreshTimeout: ReturnType<typeof setTimeout> | null = null; // Debounce refresh
   
   function startUpdateQueuePolling() {
     // Use SSE (Server-Sent Events) for push-based updates - no polling
     try {
       updateEventSource = apiService.createUpdateStream((data) => {
         if (data?.queue) {
+          const currentCompleted = data.queue.completed || 0;
+          const currentProcessing = data.queue.processing || 0;
+          
+          // Check if updates completed (new documents indexed)
+          if (currentCompleted > lastCompletedCount) {
+            // New documents were indexed - refresh the document list
+            console.debug(`Updates completed: ${currentCompleted} (was ${lastCompletedCount}), refreshing document list`);
+            // Debounce refresh to avoid multiple rapid refreshes
+            if (refreshTimeout) clearTimeout(refreshTimeout);
+            refreshTimeout = setTimeout(() => {
+              loadIndexedDocuments();
+            }, 500); // Small delay to ensure database is updated
+            lastCompletedCount = currentCompleted;
+          } else if (currentCompleted > 0 && lastCompletedCount === 0) {
+            // Initialize the count on first SSE message
+            lastCompletedCount = currentCompleted;
+          }
+          
+          // Also refresh when processing drops from >0 to 0 (all updates finished)
+          if (lastProcessingCount > 0 && currentProcessing === 0) {
+            // All updates finished - refresh to catch any new documents
+            console.debug('All updates finished, refreshing document list');
+            if (refreshTimeout) clearTimeout(refreshTimeout);
+            refreshTimeout = setTimeout(() => {
+              loadIndexedDocuments();
+            }, 1000); // Small delay to ensure database is updated
+          }
+          
+          // Fallback: If updates just started (processing went from 0 to >0),
+          // refresh after a delay to catch new files that are being indexed
+          if (lastProcessingCount === 0 && currentProcessing > 0) {
+            // Updates just started - refresh after a delay to catch new files
+            console.debug('Updates started, will refresh document list when complete');
+            if (refreshTimeout) clearTimeout(refreshTimeout);
+            refreshTimeout = setTimeout(() => {
+              loadIndexedDocuments();
+            }, 3000); // Refresh 3 seconds after updates start (gives time for indexing)
+          }
+          
+          lastProcessingCount = currentProcessing;
+          
           updateQueueStatus.set({
             pending: data.queue.pending || 0,
-            processing: data.queue.processing || 0,
-            completed: data.queue.completed || 0,
+            processing: currentProcessing,
+            completed: currentCompleted,
             failed: data.queue.failed || 0,
           });
         }
@@ -94,6 +138,10 @@
     if (updateEventSource) {
       updateEventSource.close();
       updateEventSource = null;
+    }
+    // Clean up refresh timeout
+    if (refreshTimeout) {
+      clearTimeout(refreshTimeout);
     }
   });
 
@@ -171,6 +219,10 @@
       metadataIndexed.set(true);
       isIndexingInProgress = false; // Don't block queries
       isIndexingInProgressStore.set(false);
+      
+      // Reset completed count tracker for new directory
+      lastCompletedCount = 0;
+      lastProcessingCount = 0;
       
       // Monitor content indexing progress in background
       let refreshCount = 0;
