@@ -22,7 +22,10 @@ Usage:
 """
 
 from .orchestrator import DocumentProcessorOrchestrator
-from .models import DocumentChunk, QueryResult, FileMetadata, ProcessingResult
+from .models import (
+    DocumentChunk, QueryResult, FileMetadata, ProcessingResult,
+    ChunkMatch, ChunkDiffResult
+)
 from .text_extractor import TextExtractor
 from .chunker import DocumentChunker
 from .embedding_service import EmbeddingService
@@ -32,6 +35,11 @@ from .file_validator import FileValidator
 from .bm25_service import BM25Service
 from .hybrid_search import HybridSearchService
 from .reranker_service import ReRankingService
+from .chunk_differ import ChunkDiffer
+from .update_strategy import UpdateStrategy, UpdateStrategySelector, StrategySelectionResult
+from .update_queue import UpdateQueue, UpdateTask, UpdateResult, UpdatePriority
+from .update_executor import UpdateExecutor, Checkpoint
+from .update_worker import UpdateWorker
 from .config import config, DocumentProcessorConfig
 
 __all__ = [
@@ -40,6 +48,8 @@ __all__ = [
     "QueryResult", 
     "FileMetadata",
     "ProcessingResult",
+    "ChunkMatch",
+    "ChunkDiffResult",
     "TextExtractor",
     "DocumentChunker",
     "EmbeddingService",
@@ -49,6 +59,17 @@ __all__ = [
     "BM25Service",
     "HybridSearchService",
     "ReRankingService",
+    "ChunkDiffer",
+    "UpdateStrategy",
+    "UpdateStrategySelector",
+    "StrategySelectionResult",
+    "UpdateQueue",
+    "UpdateTask",
+    "UpdateResult",
+    "UpdatePriority",
+    "UpdateExecutor",
+    "Checkpoint",
+    "UpdateWorker",
     "config",
     "DocumentProcessorConfig"
 ]

@@ -99,6 +99,48 @@ export const apiService = {
     return response.data;
   },
 
+  // Phase 3: Update Queue Management
+  async getUpdateQueueStatus(): Promise<any> {
+    const response = await apiClient.get('/updates/queue');
+    return response.data;
+  },
+
+  async getUpdateStatus(filePath: string): Promise<any> {
+    const response = await apiClient.get(`/updates/status/${encodeURIComponent(filePath)}`);
+    return response.data;
+  },
+
+  async forceUpdate(filePath: string): Promise<any> {
+    const response = await apiClient.post('/updates/force', { file_path: filePath });
+    return response.data;
+  },
+
+  // Phase 3: Server-Sent Events for real-time updates (more efficient than polling)
+  createUpdateStream(callback: (data: any) => void): EventSource | null {
+    try {
+      const eventSource = new EventSource('http://localhost:8000/api/updates/stream');
+      
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          callback(data);
+        } catch (error) {
+          console.error('Error parsing SSE data:', error);
+        }
+      };
+      
+      eventSource.onerror = (error) => {
+        console.error('SSE connection error:', error);
+        // Will automatically reconnect
+      };
+      
+      return eventSource;
+    } catch (error) {
+      console.error('Failed to create SSE stream:', error);
+      return null;
+    }
+  },
+
   // Configuration
   async getConfiguration(): Promise<Record<string, any>> {
     const response = await apiClient.get('/configuration');

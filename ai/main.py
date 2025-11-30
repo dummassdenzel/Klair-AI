@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any
 import asyncio
 import logging
 import os
+import json
 from pathlib import Path
 from services.document_processor import DocumentProcessorOrchestrator, config
 from config import settings
@@ -993,3 +994,156 @@ async def get_usage_analytics():
         return {"status": "success", "analytics": analytics}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Phase 3: Update Queue API Endpoints
+@app.get("/api/updates/queue")
+async def get_update_queue_status():
+    """Get update queue status"""
+    if not doc_processor or not hasattr(doc_processor, 'update_queue'):
+        raise HTTPException(status_code=400, detail="Update queue not available")
+    
+    try:
+        status = doc_processor.update_queue.get_status()
+        pending_tasks = doc_processor.update_queue.get_pending_tasks(limit=10)
+        
+        return {
+            "status": "success",
+            "queue": {
+                "pending": status["pending"],
+                "processing": status["processing"],
+                "completed": status["completed"],
+                "failed": status["failed"],
+                "pending_tasks": pending_tasks
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get update queue status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get update queue status: {str(e)}")
+
+@app.get("/api/updates/status/{file_path:path}")
+async def get_update_status(file_path: str):
+    """Get update status for a specific file"""
+    if not doc_processor or not hasattr(doc_processor, 'update_queue'):
+        raise HTTPException(status_code=400, detail="Update queue not available")
+    
+    try:
+        status = doc_processor.update_queue.get_status()
+        
+        # Check if file is in active updates
+        active_file = None
+        if file_path in doc_processor.update_queue.active_updates:
+            task = doc_processor.update_queue.active_updates[file_path]
+            active_file = {
+                "file_path": task.file_path,
+                "priority": task.priority,
+                "update_type": task.update_type,
+                "strategy": task.strategy.value if task.strategy else None,
+                "enqueued_at": task.enqueued_at.isoformat()
+            }
+        
+        # Check if file has completed update
+        completed_result = None
+        if file_path in doc_processor.update_queue.completed_updates:
+            result = doc_processor.update_queue.completed_updates[file_path]
+            completed_result = {
+                "success": result.success,
+                "chunks_updated": result.chunks_updated,
+                "processing_time": result.processing_time,
+                "completed_at": result.completed_at.isoformat() if result.completed_at else None,
+                "error_message": result.error_message
+            }
+        
+        return {
+            "status": "success",
+            "file_path": file_path,
+            "active": active_file,
+            "completed": completed_result
+        }
+    except Exception as e:
+        logger.error(f"Failed to get update status for {file_path}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get update status: {str(e)}")
+
+@app.post("/api/updates/force")
+async def force_update(request: dict):
+    """Force update a file (high priority)"""
+    if not doc_processor or not hasattr(doc_processor, 'enqueue_update'):
+        raise HTTPException(status_code=400, detail="Update queue not available")
+    
+    file_path = request.get("file_path")
+    if not file_path:
+        raise HTTPException(status_code=400, detail="file_path required")
+    
+    try:
+        success = await doc_processor.enqueue_update(
+            file_path=file_path,
+            update_type="modified",
+            user_requested=True  # High priority
+        )
+        
+        if success:
+            return {
+                "status": "success",
+                "message": f"Update enqueued for {file_path} with high priority"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to enqueue update (queue may be full)")
+    except Exception as e:
+        logger.error(f"Failed to force update {file_path}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to force update: {str(e)}")
+
+# Phase 3: Server-Sent Events for real-time update notifications
+@app.get("/api/updates/stream")
+async def stream_update_status():
+    """
+    Server-Sent Events stream for real-time update queue status.
+    Much more efficient than polling - only sends updates when status changes.
+    """
+    if not doc_processor or not hasattr(doc_processor, 'update_queue'):
+        raise HTTPException(status_code=400, detail="Update queue not available")
+    
+    async def event_generator():
+        """Generate SSE events when queue status changes"""
+        last_status = None
+        
+        try:
+            while True:
+                # Get current status
+                status = doc_processor.update_queue.get_status()
+                current_status = {
+                    "pending": status["pending"],
+                    "processing": status["processing"],
+                    "completed": status["completed"],
+                    "failed": status["failed"]
+                }
+                
+                # Only send event if status changed
+                if current_status != last_status:
+                    event_data = {
+                        "status": "success",
+                        "queue": current_status,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    
+                    # Format as SSE
+                    yield f"data: {json.dumps(event_data)}\n\n"
+                    last_status = current_status
+                
+                # Check every 1 second (but only send when changed)
+                await asyncio.sleep(1)
+                
+        except asyncio.CancelledError:
+            logger.debug("SSE stream cancelled")
+        except Exception as e:
+            logger.error(f"Error in SSE stream: {e}")
+            error_data = {"status": "error", "message": str(e)}
+            yield f"data: {json.dumps(error_data)}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable buffering for nginx
+        }
+    )

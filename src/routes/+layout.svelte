@@ -1,6 +1,6 @@
 <script lang="ts">
   import '../app.css';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -13,6 +13,7 @@
     isIndexingInProgress as isIndexingInProgressStore,
     contentIndexingInProgress,
     metadataIndexed,
+    updateQueueStatus,
   } from '$lib/stores/api';
   import DirectorySelectionModal from '$lib/components/DirectorySelectionModal.svelte';
   import DocumentViewer from '$lib/components/DocumentViewer.svelte';
@@ -40,9 +41,60 @@
       } else {
         await loadChatHistory();
         await loadIndexedDocuments();
+        // Phase 3: Start SSE stream for update queue status (no polling)
+        startUpdateQueuePolling();
       }
       isInitializing = false;
     })();
+  });
+
+  // Phase 3: Real-time update queue status via Server-Sent Events (SSE)
+  // No polling - uses push-based SSE for efficient real-time updates
+  let updateEventSource: EventSource | null = null;
+  
+  function startUpdateQueuePolling() {
+    // Use SSE (Server-Sent Events) for push-based updates - no polling
+    try {
+      updateEventSource = apiService.createUpdateStream((data) => {
+        if (data?.queue) {
+          updateQueueStatus.set({
+            pending: data.queue.pending || 0,
+            processing: data.queue.processing || 0,
+            completed: data.queue.completed || 0,
+            failed: data.queue.failed || 0,
+          });
+        }
+      });
+      
+      if (updateEventSource) {
+        // Monitor SSE connection for errors
+        updateEventSource.addEventListener('error', (error) => {
+          console.warn('SSE connection error, will attempt to reconnect:', error);
+          // EventSource automatically reconnects, so we just log the error
+        });
+        
+        // Log successful connection
+        updateEventSource.addEventListener('open', () => {
+          console.debug('SSE connection established for update queue status');
+        });
+      } else {
+        console.warn('Failed to create SSE stream - update status will not be available');
+        // Set status to null to indicate it's not available
+        updateQueueStatus.set(null);
+      }
+    } catch (error) {
+      // SSE not supported or failed
+      console.warn('SSE not available - update status will not be displayed:', error);
+      updateQueueStatus.set(null);
+    }
+  }
+
+  onDestroy(() => {
+    // Clean up SSE connection
+    if (updateEventSource) {
+      updateEventSource.close();
+      updateEventSource = null;
+    }
   });
 
   async function testConnection() {

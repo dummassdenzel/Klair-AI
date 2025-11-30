@@ -16,6 +16,11 @@ from .bm25_service import BM25Service
 from .hybrid_search import HybridSearchService
 from .reranker_service import ReRankingService
 from .filename_trie import FilenameTrie
+from .update_queue import UpdateQueue, UpdateTask, UpdatePriority
+from .update_executor import UpdateExecutor
+from .update_worker import UpdateWorker
+from .chunk_differ import ChunkDiffer
+from .update_strategy import UpdateStrategySelector
 from database import DatabaseService
 
 
@@ -63,16 +68,41 @@ class DocumentProcessorOrchestrator:
         # Filename Trie for fast O(m) filename search
         self.filename_trie = FilenameTrie()
         
+        # Phase 3: Incremental Updates components
+        self.update_queue = UpdateQueue(max_queue_size=1000)
+        self.chunk_differ = ChunkDiffer(self.embedding_service)
+        self.strategy_selector = UpdateStrategySelector()
+        self.update_executor = UpdateExecutor(
+            vector_store=self.vector_store,
+            bm25_service=self.bm25_service,
+            text_extractor=self.text_extractor,
+            chunker=self.chunker,
+            embedding_service=self.embedding_service,
+            database_service=self.database_service,
+            chunk_differ=self.chunk_differ
+        )
+        self.update_worker = UpdateWorker(
+            update_queue=self.update_queue,
+            update_executor=self.update_executor,
+            chunk_differ=self.chunk_differ,
+            strategy_selector=self.strategy_selector,
+            chunker=self.chunker,
+            text_extractor=self.text_extractor
+        )
+        
         # State tracking
         self.file_hashes: Dict[str, str] = {}
         self.file_metadata: Dict[str, FileMetadata] = {}
         self.current_directory: Optional[str] = None
         self.files_being_processed: set = set()  # Track files currently being indexed to prevent duplicate processing
         
-        logger.info("DocumentProcessorOrchestrator initialized with hybrid search (semantic + keyword)")
+        logger.info("DocumentProcessorOrchestrator initialized with hybrid search (semantic + keyword) and incremental updates")
         
         # Load existing indexed documents into memory
         asyncio.create_task(self._load_existing_metadata())
+        
+        # Start update worker for incremental updates
+        asyncio.create_task(self.update_worker.start())
     
     async def _load_existing_metadata(self):
         """Load existing indexed documents from database into memory"""
@@ -99,7 +129,7 @@ class DocumentProcessorOrchestrator:
                         "processing_status": doc.processing_status
                     }
                     self.file_hashes[doc.file_path] = doc.file_hash
-                    
+                
                     # Rebuild Filename Trie from existing documents
                     filename = Path(doc.file_path).name
                     self.filename_trie.add(filename, doc.file_path)
@@ -189,7 +219,7 @@ class DocumentProcessorOrchestrator:
             elapsed = asyncio.get_event_loop().time() - start_time
             logger.info(f"Initialization complete: {len(metadata_files)} files metadata-indexed in {elapsed:.2f}s")
             logger.info(f"Content indexing running in background (non-blocking)")
-                
+            
         except Exception as e:
             logger.error(f"Failed to initialize from directory: {e}")
             raise
@@ -282,7 +312,7 @@ class DocumentProcessorOrchestrator:
                     await asyncio.sleep(0.1)
             
             logger.info(f"✅ Background content indexing complete: {processed} indexed, {failed} failed")
-            
+                
         except Exception as e:
             logger.error(f"Background content indexing error: {e}")
     
@@ -291,7 +321,7 @@ class DocumentProcessorOrchestrator:
         start_time = asyncio.get_event_loop().time()
         
         try:
-            await self.add_document(file_path)
+            await self.add_document(file_path, use_queue=False)  # Initial indexing, don't use queue
             processing_time = asyncio.get_event_loop().time() - start_time
             
             return ProcessingResult(
@@ -313,14 +343,85 @@ class DocumentProcessorOrchestrator:
                 processing_time=processing_time
             )
     
-    async def add_document(self, file_path: str, force_reindex: bool = False):
+    async def enqueue_update(
+        self,
+        file_path: str,
+        update_type: str = "modified",
+        user_requested: bool = False
+    ) -> bool:
+        """
+        Enqueue a document update to the priority queue (Phase 3).
+        
+        Args:
+            file_path: Path to file to update
+            update_type: Type of update ("created", "modified", "deleted")
+            user_requested: Whether user explicitly requested update
+            
+        Returns:
+            True if enqueued successfully, False otherwise
+        """
+        try:
+            # Get file metadata for priority calculation
+            file_metadata = self.file_validator.extract_file_metadata(file_path)
+            file_size_bytes = file_metadata.get("size_bytes", 0)
+            
+            # Get last queried time (if available)
+            last_queried = datetime.utcnow()  # Default to now
+            if file_path in self.file_metadata:
+                metadata = self.file_metadata[file_path]
+                if isinstance(metadata, dict):
+                    last_queried = metadata.get("modified_at", datetime.utcnow())
+                else:
+                    last_queried = metadata.modified_at if hasattr(metadata, 'modified_at') else datetime.utcnow()
+            
+            # Check if in active session (simplified - can be enhanced)
+            is_in_active_session = False  # TODO: Track active sessions
+            
+            # Enqueue with automatic priority calculation
+            success = await self.update_queue.enqueue(
+                file_path=file_path,
+                update_type=update_type,
+                file_size_bytes=file_size_bytes,
+                last_queried=last_queried,
+                is_in_active_session=is_in_active_session,
+                user_requested=user_requested
+            )
+            
+            if success:
+                logger.info(f"Enqueued update for {file_path} (type: {update_type})")
+            else:
+                logger.warning(f"Failed to enqueue update for {file_path} (queue may be full)")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error enqueueing update for {file_path}: {e}")
+            return False
+    
+    async def add_document(self, file_path: str, force_reindex: bool = False, use_queue: bool = True):
         """
         Add or update a document with incremental indexing.
         
         Args:
             file_path: Path to the file to index
             force_reindex: If True, re-index even if file hasn't changed
+            use_queue: If True, use update queue (Phase 3). If False, process directly (for initial indexing)
         """
+        # Phase 3: Use queue for updates (unless it's initial indexing)
+        if use_queue:
+            # Check if file has changed
+            current_hash = self.file_validator.calculate_file_hash(file_path)
+            stored_hash = self.file_hashes.get(file_path)
+            
+            if not force_reindex and stored_hash == current_hash:
+                logger.debug(f"File {file_path} unchanged, skipping update")
+                return
+            
+            # Enqueue update instead of processing directly
+            await self.enqueue_update(file_path, update_type="modified")
+            return
+        
+        # Direct processing (for initial indexing or when queue is disabled)
         # Prevent duplicate processing
         if file_path in self.files_being_processed:
             logger.debug(f"File {file_path} is already being processed, skipping duplicate")

@@ -51,83 +51,94 @@ class DocumentFileHandler(FileSystemEventHandler):
 class FileMonitorService:
     def __init__(self, document_processor, max_queue_size: int = 100):
         self.document_processor = document_processor
+        self.max_queue_size = max_queue_size
         self.event_queue = asyncio.Queue(maxsize=max_queue_size)
-        
-        # Get supported extensions from the document processor's file validator
-        supported_extensions = getattr(document_processor.file_validator, 'supported_extensions', {".pdf", ".docx", ".txt"})
-        
-        self.file_handler = DocumentFileHandler(self.event_queue, supported_extensions)
-        self.observer: Optional[Observer] = None
-        self.processor_task: Optional[asyncio.Task] = None
+        self.observer = None
         self.is_running = False
+        self.pending_events = {}  # file_path -> event
+        self.debounce_delay = 2.0  # seconds
+        self.processor_task = None
         
-        # Debouncing
-        self.pending_events = {}  # file_path -> event_info
-        self.debounce_delay = 1.0  # seconds
+        # Supported file extensions
+        self.supported_extensions = {".pdf", ".docx", ".txt", ".xlsx", ".xls"}
         
-        logger.info(f"File monitor initialized with supported extensions: {supported_extensions}")
+        # Create file handler
+        self.file_handler = DocumentFileHandler(self.event_queue, self.supported_extensions)
     
     async def start_monitoring(self, directory_path: str):
         """Start monitoring directory for file changes"""
         if self.is_running:
-            await self.stop_monitoring()
+            logger.warning("File monitor is already running")
+            return
         
-        # Start file observer
-        self.observer = Observer()
-        self.observer.schedule(self.file_handler, directory_path, recursive=True)
-        self.observer.start()
-        
-        # Start event processor
-        self.processor_task = asyncio.create_task(self._process_events())
-        self.is_running = True
-        
-        logger.info(f"Started monitoring directory: {directory_path}")
+        try:
+            # Normalize path
+            directory_path = os.path.normpath(os.path.abspath(directory_path))
+            
+            if not os.path.exists(directory_path):
+                raise ValueError(f"Directory does not exist: {directory_path}")
+            
+            if not os.path.isdir(directory_path):
+                raise ValueError(f"Path is not a directory: {directory_path}")
+            
+            # Start observer
+            self.observer = Observer()
+            self.observer.schedule(self.file_handler, directory_path, recursive=True)
+            self.observer.start()
+            self.is_running = True
+            
+            # Start event processor
+            self.processor_task = asyncio.create_task(self._process_events())
+            
+            logger.info(f"Started monitoring directory: {directory_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to start file monitoring: {e}")
+            raise
     
     async def stop_monitoring(self):
-        """Stop file monitoring"""
+        """Stop monitoring directory"""
+        if not self.is_running:
+            return
+        
         self.is_running = False
         
+        # Stop observer
         if self.observer:
             self.observer.stop()
             self.observer.join()
             self.observer = None
         
+        # Cancel processor task
         if self.processor_task:
             self.processor_task.cancel()
             try:
                 await self.processor_task
             except asyncio.CancelledError:
                 pass
-            self.processor_task = None
-        
-        # Clear pending events
-        self.pending_events.clear()
-        
-        # Clear event queue
-        while not self.event_queue.empty():
-            try:
-                self.event_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
         
         logger.info("Stopped file monitoring")
     
     async def _process_events(self):
-        """Process file events with debouncing"""
+        """Process file system events from queue"""
+        logger.info("File event processor started")
+        
         while self.is_running:
             try:
-                # Wait for events or timeout for debouncing check
+                # Get event from queue (non-blocking)
                 try:
-                    event = await asyncio.wait_for(self.event_queue.get(), timeout=0.5)
-                    self._update_pending_event(event)
-                except asyncio.TimeoutError:
-                    pass
+                    event = self.event_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    # No events, update pending events and wait
+                    await self._process_pending_events()
+                    await asyncio.sleep(0.5)  # Check every 500ms
+                    continue
                 
-                # Process debounced events
-                await self._process_pending_events()
+                # Update pending events (debouncing)
+                self._update_pending_event(event)
                 
             except asyncio.CancelledError:
-                logger.info("Event processor cancelled")
+                logger.info("File event processor cancelled")
                 break
             except Exception as e:
                 logger.error(f"Error in event processor: {e}")
@@ -174,13 +185,26 @@ class FileMonitorService:
         file_path = event["file_path"]
         event_type = event["event_type"]
         
+        # NEW: Check if file is currently being processed by the orchestrator
+        if hasattr(self.document_processor, 'files_being_processed'):
+            if file_path in self.document_processor.files_being_processed:
+                logger.debug(f"File {file_path} is currently being processed, skipping file monitor event.")
+                return
+        
         try:
             if event_type == "deleted":
                 await self.document_processor.remove_document(file_path)
                 logger.info(f"Processed deletion: {file_path}")
             else:  # created or modified
-                await self.document_processor.add_document(file_path)
-                logger.info(f"Processed {event_type}: {file_path}")
+                # Phase 3: Use update queue for file changes (not initial indexing)
+                # Check if orchestrator has update queue (Phase 3 feature)
+                if hasattr(self.document_processor, 'enqueue_update'):
+                    await self.document_processor.enqueue_update(file_path, update_type=event_type)
+                    logger.info(f"Enqueued {event_type} for {file_path}")
+                else:
+                    # Fallback to direct processing (backward compatibility)
+                    await self.document_processor.add_document(file_path, use_queue=False)
+                    logger.info(f"Processed {event_type} for {file_path}")
                 
         except Exception as e:
             logger.error(f"Error processing {event_type} for {file_path}: {e}")

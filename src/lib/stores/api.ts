@@ -14,6 +14,14 @@ export const isIndexingInProgress = writable(false);
 export const contentIndexingInProgress = writable(false); // Separate flag for content indexing
 export const metadataIndexed = writable(false); // Flag for metadata completion
 
+// Phase 3: Update Queue State
+export const updateQueueStatus = writable<{
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+} | null>(null);
+
 // Document State Store
 export const documentStats = writable<DocumentStats | null>(null);
 export const isDocumentsLoading = writable(false);
