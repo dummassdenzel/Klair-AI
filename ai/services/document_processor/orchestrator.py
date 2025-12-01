@@ -164,6 +164,7 @@ class DocumentProcessorOrchestrator:
         await self.vector_store.clear_collection()
         self.file_hashes.clear()
         self.file_metadata.clear()
+        self.files_being_processed.clear()  # Clear processing set to prevent stale entries
         logger.info("Vector store cleared")
         
         # Clear BM25 index
@@ -461,6 +462,8 @@ class DocumentProcessorOrchestrator:
             stored_hash = self.file_hashes.get(file_path)
             if not force_reindex and stored_hash == current_hash:
                 logger.debug(f"File {file_path} unchanged, skipping re-index")
+                # Remove from processing set before returning
+                self.files_being_processed.discard(file_path)
                 return
             
             # Check if document exists in database and get current status
@@ -480,7 +483,13 @@ class DocumentProcessorOrchestrator:
                         # Update in-memory tracking
                         self.file_hashes[file_path] = current_hash
                         self.file_metadata[file_path] = file_metadata
+                        # Remove from processing set before returning
+                        self.files_being_processed.discard(file_path)
                         return
+                
+                # If document exists with metadata_only status, it needs to be upgraded to indexed
+                # Continue processing to upgrade from metadata_only to indexed
+                # (No need to check files_being_processed here since we already added it above)
                 
                 break
             
@@ -506,6 +515,8 @@ class DocumentProcessorOrchestrator:
                     chunks_count=0,
                     processing_status="error"
                 )
+                # Remove from processing set before returning
+                self.files_being_processed.discard(file_path)
                 return
             
             chunks = self.chunker.create_chunks(text, file_path)
