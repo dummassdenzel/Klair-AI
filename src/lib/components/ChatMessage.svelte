@@ -1,5 +1,6 @@
 <script lang="ts">
     import type { DocumentSource } from '$lib/api/types';
+    import MarkdownRenderer from './MarkdownRenderer.svelte';
     
     export let message: string;
     export let isUser: boolean;
@@ -40,7 +41,13 @@
                 <div class="w-2 h-2 bg-current rounded-full animate-bounce" style="animation-delay: 0.2s"></div>
               </div>
             {:else}
-              <div class="whitespace-pre-wrap">{safeMessage}</div>
+              {#if isUser}
+                <!-- User messages: plain text (no markdown) -->
+                <div class="whitespace-pre-wrap">{safeMessage}</div>
+              {:else}
+                <!-- AI messages: render markdown -->
+                <MarkdownRenderer content={safeMessage} />
+              {/if}
             {/if}
           </div>
           

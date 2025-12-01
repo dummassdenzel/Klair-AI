@@ -12,6 +12,7 @@
     contentIndexingInProgress,
   } from "$lib/stores/api";
   import type { ChatMessage } from "$lib/api/types";
+  import MarkdownRenderer from "$lib/components/MarkdownRenderer.svelte";
 
   let messages: ChatMessage[] = [];
   let expandedSources: Record<number, boolean> = {};
@@ -231,10 +232,10 @@
         <div class="flex items-center justify-center mx-auto mb-6">
           <img src="/klair.ai-sm.png" class="w-16 h-16" alt="User avatar" />
         </div>
-        <h3 class="text-2xl font-semibold text-[#37352F] mb-3">
+        <h3 class="text-2xl font-bold tracking-tight text-[#37352F] mb-3">
           Welcome to Klair AI!
         </h3>
-        <p class="text-gray-600 text-lg">
+        <p class="text-gray-600 text-sm">
           Start a conversation by asking questions about your documents.
         </p>
       </div>
@@ -283,9 +284,7 @@
               <div
                 class="bg-[#F7F7F7] text-[#37352F] px-6 py-4 rounded-2xl rounded-bl-md shadow-sm"
               >
-                <div class="whitespace-pre-wrap text-sm leading-relaxed">
-                  {message.ai_response}
-                </div>
+                <MarkdownRenderer content={message.ai_response} className="text-sm leading-relaxed" />
               </div>
 
               <!-- Message Metadata -->
