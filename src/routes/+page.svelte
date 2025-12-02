@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick, afterUpdate } from "svelte";
   import { apiService } from "$lib/api/services";
   import {
     systemStatus,
@@ -16,7 +16,45 @@
 
   let messages: ChatMessage[] = [];
   let expandedSources: Record<number, boolean> = {};
+  let messagesContainer: HTMLDivElement;
+  let shouldAutoScroll = true;
+  let previousMessagesLength = 0;
 
+  // Auto-scroll to bottom when new messages arrive
+  function scrollToBottom(smooth: boolean = true) {
+    if (messagesContainer && shouldAutoScroll) {
+      tick().then(() => {
+        if (messagesContainer) {
+          messagesContainer.scrollTo({
+            top: messagesContainer.scrollHeight,
+            behavior: smooth ? 'smooth' : 'auto'
+          });
+        }
+      });
+    }
+  }
+  
+  // Handle scroll events to determine if we should auto-scroll
+  function handleScroll() {
+    if (!messagesContainer) return;
+    const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
+    // Check if user is near the bottom (within 50px)
+    const isAtBottom = scrollTop + clientHeight >= scrollHeight - 50;
+    shouldAutoScroll = isAtBottom;
+  }
+  
+  // Auto-scroll when messages change
+  $: if (messages.length !== previousMessagesLength) {
+    previousMessagesLength = messages.length;
+    // Small delay to ensure DOM is updated
+    setTimeout(() => scrollToBottom(true), 100);
+  }
+  
+  // Auto-scroll when loading state changes (AI starts/stops typing)
+  $: if ($isChatLoading !== undefined) {
+    setTimeout(() => scrollToBottom(true), 100);
+  }
+  
   onMount(() => {
     // Load messages if session exists
     if ($currentChatSession) {
@@ -26,9 +64,32 @@
     // Listen for session load events from layout
     window.addEventListener('loadSession', handleSessionLoad as EventListener);
     
+    // Add scroll listener
+    if (messagesContainer) {
+      messagesContainer.addEventListener('scroll', handleScroll);
+    }
+    
+    // Initial scroll to bottom
+    setTimeout(() => scrollToBottom(false), 200);
+    
     return () => {
       window.removeEventListener('loadSession', handleSessionLoad as EventListener);
+      if (messagesContainer) {
+        messagesContainer.removeEventListener('scroll', handleScroll);
+      }
     };
+  });
+  
+  // Also scroll after updates (for when messages are updated in place)
+  afterUpdate(() => {
+    if (shouldAutoScroll && messagesContainer) {
+      // Use requestAnimationFrame for smoother scrolling
+      requestAnimationFrame(() => {
+        if (messagesContainer && shouldAutoScroll) {
+          messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+      });
+    }
   });
 
   function handleSessionLoad(event: CustomEvent) {
@@ -45,6 +106,8 @@
       } else {
         messages = [];
       }
+      // Scroll to bottom when loading a session
+      setTimeout(() => scrollToBottom(false), 200);
     } catch (error) {
       console.error("❌ Failed to load session:", error);
       messages = [];
@@ -84,6 +147,8 @@
     };
 
     messages = [...messages, userMessage];
+    // Scroll to bottom after user message
+    setTimeout(() => scrollToBottom(true), 50);
     apiActions.setChatLoading(true);
 
     try {
@@ -113,6 +178,8 @@
       messages = messages.map((msg) =>
         msg.id === userMessage.id ? updatedMessage : msg,
       );
+      // Scroll to bottom after AI response
+      setTimeout(() => scrollToBottom(true), 100);
 
       if (messages.length === 2) {
         const newTitle = `Chat about: ${message.substring(0, 50)}...`;
@@ -226,7 +293,11 @@
       {/if}
   
   <!-- Messages Container -->
-  <div class="flex-1 overflow-y-auto p-8 space-y-6">
+  <div 
+    bind:this={messagesContainer}
+    class="flex-1 overflow-y-auto p-8 space-y-6"
+    onscroll={handleScroll}
+  >
     {#if messages.length === 0}
       <div class="text-center text-gray-500 mt-20">
         <div class="flex items-center justify-center mx-auto mb-6">
