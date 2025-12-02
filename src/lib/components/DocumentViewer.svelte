@@ -10,9 +10,10 @@
   let error = $state<string | null>(null);
   let contentUrl = $state<string | null>(null);
 
-  // Lazy load PDF.js and mammoth only when needed (client-side)
+  // Lazy load PDF.js, mammoth, and xlsx only when needed (client-side)
   let pdfjsLib: any = null;
   let mammoth: any = null;
+  let xlsxLib: any = null;
 
   // Track the current document ID to detect changes
   let currentDocId = $state<number | null>(null);
@@ -48,6 +49,17 @@
       mammoth = mammothModule.default || mammothModule;
     }
     return mammoth;
+  }
+
+  async function loadXLSX() {
+    if (typeof window === 'undefined') return null;
+    
+    if (!xlsxLib) {
+      const xlsxModule = await import('xlsx');
+      // xlsx exports as namespace
+      xlsxLib = xlsxModule;
+    }
+    return xlsxLib;
   }
 
   onMount(async () => {
@@ -104,6 +116,8 @@
         await renderDOCX(blob);
       } else if (fileType === 'txt') {
         await renderTXT(blob);
+      } else if (fileType === 'xlsx' || fileType === 'xls') {
+        await renderExcel(blob);
       } else {
         throw new Error(`Unsupported file type: ${fileType}`);
       }
@@ -243,6 +257,303 @@
     }
   }
 
+  async function renderExcel(blob: Blob) {
+    if (!container || typeof window === 'undefined') return;
+
+    // Load xlsx library first
+    const xlsx = await loadXLSX();
+    if (!xlsx) {
+      throw new Error('xlsx library could not be loaded');
+    }
+
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      // Read with cellStyles to get formatting information
+      const workbook = xlsx.read(arrayBuffer, { type: 'array', cellStyles: true });
+      
+      // Build HTML for all sheets
+      let html = '<div class="excel-viewer" style="padding: 40px; max-width: 100%; margin: 0 auto; background: white; font-family: \'Poppins\', sans-serif;">';
+      
+      // Process each sheet
+      workbook.SheetNames.forEach((sheetName: string, index: number) => {
+        const worksheet = workbook.Sheets[sheetName];
+        
+        // Get the range of the worksheet
+        const range = xlsx.utils.decode_range(worksheet['!ref'] || 'A1');
+        if (!worksheet['!ref']) {
+          return; // Skip empty sheets
+        }
+        
+        // Get column widths if available
+        const colWidths: { [key: number]: number } = {};
+        if (worksheet['!cols']) {
+          worksheet['!cols'].forEach((col: any, idx: number) => {
+            if (col && col.wpx) {
+              colWidths[idx] = col.wpx;
+            } else if (col && col.width) {
+              // Convert Excel column width to pixels (approximate)
+              colWidths[idx] = col.width * 7; // Rough conversion
+            }
+          });
+        }
+        
+        // Track merged cells
+        const mergedCells: { [key: string]: any } = {};
+        if (worksheet['!merges']) {
+          worksheet['!merges'].forEach((merge: any) => {
+            const start = xlsx.utils.encode_cell({ r: merge.s.r, c: merge.s.c });
+            mergedCells[start] = {
+              rowspan: merge.e.r - merge.s.r + 1,
+              colspan: merge.e.c - merge.s.c + 1
+            };
+          });
+        }
+        
+        // Add sheet header
+        if (workbook.SheetNames.length > 1) {
+          html += `<div class="excel-sheet-header" style="margin-top: ${index > 0 ? '60px' : '0'}; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 2px solid #e5e7eb;">`;
+          html += `<h2 style="font-size: 24px; font-weight: 600; color: #37352F; margin: 0;">${escapeHtml(sheetName)}</h2>`;
+          html += `</div>`;
+        }
+        
+        // Create table
+        html += '<div class="excel-table-container" style="overflow-x: auto; margin-bottom: 30px;">';
+        html += '<table class="excel-table" style="border-collapse: collapse; background: white; table-layout: fixed;">';
+        
+        // Build column width styles
+        if (Object.keys(colWidths).length > 0) {
+          html += '<colgroup>';
+          for (let c = range.s.c; c <= range.e.c; c++) {
+            const width = colWidths[c] ? `${colWidths[c]}px` : 'auto';
+            html += `<col style="width: ${width};" />`;
+          }
+          html += '</colgroup>';
+        }
+        
+        // Process each row
+        for (let r = range.s.r; r <= range.e.r; r++) {
+          let rowHasContent = false;
+          let rowCells: string[] = [];
+          
+          // Check if row has any content
+          for (let c = range.s.c; c <= range.e.c; c++) {
+            const cellAddress = xlsx.utils.encode_cell({ r, c });
+            const cell = worksheet[cellAddress];
+            if (cell && (cell.v !== null && cell.v !== undefined && cell.v !== '')) {
+              rowHasContent = true;
+              break;
+            }
+          }
+          
+          if (!rowHasContent) continue;
+          
+          html += '<tr>';
+          
+          for (let c = range.s.c; c <= range.e.c; c++) {
+            const cellAddress = xlsx.utils.encode_cell({ r, c });
+            const cell = worksheet[cellAddress];
+            const mergeInfo = mergedCells[cellAddress];
+            
+            // Check if this cell is covered by another merge (not the starting cell)
+            let isCoveredByMerge = false;
+            if (!mergeInfo) {
+              for (const [startAddr, merge] of Object.entries(mergedCells)) {
+                const start = xlsx.utils.decode_cell(startAddr);
+                if (r >= start.r && r <= start.r + (merge as any).rowspan - 1 &&
+                    c >= start.c && c <= start.c + (merge as any).colspan - 1 &&
+                    !(r === start.r && c === start.c)) {
+                  isCoveredByMerge = true;
+                  break;
+                }
+              }
+            }
+            
+            if (isCoveredByMerge) {
+              continue; // Skip this cell, it's covered by a merge
+            }
+            
+            // Get cell value with proper formatting
+            let cellValue = '';
+            if (cell) {
+              if (cell.w !== undefined && cell.w !== null) {
+                cellValue = String(cell.w); // Formatted text (preferred)
+              } else if (cell.v !== undefined && cell.v !== null) {
+                // Format numbers with proper decimal places if it's a number
+                if (typeof cell.v === 'number') {
+                  // Check if it's an integer or has decimals
+                  if (cell.v % 1 === 0) {
+                    cellValue = String(cell.v);
+                  } else {
+                    // Preserve reasonable decimal places
+                    cellValue = cell.v.toFixed(2).replace(/\.?0+$/, '');
+                  }
+                } else {
+                  cellValue = String(cell.v);
+                }
+              }
+            }
+            
+            // Build cell style
+            const styles: string[] = [];
+            
+            // Base styles
+            styles.push('padding: 8px 12px');
+            styles.push('border: 1px solid #d1d5db');
+            styles.push('vertical-align: middle');
+            
+            // Apply cell formatting
+            if (cell && cell.s) {
+              const style = cell.s;
+              
+              // Background color
+              if (style.fill && style.fill.fgColor) {
+                const bgColor = excelColorToCSS(style.fill.fgColor);
+                if (bgColor) {
+                  styles.push(`background-color: ${bgColor}`);
+                }
+              }
+              
+              // Font styles
+              if (style.font) {
+                if (style.font.bold) {
+                  styles.push('font-weight: bold');
+                }
+                if (style.font.italic) {
+                  styles.push('font-style: italic');
+                }
+                if (style.font.underline) {
+                  styles.push('text-decoration: underline');
+                }
+                if (style.font.strike) {
+                  styles.push('text-decoration: line-through');
+                }
+                if (style.font.sz) {
+                  styles.push(`font-size: ${style.font.sz}pt`);
+                }
+                if (style.font.color) {
+                  const textColor = excelColorToCSS(style.font.color);
+                  if (textColor) {
+                    styles.push(`color: ${textColor}`);
+                  }
+                }
+                if (style.font.name) {
+                  styles.push(`font-family: "${style.font.name}", sans-serif`);
+                }
+              }
+              
+              // Alignment
+              if (style.alignment) {
+                if (style.alignment.horizontal) {
+                  styles.push(`text-align: ${style.alignment.horizontal}`);
+                }
+                if (style.alignment.vertical) {
+                  styles.push(`vertical-align: ${style.alignment.vertical}`);
+                }
+                if (style.alignment.wrapText) {
+                  styles.push('white-space: normal');
+                  styles.push('word-wrap: break-word');
+                }
+              }
+              
+              // Borders
+              if (style.border) {
+                const borderStyles = getBorderStyles(style.border);
+                if (borderStyles.length > 0) {
+                  styles.push(...borderStyles);
+                }
+              }
+            }
+            
+            // Merge attributes
+            let mergeAttrs = '';
+            if (mergeInfo) {
+              if (mergeInfo.rowspan > 1) {
+                mergeAttrs += ` rowspan="${mergeInfo.rowspan}"`;
+              }
+              if (mergeInfo.colspan > 1) {
+                mergeAttrs += ` colspan="${mergeInfo.colspan}"`;
+              }
+            }
+            
+            const cellStyle = styles.join('; ');
+            html += `<td style="${cellStyle}"${mergeAttrs}>${escapeHtml(cellValue)}</td>`;
+          }
+          
+          html += '</tr>';
+        }
+        
+        html += '</table>';
+        html += '</div>';
+      });
+      
+      html += '</div>';
+      
+      container.innerHTML = html;
+    } catch (err) {
+      throw new Error(`Failed to render Excel: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  }
+
+  // Convert Excel color format to CSS color
+  function excelColorToCSS(color: any): string | null {
+    if (!color) return null;
+    
+    // RGB format
+    if (color.rgb) {
+      // Remove alpha if present (Excel uses ARGB, CSS uses RGB)
+      const rgb = color.rgb;
+      if (rgb.length === 8) {
+        // ARGB format, remove alpha
+        return `#${rgb.substring(2)}`;
+      }
+      return `#${rgb}`;
+    }
+    
+    // Theme color (limited support)
+    if (color.theme !== undefined) {
+      // Basic theme color mapping
+      const themeColors: { [key: number]: string } = {
+        0: '#000000', // Dark 1
+        1: '#FFFFFF', // Light 1
+        2: '#FF0000', // Dark 2
+        3: '#00FF00', // Light 2
+        4: '#0000FF', // Accent 1
+        5: '#FFFF00', // Accent 2
+        6: '#FF00FF', // Accent 3
+        7: '#00FFFF', // Accent 4
+        8: '#800000', // Accent 5
+        9: '#008000', // Accent 6
+      };
+      return themeColors[color.theme] || null;
+    }
+    
+    return null;
+  }
+
+  // Get border styles from Excel border format
+  function getBorderStyles(border: any): string[] {
+    const styles: string[] = [];
+    
+    const sides = ['top', 'right', 'bottom', 'left'] as const;
+    const borderProps = ['top', 'right', 'bottom', 'left'] as const;
+    
+    borderProps.forEach((side, index) => {
+      const borderSide = border[side];
+      if (borderSide && borderSide.style) {
+        const color = borderSide.color ? excelColorToCSS(borderSide.color) : '#d1d5db';
+        const style = borderSide.style === 'thin' ? '1px solid' :
+                     borderSide.style === 'medium' ? '2px solid' :
+                     borderSide.style === 'thick' ? '3px solid' :
+                     borderSide.style === 'dashed' ? '1px dashed' :
+                     borderSide.style === 'dotted' ? '1px dotted' :
+                     '1px solid';
+        styles.push(`border-${side}: ${style} ${color || '#d1d5db'}`);
+      }
+    });
+    
+    return styles;
+  }
+
   function escapeHtml(text: string): string {
     const div = window.document.createElement('div');
     div.textContent = text;
@@ -284,6 +595,60 @@
   :global(.pdf-page) {
     background: white;
     margin: 0 auto;
+  }
+
+  :global(.excel-viewer) {
+    padding: 40px;
+    max-width: 100%;
+    margin: 0 auto;
+    background: white;
+    font-family: 'Poppins', sans-serif;
+  }
+
+  :global(.excel-sheet-header) {
+    margin-top: 60px;
+    margin-bottom: 20px;
+    padding-bottom: 15px;
+    border-bottom: 2px solid #e5e7eb;
+  }
+
+  :global(.excel-sheet-header:first-child) {
+    margin-top: 0;
+  }
+
+  :global(.excel-table-container) {
+    overflow-x: auto;
+    margin-bottom: 30px;
+  }
+
+  :global(.excel-table) {
+    width: 100%;
+    border-collapse: collapse;
+    border: 1px solid #e5e7eb;
+    background: white;
+  }
+
+  :global(.excel-table th) {
+    background: #f9fafb;
+    font-weight: 600;
+    color: #37352F;
+    padding: 12px 16px;
+    border: 1px solid #e5e7eb;
+    text-align: left;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  :global(.excel-table td) {
+    padding: 10px 16px;
+    border: 1px solid #e5e7eb;
+    text-align: left;
+    color: #37352F;
+  }
+
+  :global(.excel-table tr:hover) {
+    background: #f9fafb;
   }
 </style>
 

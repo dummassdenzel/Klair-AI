@@ -43,7 +43,7 @@
             {:else}
               {#if isUser}
                 <!-- User messages: plain text (no markdown) -->
-                <div class="whitespace-pre-wrap">{safeMessage}</div>
+              <div class="whitespace-pre-wrap">{safeMessage}</div>
               {:else}
                 <!-- AI messages: render markdown -->
                 <MarkdownRenderer content={safeMessage} />

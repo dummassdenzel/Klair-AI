@@ -909,7 +909,9 @@ async def get_document_file(document_id: int):
             content_type_map = {
                 'pdf': 'application/pdf',
                 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                'txt': 'text/plain'
+                'txt': 'text/plain',
+                'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'xls': 'application/vnd.ms-excel'
             }
             
             content_type = content_type_map.get(file_type, 'application/octet-stream')
@@ -947,7 +949,7 @@ async def get_document_file(document_id: int):
                         logger.error(f"Failed to read TXT file {file_path}: {e}")
                         raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
             
-            # For PDF and DOCX files, return file response
+            # For PDF, DOCX, and Excel files, return file response
             return FileResponse(
                 path=file_path,
                 media_type=content_type,
