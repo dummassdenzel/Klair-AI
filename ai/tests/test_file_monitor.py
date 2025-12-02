@@ -7,7 +7,7 @@ import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.file_monitor import FileMonitorService
-from services.document_processor import DocumentProcessor
+from services.document_processor import DocumentProcessorOrchestrator
 
 async def test_new_file_monitor():
     """Test the new FileMonitorService"""
@@ -19,7 +19,7 @@ async def test_new_file_monitor():
     
     try:
         # Initialize document processor
-        processor = DocumentProcessor(persist_dir="./test_monitor_v2_db")
+        processor = DocumentProcessorOrchestrator(persist_dir="./test_monitor_v2_db")
         
         # Create file monitor service
         monitor = FileMonitorService(processor)

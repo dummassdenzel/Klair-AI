@@ -73,6 +73,3 @@ __all__ = [
     "config",
     "DocumentProcessorConfig"
 ]
-
-# For backward compatibility, you can still import the old way
-DocumentProcessor = DocumentProcessorOrchestrator

@@ -7,7 +7,7 @@ import shutil
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.document_processor import DocumentProcessor
+from services.document_processor import DocumentProcessorOrchestrator
 
 class TestDocumentProcessor:
     def __init__(self):
@@ -27,7 +27,7 @@ class TestDocumentProcessor:
         
         try:
             # Initialize processor with test directory
-            self.processor = DocumentProcessor(persist_dir="./test_chroma_db")
+            self.processor = DocumentProcessorOrchestrator(persist_dir="./test_chroma_db")
             print("✅ Test environment ready")
         except Exception as e:
             print(f"❌ Failed to initialize processor: {e}")

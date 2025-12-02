@@ -27,7 +27,7 @@ class Settings:
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
     
     # File processing
-    SUPPORTED_EXTENSIONS: List[str] = os.getenv("SUPPORTED_EXTENSIONS", ".pdf,.docx,.txt").split(',')
+    SUPPORTED_EXTENSIONS: List[str] = os.getenv("SUPPORTED_EXTENSIONS", ".pdf,.docx,.txt,.xlsx,.xls").split(',')
     
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

@@ -54,7 +54,7 @@
   $: if ($isChatLoading !== undefined) {
     setTimeout(() => scrollToBottom(true), 100);
   }
-  
+
   onMount(() => {
     // Load messages if session exists
     if ($currentChatSession) {

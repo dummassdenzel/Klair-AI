@@ -157,16 +157,16 @@ export MAX_CONCURRENT_FILES=10
 6. **Error Handling**: Better error isolation and handling
 7. **Resource Management**: Proper cleanup and resource management
 
-## Migration from Old Code
+## Usage
 
-The old `DocumentProcessor` class is still available for backward compatibility:
+Use the `DocumentProcessorOrchestrator` class for all document processing:
 
 ```python
-# Old way (still works)
-from services.document_processor import DocumentProcessor
-
-# New way (recommended)
 from services.document_processor import DocumentProcessorOrchestrator
+
+processor = DocumentProcessorOrchestrator()
+await processor.initialize_from_directory("/path/to/documents")
+result = await processor.query("What is this document about?")
 ```
 
 ## Testing

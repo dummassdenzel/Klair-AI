@@ -6,7 +6,7 @@ import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.document_processor import DocumentProcessor
+from services.document_processor import DocumentProcessorOrchestrator
 from services.file_monitor import FileMonitorService  # Updated import
 
 async def test_integration():
@@ -24,7 +24,7 @@ async def test_integration():
             f.write("This is a test document for integration testing.")
         
         # Initialize document processor
-        processor = DocumentProcessor(persist_dir="./test_integration_db")
+        processor = DocumentProcessorOrchestrator(persist_dir="./test_integration_db")
         await processor.initialize_from_directory(test_dir)
         
         # Test initial query
@@ -95,7 +95,7 @@ async def test_full_workflow():
     
     try:
         # Initialize processor
-        processor = DocumentProcessor(persist_dir="./test_workflow_db")
+        processor = DocumentProcessorOrchestrator(persist_dir="./test_workflow_db")
         
         # Create multiple files
         files = {
