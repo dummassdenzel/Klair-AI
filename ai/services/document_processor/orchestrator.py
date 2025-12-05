@@ -876,6 +876,97 @@ Your response:"""
         
         return (documents, metadatas, scores, retrieval_count, rerank_count)
     
+    async def _get_document_listing(self) -> QueryResult:
+        """
+        Get listing of all documents from database.
+        Used for document_listing queries.
+        """
+        try:
+            from database.database import get_db
+            from database.models import IndexedDocument
+            from sqlalchemy import select
+            
+            all_docs = []
+            async for db_session in get_db():
+                stmt = select(IndexedDocument).where(
+                    IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
+                )
+                result = await db_session.execute(stmt)
+                all_docs = result.scalars().all()
+                break
+            
+            if not all_docs:
+                return QueryResult(
+                    message="No documents are currently indexed.",
+                    sources=[],
+                    response_time=0.0,
+                    query_type="document_listing",
+                    retrieval_count=0,
+                    rerank_count=0
+                )
+            
+            # Build context from all documents
+            sources = []
+            context_parts = []
+            for doc in all_docs:
+                filename = Path(doc.file_path).name
+                
+                if doc.processing_status == "metadata_only":
+                    preview = f"[Indexing in progress...] {filename}"
+                else:
+                    preview = doc.content_preview if doc.content_preview else ""
+                    if not preview and doc.chunks_count > 0:
+                        preview = f"[File indexed with {doc.chunks_count} chunk(s)]"
+                
+                context_parts.append(f"[Document: {filename}]\n{preview}")
+                sources.append({
+                    "file_path": doc.file_path,
+                    "relevance_score": 1.0,
+                    "content_snippet": preview[:300] + "..." if len(preview) > 300 else preview,
+                    "chunks_found": doc.chunks_count,
+                    "file_type": doc.file_type,
+                    "processing_status": doc.processing_status
+                })
+            
+            context = "\n\n---\n\n".join(context_parts)
+            
+            # Generate response with comprehensive prompt
+            response_prompt = f"""You are a document assistant. The user asked to see all documents.
+
+Here are all indexed documents:
+
+{context}
+
+Provide a clear, organized list of all documents. For each document, mention:
+- The filename
+- Brief description if available
+- File type
+- Status (if still indexing)
+
+Be comprehensive and list ALL documents mentioned above."""
+
+            response_text = await self.llm_service.generate_simple(response_prompt)
+            
+            return QueryResult(
+                message=response_text,
+                sources=sources,
+                response_time=0.0,  # Will be set by caller
+                query_type="document_listing",
+                retrieval_count=len(all_docs),
+                rerank_count=0
+            )
+            
+        except Exception as e:
+            logger.error(f"Document listing failed: {e}")
+            return QueryResult(
+                message=f"Sorry, I encountered an error while retrieving the document list: {str(e)}",
+                sources=[],
+                response_time=0.0,
+                query_type="document_listing",
+                retrieval_count=0,
+                rerank_count=0
+            )
+    
     async def query(self, question: str, max_results: int = 15, conversation_history: list = None) -> QueryResult:
         """
         Query the document index using unified retrieval pipeline.
