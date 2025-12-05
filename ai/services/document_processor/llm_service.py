@@ -211,6 +211,8 @@ Question: {query}
 Instructions:
 - Answer based on the DOCUMENT CONTENT, not just filenames
 - Read the actual text in each document to understand what it contains
+- **COMPREHENSIVE EXTRACTION**: If the question asks for a list (e.g., "list all speakers", "all participants", "every attendee"), be thorough and include ALL items mentioned across ALL provided document chunks
+- **COMBINE INFORMATION**: If information appears in multiple chunks of the same document, combine it into a complete answer
 - When listing documents, look for mentions in the CONTENT (e.g., if content says "delivery receipt", include it)
 - Include the [Document: filename] label when referencing documents in your answer
 - Use previous conversation context to understand follow-up questions (e.g., "that file" refers to previously mentioned documents)

@@ -165,7 +165,7 @@ async def select_directory():
             
             # Count supported files in the directory
             dir_path = Path(directory_path)
-            supported_extensions = {'.pdf', '.docx', '.txt'}
+            supported_extensions = {'.pdf', '.docx', '.txt', '.xlsx', '.xls', '.pptx'}
             file_count = 0
             
             if dir_path.exists() and dir_path.is_dir():
@@ -911,7 +911,8 @@ async def get_document_file(document_id: int):
                 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                 'txt': 'text/plain',
                 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                'xls': 'application/vnd.ms-excel'
+                'xls': 'application/vnd.ms-excel',
+                'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
             }
             
             content_type = content_type_map.get(file_type, 'application/octet-stream')

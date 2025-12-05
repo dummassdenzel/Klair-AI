@@ -14,7 +14,7 @@ class FileValidator:
     
     def __init__(self, max_file_size_mb: int = 50):
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
-        self.supported_extensions = {".pdf", ".docx", ".txt", ".xlsx", ".xls"}
+        self.supported_extensions = {".pdf", ".docx", ".txt", ".xlsx", ".xls", ".pptx"}
     
     def validate_file(self, file_path: str) -> Tuple[bool, str]:
         """Validate file and return (is_valid, error_message)"""
