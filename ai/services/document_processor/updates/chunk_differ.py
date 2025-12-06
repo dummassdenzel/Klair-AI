@@ -19,8 +19,8 @@ import difflib
 from typing import List, Tuple, Set, Dict
 import numpy as np
 
-from .models import DocumentChunk, ChunkMatch, ChunkDiffResult
-from .embedding_service import EmbeddingService
+from ..models import DocumentChunk, ChunkMatch, ChunkDiffResult
+from ..extraction.embedding_service import EmbeddingService
 
 logger = logging.getLogger(__name__)
 

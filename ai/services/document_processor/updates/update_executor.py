@@ -17,13 +17,13 @@ from dataclasses import dataclass
 
 from .update_queue import UpdateTask, UpdateResult
 from .update_strategy import UpdateStrategy
-from .models import DocumentChunk, ChunkDiffResult
+from ..models import DocumentChunk, ChunkDiffResult
 from .chunk_differ import ChunkDiffer
-from .vector_store import VectorStoreService
-from .bm25_service import BM25Service
-from .text_extractor import TextExtractor
-from .chunker import DocumentChunker
-from .embedding_service import EmbeddingService
+from ..storage.vector_store import VectorStoreService
+from ..storage.bm25_service import BM25Service
+from ..extraction.text_extractor import TextExtractor
+from ..extraction.chunker import DocumentChunker
+from ..extraction.embedding_service import EmbeddingService
 from database import DatabaseService
 
 logger = logging.getLogger(__name__)
@@ -319,7 +319,7 @@ class UpdateExecutor:
         self.bm25_service.add_documents(bm25_documents)
         
         # Update database
-        from services.document_processor.file_validator import FileValidator
+        from ..extraction.file_validator import FileValidator
         file_validator = FileValidator()
         file_metadata = file_validator.extract_file_metadata(task.file_path)
         file_hash = file_validator.calculate_file_hash(task.file_path)
@@ -416,7 +416,7 @@ class UpdateExecutor:
         self.bm25_service.add_documents(bm25_documents)
         
         # Update database
-        from services.document_processor.file_validator import FileValidator
+        from ..extraction.file_validator import FileValidator
         file_validator = FileValidator()
         file_metadata = file_validator.extract_file_metadata(task.file_path)
         file_hash = file_validator.calculate_file_hash(task.file_path)

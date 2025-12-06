@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from database.database import get_db
 from database.models import IndexedDocument
 from sqlalchemy import select
-from services.document_processor.vector_store import VectorStoreService
+from services.document_processor.storage import VectorStoreService
 import logging
 
 logging.basicConfig(level=logging.INFO)

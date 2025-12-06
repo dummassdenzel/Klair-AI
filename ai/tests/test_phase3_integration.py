@@ -42,7 +42,7 @@ async def test_imports():
         print("✅ Phase 3 components imported")
         
         # Test UpdateWorker import
-        from services.document_processor.update_worker import UpdateWorker
+        from services.document_processor.updates import UpdateWorker
         print("✅ UpdateWorker imported")
         
         # Test FileMonitor import

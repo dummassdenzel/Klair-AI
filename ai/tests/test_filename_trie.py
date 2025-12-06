@@ -18,7 +18,7 @@ import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.document_processor.filename_trie import FilenameTrie
+from services.document_processor.retrieval import FilenameTrie
 from pathlib import Path
 
 

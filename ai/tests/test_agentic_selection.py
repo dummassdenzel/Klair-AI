@@ -9,8 +9,8 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from services.document_processor.llm_service import LLMService
-from services.document_processor.orchestrator import DocumentProcessorOrchestrator
+from services.document_processor.llm import LLMService
+from services.document_processor import DocumentProcessorOrchestrator
 from config import settings
 
 

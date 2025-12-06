@@ -6,21 +6,21 @@ from datetime import datetime
 from pathlib import Path
 
 from .models import QueryResult, ProcessingResult, FileMetadata
-from .text_extractor import TextExtractor
-from .chunker import DocumentChunker
-from .embedding_service import EmbeddingService
-from .vector_store import VectorStoreService
-from .llm_service import LLMService
-from .file_validator import FileValidator
-from .bm25_service import BM25Service
-from .hybrid_search import HybridSearchService
-from .reranker_service import ReRankingService
-from .filename_trie import FilenameTrie
-from .update_queue import UpdateQueue, UpdateTask, UpdatePriority
-from .update_executor import UpdateExecutor
-from .update_worker import UpdateWorker
-from .chunk_differ import ChunkDiffer
-from .update_strategy import UpdateStrategySelector
+from .extraction.text_extractor import TextExtractor
+from .extraction.chunker import DocumentChunker
+from .extraction.embedding_service import EmbeddingService
+from .storage.vector_store import VectorStoreService
+from .llm.llm_service import LLMService
+from .extraction.file_validator import FileValidator
+from .storage.bm25_service import BM25Service
+from .retrieval.hybrid_search import HybridSearchService
+from .retrieval.reranker_service import ReRankingService
+from .retrieval.filename_trie import FilenameTrie
+from .updates.update_queue import UpdateQueue, UpdateTask, UpdatePriority
+from .updates.update_executor import UpdateExecutor
+from .updates.update_worker import UpdateWorker
+from .updates.chunk_differ import ChunkDiffer
+from .updates.update_strategy import UpdateStrategySelector
 from .query_config import RetrievalConfig, default_retrieval_config
 from database import DatabaseService
 

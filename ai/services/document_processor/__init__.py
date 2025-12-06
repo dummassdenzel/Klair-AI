@@ -26,20 +26,15 @@ from .models import (
     DocumentChunk, QueryResult, FileMetadata, ProcessingResult,
     ChunkMatch, ChunkDiffResult
 )
-from .text_extractor import TextExtractor
-from .chunker import DocumentChunker
-from .embedding_service import EmbeddingService
-from .vector_store import VectorStoreService
-from .llm_service import LLMService
-from .file_validator import FileValidator
-from .bm25_service import BM25Service
-from .hybrid_search import HybridSearchService
-from .reranker_service import ReRankingService
-from .chunk_differ import ChunkDiffer
-from .update_strategy import UpdateStrategy, UpdateStrategySelector, StrategySelectionResult
-from .update_queue import UpdateQueue, UpdateTask, UpdateResult, UpdatePriority
-from .update_executor import UpdateExecutor, Checkpoint
-from .update_worker import UpdateWorker
+from .extraction import TextExtractor, DocumentChunker, EmbeddingService, FileValidator
+from .storage import VectorStoreService, BM25Service
+from .llm import LLMService
+from .retrieval import HybridSearchService, ReRankingService, FilenameTrie
+from .updates import (
+    ChunkDiffer, UpdateStrategy, UpdateStrategySelector, StrategySelectionResult,
+    UpdateQueue, UpdateTask, UpdateResult, UpdatePriority,
+    UpdateExecutor, Checkpoint, UpdateWorker
+)
 from .config import config, DocumentProcessorConfig
 
 __all__ = [

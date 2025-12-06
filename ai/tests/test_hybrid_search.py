@@ -14,8 +14,8 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from services.document_processor.bm25_service import BM25Service
-from services.document_processor.hybrid_search import HybridSearchService
+from services.document_processor.storage import BM25Service
+from services.document_processor.retrieval import HybridSearchService
 
 
 def test_bm25_basic():

@@ -1,5 +1,5 @@
 from typing import List
-from .models import DocumentChunk
+from ..models import DocumentChunk
 
 
 class DocumentChunker:

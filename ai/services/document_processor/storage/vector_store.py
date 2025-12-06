@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict, Optional
 from datetime import datetime
-from .models import DocumentChunk
+from ..models import DocumentChunk
 
 
 logger = logging.getLogger(__name__)

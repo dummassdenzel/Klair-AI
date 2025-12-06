@@ -13,7 +13,7 @@ from enum import Enum
 from typing import Optional
 from dataclasses import dataclass
 
-from .models import ChunkDiffResult
+from ..models import ChunkDiffResult
 
 logger = logging.getLogger(__name__)
 

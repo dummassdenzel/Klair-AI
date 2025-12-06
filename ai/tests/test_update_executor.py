@@ -21,7 +21,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import modules that will be patched
 import database.database
-import services.document_processor.file_validator
+import services.document_processor.extraction.file_validator
 
 from services.document_processor import (
     UpdateExecutor, UpdateTask, UpdateResult, UpdateStrategy,
@@ -175,7 +175,7 @@ async def test_2_full_reindex_execution():
     )
     
     # Mock file validator
-    with patch('services.document_processor.file_validator.FileValidator') as mock_validator_class:
+    with patch('services.document_processor.extraction.file_validator.FileValidator') as mock_validator_class:
         mock_validator = Mock()
         mock_validator.extract_file_metadata = Mock(return_value={
             "file_type": "txt",
@@ -242,7 +242,7 @@ async def test_3_chunk_update_execution():
     )
     
     # Mock file validator
-    with patch('services.document_processor.file_validator.FileValidator') as mock_validator_class:
+    with patch('services.document_processor.extraction.file_validator.FileValidator') as mock_validator_class:
         mock_validator = Mock()
         mock_validator.extract_file_metadata = Mock(return_value={
             "file_type": "txt",
@@ -473,7 +473,7 @@ async def test_7_smart_hybrid_execution():
     )
     
     # Mock file validator
-    with patch('services.document_processor.file_validator.FileValidator') as mock_validator_class:
+    with patch('services.document_processor.extraction.file_validator.FileValidator') as mock_validator_class:
         mock_validator = Mock()
         mock_validator.extract_file_metadata = Mock(return_value={
             "file_type": "txt",
@@ -540,7 +540,7 @@ async def test_8_chunk_update_fallback():
     )
     
     # Mock file validator
-    with patch('services.document_processor.file_validator.FileValidator') as mock_validator_class:
+    with patch('services.document_processor.extraction.file_validator.FileValidator') as mock_validator_class:
         mock_validator = Mock()
         mock_validator.extract_file_metadata = Mock(return_value={
             "file_type": "txt",

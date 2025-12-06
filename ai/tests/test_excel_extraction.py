@@ -18,7 +18,7 @@ import shutil
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from services.document_processor.text_extractor import TextExtractor
+from services.document_processor.extraction import TextExtractor
 
 
 async def test_basic_xlsx():
@@ -292,7 +292,7 @@ async def test_file_validator():
     print("TEST 6: FileValidator Excel Support")
     print("="*60)
     
-    from services.document_processor.file_validator import FileValidator
+    from services.document_processor.extraction import FileValidator
     
     validator = FileValidator()
     

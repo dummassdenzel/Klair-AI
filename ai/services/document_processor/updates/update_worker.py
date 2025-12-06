@@ -14,7 +14,7 @@ from .update_queue import UpdateQueue, UpdateTask, UpdateResult
 from .update_executor import UpdateExecutor
 from .chunk_differ import ChunkDiffer
 from .update_strategy import UpdateStrategySelector
-from .models import DocumentChunk
+from ..models import DocumentChunk
 
 logger = logging.getLogger(__name__)
 

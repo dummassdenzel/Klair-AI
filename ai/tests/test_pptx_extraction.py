@@ -10,7 +10,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from services.document_processor.text_extractor import TextExtractor
+from services.document_processor.extraction import TextExtractor
 import logging
 
 # Set up logging to see detailed output
