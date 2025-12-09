@@ -12,6 +12,7 @@ from .extraction.embedding_service import EmbeddingService
 from .storage.vector_store import VectorStoreService
 from .llm.llm_service import LLMService
 from .extraction.file_validator import FileValidator
+from .extraction.ocr_service import OCRService
 from .storage.bm25_service import BM25Service
 from .retrieval.hybrid_search import HybridSearchService
 from .retrieval.reranker_service import ReRankingService
@@ -43,8 +44,29 @@ class DocumentProcessorOrchestrator:
                  gemini_model: str = "gemini-2.5-pro",
                  llm_provider: str = "ollama"):
         
+        # Initialize OCR service (optional, for scanned documents and images)
+        # Try to import settings, but use defaults if not available
+        try:
+            import sys
+            from pathlib import Path
+            # Add ai directory to path if not already there
+            ai_dir = Path(__file__).parent.parent.parent.parent
+            if str(ai_dir) not in sys.path:
+                sys.path.insert(0, str(ai_dir))
+            from config import settings
+            
+            ocr_service = OCRService(
+                tesseract_path=settings.TESSERACT_PATH if settings.TESSERACT_PATH else None,
+                cache_dir=settings.OCR_CACHE_DIR,
+                languages=settings.OCR_LANGUAGES
+            )
+        except (ImportError, AttributeError):
+            # Settings not available, use defaults
+            logger.info("OCR settings not available, using defaults")
+            ocr_service = OCRService()
+        
         # Initialize all services
-        self.text_extractor = TextExtractor()
+        self.text_extractor = TextExtractor(ocr_service=ocr_service)
         self.chunker = DocumentChunker(chunk_size, chunk_overlap)
         self.embedding_service = EmbeddingService(embed_model_name)
         self.vector_store = VectorStoreService(persist_dir)
@@ -56,7 +78,7 @@ class DocumentProcessorOrchestrator:
             gemini_model=gemini_model,
             provider=llm_provider
         )
-        self.file_validator = FileValidator(max_file_size_mb)
+        self.file_validator = FileValidator(max_file_size_mb, ocr_service=ocr_service)
         self.database_service = DatabaseService()
         
         # Hybrid search services (semantic + keyword)

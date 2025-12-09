@@ -12,9 +12,20 @@ logger = logging.getLogger(__name__)
 class FileValidator:
     """Service for validating files and managing file metadata"""
     
-    def __init__(self, max_file_size_mb: int = 50):
+    def __init__(self, max_file_size_mb: int = 50, ocr_service=None):
+        """
+        Initialize file validator.
+        
+        Args:
+            max_file_size_mb: Maximum file size in MB
+            ocr_service: Optional OCRService instance (if provided, adds image extensions)
+        """
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
         self.supported_extensions = {".pdf", ".docx", ".txt", ".xlsx", ".xls", ".pptx"}
+        
+        # Add image extensions if OCR is available
+        if ocr_service and ocr_service.is_available():
+            self.supported_extensions.update({".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"})
     
     def validate_file(self, file_path: str) -> Tuple[bool, str]:
         """Validate file and return (is_valid, error_message)"""

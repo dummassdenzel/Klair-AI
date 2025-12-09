@@ -9,8 +9,20 @@ logger = logging.getLogger(__name__)
 class TextExtractor:
     """Service for extracting text from various document formats"""
     
-    def __init__(self):
+    def __init__(self, ocr_service=None):
+        """
+        Initialize text extractor.
+        
+        Args:
+            ocr_service: Optional OCRService instance for scanned document processing
+        """
         self.supported_extensions = {".pdf", ".docx", ".txt", ".xlsx", ".xls", ".pptx"}
+        # Add image extensions if OCR is available
+        if ocr_service and ocr_service.is_available():
+            self.supported_extensions.update({".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"})
+        
+        self.ocr_service = ocr_service
+        
         # Excel processing limits (configurable for performance)
         self.max_sheets_per_file = 20  # Limit sheets to prevent memory issues
         self.max_rows_per_sheet = 10000  # Limit rows per sheet
@@ -42,6 +54,8 @@ class TextExtractor:
                 return self._extract_excel(file_path)
             elif ext == ".pptx":
                 return self._extract_pptx(file_path)
+            elif ext in {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}:
+                return self._extract_image(file_path)
             else:
                 raise ValueError(f"Unsupported file type: {ext}")
         except Exception as e:
@@ -49,7 +63,10 @@ class TextExtractor:
             raise
     
     def _extract_pdf(self, file_path: str) -> str:
-        """Extract text from PDF"""
+        """
+        Extract text from PDF.
+        If PDF is scanned (no extractable text), uses OCR if available.
+        """
         try:
             import fitz
             doc = fitz.open(file_path)
@@ -57,7 +74,26 @@ class TextExtractor:
             for page in doc:
                 text += page.get_text()
             doc.close()
-            return text
+            
+            # Check if PDF has extractable text
+            if text.strip():
+                # PDF has text, return it
+                return text
+            else:
+                # PDF appears to be scanned (no text), try OCR
+                if self.ocr_service and self.ocr_service.is_available():
+                    logger.info(f"PDF {file_path} has no extractable text, attempting OCR...")
+                    try:
+                        # Use sync method directly (OCR service has sync methods for internal use)
+                        ocr_text = self.ocr_service._extract_text_from_scanned_pdf_sync(file_path)
+                        return ocr_text if ocr_text else ""
+                    except Exception as ocr_error:
+                        logger.warning(f"OCR failed for PDF {file_path}: {ocr_error}")
+                        return ""
+                else:
+                    logger.warning(f"PDF {file_path} has no extractable text and OCR is not available")
+                    return ""
+                    
         except Exception as e:
             logger.error(f"PDF extraction failed for {file_path}: {e}")
             raise
@@ -608,6 +644,35 @@ class TextExtractor:
             return ""  # Sheet has no data rows
         
         return "\n".join(lines)
+    
+    def _extract_image(self, file_path: str) -> str:
+        """
+        Extract text from image file using OCR.
+        
+        Args:
+            file_path: Path to image file
+            
+        Returns:
+            Extracted text from image
+        """
+        if not self.ocr_service or not self.ocr_service.is_available():
+            raise RuntimeError(
+                f"OCR not available. Cannot extract text from image file: {file_path}. "
+                "Please install Tesseract OCR to enable image processing."
+            )
+        
+        try:
+            # Use sync method directly (OCR service has sync methods for internal use)
+            text = self.ocr_service._extract_text_from_image_sync(file_path)
+            
+            if not text:
+                logger.warning(f"No text extracted from image {file_path}")
+            
+            return text
+            
+        except Exception as e:
+            logger.error(f"Image OCR extraction failed for {file_path}: {e}")
+            raise
     
     def is_supported_file(self, file_path: str) -> bool:
         """Check if file type is supported"""

@@ -5,12 +5,14 @@ from .chunker import DocumentChunker
 from .file_validator import FileValidator
 from .embedding_service import EmbeddingService
 from .pptx_converter import PPTXConverter
+from .ocr_service import OCRService
 
 __all__ = [
     "TextExtractor",
     "DocumentChunker",
     "FileValidator",
     "EmbeddingService",
-    "PPTXConverter"
+    "PPTXConverter",
+    "OCRService"
 ]
 

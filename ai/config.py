@@ -35,6 +35,13 @@ class Settings:
     PPTX_CACHE_ENABLED: bool = os.getenv("PPTX_CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
     PPTX_CONVERSION_TIMEOUT: int = int(os.getenv("PPTX_CONVERSION_TIMEOUT", "60"))
     
+    # OCR settings
+    TESSERACT_PATH: str = os.getenv("TESSERACT_PATH", "")  # Auto-detect if empty
+    OCR_CACHE_DIR: str = os.getenv("OCR_CACHE_DIR", "./ocr_cache")
+    OCR_CACHE_ENABLED: bool = os.getenv("OCR_CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
+    OCR_LANGUAGES: str = os.getenv("OCR_LANGUAGES", "eng")  # Comma-separated: "eng,spa,fra"
+    OCR_TIMEOUT: int = int(os.getenv("OCR_TIMEOUT", "300"))  # 5 minutes for large images
+    
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FORMAT: str = os.getenv("LOG_FORMAT", "human")  # 'json' or 'human'
