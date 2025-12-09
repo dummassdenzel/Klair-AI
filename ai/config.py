@@ -27,7 +27,13 @@ class Settings:
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
     
     # File processing
-    SUPPORTED_EXTENSIONS: List[str] = os.getenv("SUPPORTED_EXTENSIONS", ".pdf,.docx,.txt,.xlsx,.xls").split(',')
+    SUPPORTED_EXTENSIONS: List[str] = os.getenv("SUPPORTED_EXTENSIONS", ".pdf,.docx,.txt,.xlsx,.xls,.pptx").split(',')
+    
+    # PPTX Preview settings
+    LIBREOFFICE_PATH: str = os.getenv("LIBREOFFICE_PATH", "")  # Auto-detect if empty
+    PPTX_CACHE_DIR: str = os.getenv("PPTX_CACHE_DIR", "./pptx_cache")
+    PPTX_CACHE_ENABLED: bool = os.getenv("PPTX_CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
+    PPTX_CONVERSION_TIMEOUT: int = int(os.getenv("PPTX_CONVERSION_TIMEOUT", "60"))
     
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

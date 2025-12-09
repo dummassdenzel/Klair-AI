@@ -10,6 +10,7 @@ import os
 import json
 from pathlib import Path
 from services.document_processor import DocumentProcessorOrchestrator, config
+from services.document_processor.extraction import PPTXConverter
 from config import settings
 from services.file_monitor import FileMonitorService
 from schemas.chat import ChatRequest, ChatResponse
@@ -45,6 +46,9 @@ prewarming_task = None
 # NEW: Add database service
 db_service = DatabaseService()
 
+# PPTX Converter for preview functionality
+pptx_converter: Optional[PPTXConverter] = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
@@ -52,6 +56,18 @@ async def lifespan(app: FastAPI):
     
     # Startup
     logger.info("Starting AI Document Assistant...")
+    
+    # Initialize PPTX converter
+    global pptx_converter
+    libreoffice_path = settings.LIBREOFFICE_PATH if settings.LIBREOFFICE_PATH else None
+    pptx_converter = PPTXConverter(
+        libreoffice_path=libreoffice_path,
+        cache_dir=settings.PPTX_CACHE_DIR
+    )
+    if pptx_converter.is_available():
+        logger.info("PPTX preview functionality enabled")
+    else:
+        logger.warning("PPTX preview disabled: LibreOffice not found")
     
     # Start pre-warming immediately
     prewarming_task = asyncio.create_task(prewarm_services())
@@ -967,6 +983,115 @@ async def get_document_file(document_id: int):
     except Exception as e:
         logger.error(f"Failed to serve document file {document_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to serve document file: {str(e)}")
+
+@app.get("/api/documents/{document_id}/preview")
+async def get_document_preview(document_id: int, format: str = "pdf", force_refresh: bool = False):
+    """
+    Get a preview of a document in a viewable format.
+    Currently supports PPTX -> PDF conversion for PowerPoint files.
+    
+    Args:
+        document_id: ID of the document
+        format: Requested preview format (default: "pdf")
+        force_refresh: If True, bypass cache and regenerate preview
+        
+    Returns:
+        Preview file (PDF for PPTX files)
+    """
+    global pptx_converter
+    
+    if not pptx_converter:
+        raise HTTPException(
+            status_code=503, 
+            detail="PPTX preview service not available. LibreOffice may not be installed."
+        )
+    
+    if not pptx_converter.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="PPTX preview service not available. LibreOffice not found."
+        )
+    
+    try:
+        # Get document from database
+        async for db_session in get_db():
+            stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
+            result = await db_session.execute(stmt)
+            document = result.scalar_one_or_none()
+            
+            if not document:
+                raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
+            
+            file_path = document.file_path
+            file_type = document.file_type.lower().replace('.', '')
+            
+            # Validate file exists
+            path_obj = Path(file_path)
+            if not path_obj.exists() or not path_obj.is_file():
+                logger.error(f"Document file not found on disk: {file_path}")
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Document file not found on disk: {path_obj.name}"
+                )
+            
+            # Currently only support PPTX -> PDF conversion
+            if file_type != 'pptx':
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Preview not supported for file type: {file_type}. Currently only PPTX files are supported."
+                )
+            
+            if format != 'pdf':
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Preview format '{format}' not supported. Only 'pdf' is currently supported."
+                )
+            
+            # Convert PPTX to PDF
+            try:
+                use_cache = settings.PPTX_CACHE_ENABLED and not force_refresh
+                pdf_path = await pptx_converter.convert_pptx_to_pdf(
+                    file_path,
+                    use_cache=use_cache
+                )
+                
+                # Return PDF file
+                return FileResponse(
+                    path=pdf_path,
+                    media_type='application/pdf',
+                    filename=f"{path_obj.stem}.pdf",
+                    headers={
+                        "X-Document-Id": str(document_id),
+                        "X-Original-File": path_obj.name,
+                        "X-Preview-Format": "pdf",
+                        "X-Cache-Used": "true" if use_cache and pptx_converter.get_cached_pdf(file_path) else "false"
+                    }
+                )
+                
+            except FileNotFoundError as e:
+                logger.error(f"PPTX file not found: {e}")
+                raise HTTPException(status_code=404, detail=f"PPTX file not found: {str(e)}")
+            except RuntimeError as e:
+                logger.error(f"PPTX conversion failed: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to convert PPTX to PDF: {str(e)}"
+                )
+            except Exception as e:
+                logger.error(f"Unexpected error during PPTX conversion: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Unexpected error during preview generation: {str(e)}"
+                )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to generate preview for document {document_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate preview: {str(e)}"
+        )
 
 @app.get("/api/documents/{document_id}")
 async def get_document_metadata(document_id: int):
