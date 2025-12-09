@@ -11,6 +11,7 @@ import shutil
 import hashlib
 import os
 import platform
+import signal
 from pathlib import Path
 from typing import Optional
 import asyncio
@@ -205,6 +206,7 @@ class PPTXConverter:
             pptx_path: Path to PPTX file
             output_dir: Directory to save PDF output
         """
+        process = None
         try:
             # Build LibreOffice command
             cmd = [
@@ -217,24 +219,67 @@ class PPTXConverter:
             
             logger.debug(f"Running LibreOffice conversion: {' '.join(cmd)}")
             
-            # Run conversion with timeout
-            result = subprocess.run(
+            # Create process with proper cleanup handling
+            # Use Popen for better control over process lifecycle
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.conversion_timeout,
-                check=False
+                # Create new process group on Windows to allow proper termination
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if platform.system() == "Windows" else 0
             )
             
-            if result.returncode != 0:
-                error_msg = result.stderr or result.stdout or "Unknown error"
+            # Wait with timeout
+            try:
+                stdout, stderr = process.communicate(timeout=self.conversion_timeout)
+            except subprocess.TimeoutExpired:
+                # Kill the process and its children
+                try:
+                    if platform.system() == "Windows":
+                        # On Windows, use taskkill to kill process tree
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                            capture_output=True,
+                            timeout=5
+                        )
+                    else:
+                        # On Unix, kill process group
+                        try:
+                            pgid = os.getpgid(process.pid)
+                            os.killpg(pgid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            # Process already dead
+                            pass
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                pgid = os.getpgid(process.pid)
+                                os.killpg(pgid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                # Process already dead
+                                pass
+                except Exception as kill_error:
+                    logger.warning(f"Error killing LibreOffice process: {kill_error}")
+                finally:
+                    process.wait()  # Ensure process is cleaned up
+                
                 raise RuntimeError(
-                    f"LibreOffice conversion failed (exit code {result.returncode}): {error_msg}"
+                    f"PPTX conversion timed out after {self.conversion_timeout} seconds. "
+                    "File may be too large or complex."
+                )
+            
+            if process.returncode != 0:
+                error_msg = stderr or stdout or "Unknown error"
+                raise RuntimeError(
+                    f"LibreOffice conversion failed (exit code {process.returncode}): {error_msg}"
                 )
             
             logger.debug(f"LibreOffice conversion completed successfully")
             
         except subprocess.TimeoutExpired:
+            # This should not happen as we handle it above, but keep for safety
             raise RuntimeError(
                 f"PPTX conversion timed out after {self.conversion_timeout} seconds. "
                 "File may be too large or complex."
@@ -244,7 +289,36 @@ class PPTXConverter:
                 f"LibreOffice executable not found at: {self.libreoffice_path}"
             )
         except Exception as e:
+            # Ensure process is cleaned up even on unexpected errors
+            if process and process.poll() is None:
+                try:
+                    if platform.system() == "Windows":
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                            capture_output=True,
+                            timeout=5
+                        )
+                    else:
+                        try:
+                            pgid = os.getpgid(process.pid)
+                            os.killpg(pgid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            # Process already dead
+                            pass
+                except Exception:
+                    pass
             raise RuntimeError(f"PPTX conversion failed: {str(e)}")
+        finally:
+            # Ensure process is terminated
+            if process and process.poll() is None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=2)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
     
     def get_cached_pdf(self, pptx_path: str) -> Optional[str]:
         """
@@ -268,28 +342,92 @@ class PPTXConverter:
         Args:
             older_than_days: Only clear files older than this many days. 
                            If None, clears all cache.
+                           
+        Returns:
+            dict with statistics about cleared cache
         """
         if not self.cache_dir.exists():
-            return
+            return {
+                "cleared_count": 0,
+                "total_size_bytes": 0,
+                "cache_dir": str(self.cache_dir)
+            }
         
         now = datetime.now().timestamp()
         cleared_count = 0
+        total_size_bytes = 0
         
         for cache_file in self.cache_dir.glob("*.pdf"):
             try:
+                file_size = cache_file.stat().st_size
+                should_delete = False
+                
                 if older_than_days is None:
-                    cache_file.unlink()
-                    cleared_count += 1
+                    should_delete = True
                 else:
                     file_age = now - cache_file.stat().st_mtime
                     age_days = file_age / (24 * 60 * 60)
                     if age_days > older_than_days:
-                        cache_file.unlink()
-                        cleared_count += 1
+                        should_delete = True
+                
+                if should_delete:
+                    cache_file.unlink()
+                    cleared_count += 1
+                    total_size_bytes += file_size
             except Exception as e:
                 logger.warning(f"Failed to delete cache file {cache_file}: {e}")
         
-        logger.info(f"Cleared {cleared_count} cached PDF files")
+        logger.info(f"Cleared {cleared_count} cached PDF files ({total_size_bytes / (1024*1024):.2f} MB)")
+        
+        return {
+            "cleared_count": cleared_count,
+            "total_size_bytes": total_size_bytes,
+            "total_size_mb": round(total_size_bytes / (1024 * 1024), 2),
+            "cache_dir": str(self.cache_dir)
+        }
+    
+    def get_cache_stats(self) -> dict:
+        """
+        Get statistics about the cache directory.
+        
+        Returns:
+            dict with cache statistics
+        """
+        if not self.cache_dir.exists():
+            return {
+                "file_count": 0,
+                "total_size_bytes": 0,
+                "total_size_mb": 0,
+                "cache_dir": str(self.cache_dir),
+                "oldest_file_age_days": 0,
+                "newest_file_age_days": 0
+            }
+        
+        cache_files = list(self.cache_dir.glob("*.pdf"))
+        file_count = len(cache_files)
+        total_size_bytes = sum(f.stat().st_size for f in cache_files if f.exists())
+        
+        if cache_files:
+            now = datetime.now().timestamp()
+            file_ages = [
+                (now - f.stat().st_mtime) / (24 * 60 * 60)
+                for f in cache_files
+                if f.exists()
+            ]
+            oldest_age = max(file_ages) if file_ages else 0
+            newest_age = min(file_ages) if file_ages else 0
+        else:
+            oldest_age = 0
+            newest_age = 0
+        
+        return {
+            "file_count": file_count,
+            "total_size_bytes": total_size_bytes,
+            "total_size_mb": round(total_size_bytes / (1024 * 1024), 2),
+            "cache_dir": str(self.cache_dir),
+            "oldest_file_age_days": round(oldest_age, 2),
+            "newest_file_age_days": round(newest_age, 2)
+        }
     
     def is_available(self) -> bool:
         """Check if LibreOffice is available for conversion"""

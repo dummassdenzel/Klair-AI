@@ -1093,6 +1093,67 @@ async def get_document_preview(document_id: int, format: str = "pdf", force_refr
             detail=f"Failed to generate preview: {str(e)}"
         )
 
+@app.get("/api/pptx-cache/stats")
+async def get_pptx_cache_stats():
+    """
+    Get statistics about the PPTX cache.
+    Returns information about cache size, file count, and age.
+    """
+    global pptx_converter
+    
+    if not pptx_converter:
+        raise HTTPException(
+            status_code=503,
+            detail="PPTX preview service not available. LibreOffice may not be installed."
+        )
+    
+    try:
+        stats = pptx_converter.get_cache_stats()
+        return {
+            "status": "success",
+            "cache_stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Failed to get PPTX cache stats: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get cache stats: {str(e)}"
+        )
+
+@app.delete("/api/pptx-cache/clear")
+async def clear_pptx_cache(older_than_days: Optional[int] = None):
+    """
+    Clear PPTX cache files.
+    
+    Query Parameters:
+        older_than_days: Optional. Only clear files older than this many days.
+                        If not provided, clears all cache files.
+    
+    Returns:
+        Statistics about cleared cache
+    """
+    global pptx_converter
+    
+    if not pptx_converter:
+        raise HTTPException(
+            status_code=503,
+            detail="PPTX preview service not available. LibreOffice may not be installed."
+        )
+    
+    try:
+        result = pptx_converter.clear_cache(older_than_days=older_than_days)
+        return {
+            "status": "success",
+            "message": f"Cleared {result['cleared_count']} cache files ({result['total_size_mb']} MB)",
+            "cache_cleared": result
+        }
+    except Exception as e:
+        logger.error(f"Failed to clear PPTX cache: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear cache: {str(e)}"
+        )
+
 @app.get("/api/documents/{document_id}")
 async def get_document_metadata(document_id: int):
     """
