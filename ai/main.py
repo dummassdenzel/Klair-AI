@@ -974,12 +974,18 @@ async def get_document_file(request: Request, document_id: int):
             
             content_type = content_type_map.get(file_type, 'application/octet-stream')
             
-            # For TXT files, read and return as text response
+            # For TXT files, read and return as text response (with size limit to prevent DoS)
             if file_type == 'txt':
+                MAX_TEXT_FILE_DISPLAY_BYTES = 10 * 1024 * 1024  # 10 MB
+                file_size_bytes = path_obj.stat().st_size
+                if file_size_bytes > MAX_TEXT_FILE_DISPLAY_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large to display. Maximum size is {MAX_TEXT_FILE_DISPLAY_BYTES // (1024 * 1024)} MB."
+                    )
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         content = f.read()
-                    
                     return Response(
                         content=content,
                         media_type=content_type,

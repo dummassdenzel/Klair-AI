@@ -49,6 +49,9 @@ class DocumentFileHandler(FileSystemEventHandler):
             logger.warning(f"Event queue full, dropping {event_type} event for {file_path}")
 
 class FileMonitorService:
+    # Fallback when document processor has no file_validator (e.g. in tests)
+    _DEFAULT_SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".xlsx", ".xls", ".pptx"}
+
     def __init__(self, document_processor, max_queue_size: int = 100):
         self.document_processor = document_processor
         self.max_queue_size = max_queue_size
@@ -58,10 +61,14 @@ class FileMonitorService:
         self.pending_events = {}  # file_path -> event
         self.debounce_delay = 2.0  # seconds
         self.processor_task = None
-        
-        # Supported file extensions
-        self.supported_extensions = {".pdf", ".docx", ".txt", ".xlsx", ".xls"}
-        
+
+        # Supported file extensions: use validator's set so we stay in sync (includes .pptx and OCR image exts when available)
+        validator = getattr(document_processor, "file_validator", None)
+        if validator is not None and hasattr(validator, "supported_extensions") and validator.supported_extensions:
+            self.supported_extensions = set(validator.supported_extensions)
+        else:
+            self.supported_extensions = set(self._DEFAULT_SUPPORTED_EXTENSIONS)
+
         # Create file handler
         self.file_handler = DocumentFileHandler(self.event_queue, self.supported_extensions)
     
