@@ -1,7 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
 import asyncio
@@ -48,6 +52,32 @@ db_service = DatabaseService()
 
 # PPTX Converter for preview functionality
 pptx_converter: Optional[PPTXConverter] = None
+
+
+def _validate_file_under_directory(file_path: Path, directory: Optional[str]) -> None:
+    """
+    Ensure the file is under the configured document directory.
+    Raises HTTPException(403) if no directory is set or file is outside it.
+    """
+    if not directory:
+        raise HTTPException(
+            status_code=403,
+            detail="No document directory set. Set a document directory first."
+        )
+    dir_resolved = Path(directory).resolve()
+    if not dir_resolved.exists() or not dir_resolved.is_dir():
+        raise HTTPException(
+            status_code=403,
+            detail="Document directory is not valid."
+        )
+    try:
+        file_path.resolve().relative_to(dir_resolved)
+    except ValueError:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied. File is outside the document directory."
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -149,6 +179,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate limiting (per-IP)
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
 @app.get("/api/select-directory")
 async def select_directory():
     """
@@ -221,12 +257,14 @@ async def select_directory():
         raise HTTPException(status_code=500, detail=f"Failed to open directory picker: {str(e)}")
 
 @app.post("/api/set-directory")
-async def set_directory(request: dict):
+@limiter.limit("10/minute")
+async def set_directory(request: Request):
     """Set the directory to monitor and process documents from"""
     import os
     global doc_processor, file_monitor, current_directory
-    
-    directory_path = request.get("path")
+
+    body = await request.json()
+    directory_path = body.get("path")
     if not directory_path:
         raise HTTPException(status_code=400, detail="Directory path required")
     
@@ -297,39 +335,40 @@ async def set_directory(request: dict):
         raise HTTPException(status_code=500, detail=f"Failed to set directory: {str(e)}")
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+@limiter.limit("10/minute")
+async def chat(chat_request: ChatRequest, request: Request):
     """Query the document index with natural language"""
     if not doc_processor:
         raise HTTPException(status_code=400, detail="No directory set")
     
     try:
-        logger.info(f"Processing chat query: {request.message[:100]}...")
+        logger.info(f"Processing chat query: {chat_request.message[:100]}...")
         
         # FIX: Check if session_id exists, create new only if needed
-        if request.session_id:
+        if chat_request.session_id:
             # Try to get existing session
             try:
-                chat_session = await db_service.get_chat_session_by_id(request.session_id)
+                chat_session = await db_service.get_chat_session_by_id(chat_request.session_id)
                 if chat_session:
-                    logger.info(f"Using existing session: {request.session_id}")
+                    logger.info(f"Using existing session: {chat_request.session_id}")
                 else:
-                    logger.warning(f"Session {request.session_id} not found, creating new one")
+                    logger.warning(f"Session {chat_request.session_id} not found, creating new one")
                     chat_session = await db_service.create_chat_session(
                         directory_path=current_directory,
-                        title=f"Chat about: {request.message[:50]}..."
+                        title=f"Chat about: {chat_request.message[:50]}..."
                     )
             except Exception as e:
-                logger.error(f"Error getting session {request.session_id}: {e}")
+                logger.error(f"Error getting session {chat_request.session_id}: {e}")
                 # Fallback to creating new session
                 chat_session = await db_service.create_chat_session(
                     directory_path=current_directory,
-                    title=f"Chat about: {request.message[:50]}..."
+                    title=f"Chat about: {chat_request.message[:50]}..."
                 )
         else:
             # No session_id provided, create new session
             chat_session = await db_service.create_chat_session(
                 directory_path=current_directory,
-                title=f"Chat about: {request.message[:50]}..."
+                title=f"Chat about: {chat_request.message[:50]}..."
             )
         
         # Get conversation history for context (last 3 messages for efficiency)
@@ -351,12 +390,12 @@ async def chat(request: ChatRequest):
             conversation_history = []
         
         # Query RAG system with conversation context
-        response = await doc_processor.query(request.message, conversation_history=conversation_history)
+        response = await doc_processor.query(chat_request.message, conversation_history=conversation_history)
         
         # Store chat message in database
         await db_service.add_chat_message(
             session_id=chat_session.id,
-            user_message=request.message,
+            user_message=chat_request.message,
             ai_response=response.message,
             sources=response.sources,
             response_time=response.response_time
@@ -407,7 +446,7 @@ async def chat(request: ChatRequest):
         query_type = response.query_type or "unknown"
         log_query_metrics(
             logger=logger,
-            query=request.message,
+            query=chat_request.message,
             query_type=query_type,
             response_time=response.response_time,
             sources_count=len(response.sources),
@@ -424,7 +463,7 @@ async def chat(request: ChatRequest):
             retrieval_count=response.retrieval_count or 0,
             rerank_count=response.rerank_count or 0,
             session_id=chat_session.id,
-            query_preview=request.message[:100]  # First 100 chars
+            query_preview=chat_request.message[:100]  # First 100 chars
         )
         
         return ChatResponse(
@@ -894,7 +933,8 @@ async def autocomplete_filenames(q: str = "", limit: int = 10):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/documents/{document_id}/file")
-async def get_document_file(document_id: int):
+@limiter.limit("30/minute")
+async def get_document_file(request: Request, document_id: int):
     """
     Serve a document file by its ID.
     Returns the file content with appropriate content-type headers.
@@ -920,7 +960,8 @@ async def get_document_file(document_id: int):
                     status_code=404, 
                     detail=f"Document file not found on disk: {path_obj.name}"
                 )
-            
+            _validate_file_under_directory(path_obj, current_directory)
+
             # Determine content type based on file extension
             content_type_map = {
                 'pdf': 'application/pdf',
@@ -985,7 +1026,8 @@ async def get_document_file(document_id: int):
         raise HTTPException(status_code=500, detail=f"Failed to serve document file: {str(e)}")
 
 @app.get("/api/documents/{document_id}/preview")
-async def get_document_preview(document_id: int, format: str = "pdf", force_refresh: bool = False):
+@limiter.limit("30/minute")
+async def get_document_preview(request: Request, document_id: int, format: str = "pdf", force_refresh: bool = False):
     """
     Get a preview of a document in a viewable format.
     Currently supports PPTX -> PDF conversion for PowerPoint files.
@@ -1033,7 +1075,8 @@ async def get_document_preview(document_id: int, format: str = "pdf", force_refr
                     status_code=404,
                     detail=f"Document file not found on disk: {path_obj.name}"
                 )
-            
+            _validate_file_under_directory(path_obj, current_directory)
+
             # Currently only support PPTX -> PDF conversion
             if file_type != 'pptx':
                 raise HTTPException(
