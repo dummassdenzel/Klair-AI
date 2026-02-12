@@ -14,6 +14,8 @@
     contentIndexingInProgress,
     metadataIndexed,
     updateQueueStatus,
+    apiActions,
+    error as apiError,
   } from '$lib/stores/api';
   import DirectorySelectionModal from '$lib/components/DirectorySelectionModal.svelte';
   import DocumentViewer from '$lib/components/DocumentViewer.svelte';
@@ -254,8 +256,9 @@
           clearInterval(refreshInterval);
         }
       }, 3000); // Check every 3 seconds for content indexing progress
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to set directory:', error);
+      apiActions.setError(error?.message ?? 'Failed to set directory');
     } finally {
       isSettingDirectory = false;
     }
@@ -341,6 +344,21 @@
 </svelte:head>
 
 <div class="h-screen bg-white overflow-hidden flex flex-col">
+  <!-- Global API error banner (e.g. rate limit, set directory failure) -->
+  {#if $apiError}
+    <div class="flex-shrink-0 bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center justify-between gap-3">
+      <p class="text-sm text-amber-800 flex-1 truncate">{$apiError}</p>
+      <button
+        type="button"
+        onclick={() => apiActions.clearError()}
+        class="flex-shrink-0 text-amber-600 hover:text-amber-800 p-1"
+        aria-label="Dismiss"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+      </button>
+    </div>
+  {/if}
+
   <!-- Directory Selection Modal -->
   <DirectorySelectionModal
     bind:isOpen={showDirectoryModal}

@@ -21,13 +21,24 @@ apiClient.interceptors.request.use(
   }
 );
 
-// Response interceptor for error handling
+// Response interceptor: surface backend error message so UI can show it (403, 429, 413, etc.)
+function getResponseMessage(error: any): string | undefined {
+  const data = error.response?.data;
+  if (!data) return undefined;
+  const detail = data.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) return detail.map((e: any) => e.msg ?? e.message).filter(Boolean).join(' ') || undefined;
+  return data.error ?? undefined;
+}
+
 apiClient.interceptors.response.use(
   (response: AxiosResponse) => {
     console.log(`✅ API Response: ${response.status} ${response.config.url}`);
     return response;
   },
   (error) => {
+    const msg = getResponseMessage(error);
+    if (msg) error.message = msg;
     console.error('❌ Response Error:', error.response?.data || error.message);
     return Promise.reject(error);
   }
