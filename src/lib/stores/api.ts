@@ -22,6 +22,9 @@ export const updateQueueStatus = writable<{
   failed: number;
 } | null>(null);
 
+// Content indexing progress (indexed count / total) for UX
+export const indexingProgress = writable<{ indexed: number; total: number }>({ indexed: 0, total: 0 });
+
 // Document State Store
 export const documentStats = writable<DocumentStats | null>(null);
 export const isDocumentsLoading = writable(false);

@@ -10,6 +10,7 @@
     isIndexingInProgress,
     metadataIndexed,
     contentIndexingInProgress,
+    indexingProgress,
   } from "$lib/stores/api";
   import type { ChatMessage } from "$lib/api/types";
   import MarkdownRenderer from "$lib/components/MarkdownRenderer.svelte";
@@ -573,7 +574,7 @@
             </div>
           </div>
         {:else if $contentIndexingInProgress}
-          <!-- Content Indexing Message (non-blocking) -->
+          <!-- Content Indexing Message (non-blocking) with progress -->
           <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4">
             <div class="flex items-center gap-3">
               <svg class="animate-spin h-5 w-5 text-amber-600 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -582,7 +583,10 @@
               </svg>
               <div class="flex-1">
                 <p class="text-sm font-medium text-amber-900">
-                  Content indexing in progress...
+                  Content indexing in progress…
+                  {#if $indexingProgress.total > 0}
+                    <span class="font-normal text-amber-800">{$indexingProgress.indexed} of {$indexingProgress.total} documents</span>
+                  {/if}
                 </p>
                 <p class="text-xs text-amber-700 mt-1">
                   You can query files by name now. Full content search will be available once indexing completes.
@@ -596,7 +600,7 @@
           <div class="flex-1">
             <textarea
               id="chat-input"
-              placeholder={!$metadataIndexed ? "Indexing metadata..." : $contentIndexingInProgress ? "Ask about files by name, or wait for content indexing..." : "Ask me anything about your documents..."}
+              placeholder={!$metadataIndexed ? "Setting up…" : $contentIndexingInProgress ? "Ask about files by name, or wait for content indexing…" : "Ask me anything about your documents…"}
               rows="1"
               disabled={!$metadataIndexed}
               class="text-sm  w-full h-full px-6 py-4 border border-gray-200 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent text-[#37352F] placeholder-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
@@ -655,9 +659,9 @@
   
         <div class="text-xs text-gray-400 mt-3 text-center">
           {#if !$metadataIndexed}
-            Indexing metadata... Chat will be available shortly
+            Setting up… Chat will be available shortly
           {:else if $contentIndexingInProgress}
-            Content indexing in background... You can query files by name
+            Content indexing in background{#if $indexingProgress.total > 0} ({$indexingProgress.indexed} of {$indexingProgress.total}){/if}. You can query files by name
           {:else}
             Press Enter to send, Shift+Enter for new line
           {/if}

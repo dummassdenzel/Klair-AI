@@ -16,6 +16,7 @@
     updateQueueStatus,
     apiActions,
     error as apiError,
+    indexingProgress,
   } from '$lib/stores/api';
   import DirectorySelectionModal from '$lib/components/DirectorySelectionModal.svelte';
   import DocumentViewer from '$lib/components/DocumentViewer.svelte';
@@ -56,7 +57,13 @@
   let lastCompletedCount = 0; // Track completed updates to detect new documents
   let lastProcessingCount = 0; // Track processing to detect when updates finish
   let refreshTimeout: ReturnType<typeof setTimeout> | null = null; // Debounce refresh
-  
+
+  // Prevent document-load storm: debounce and single interval only
+  const DOCUMENT_LOAD_DEBOUNCE_MS = 2500;
+  let lastDocumentLoadTime = 0;
+  let documentLoadScheduled: ReturnType<typeof setTimeout> | null = null;
+  let contentRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
+
   function startUpdateQueuePolling() {
     // Use SSE (Server-Sent Events) for push-based updates - no polling
     try {
@@ -136,15 +143,13 @@
   }
 
   onDestroy(() => {
-    // Clean up SSE connection
     if (updateEventSource) {
       updateEventSource.close();
       updateEventSource = null;
     }
-    // Clean up refresh timeout
-    if (refreshTimeout) {
-      clearTimeout(refreshTimeout);
-    }
+    if (refreshTimeout) clearTimeout(refreshTimeout);
+    if (documentLoadScheduled) clearTimeout(documentLoadScheduled);
+    if (contentRefreshIntervalId) clearInterval(contentRefreshIntervalId);
   });
 
   async function testConnection() {
@@ -164,34 +169,28 @@
     }
   }
 
-  async function loadIndexedDocuments() {
+  async function loadIndexedDocumentsCore() {
     isLoadingDocuments = true;
     try {
       const response = await apiService.searchDocuments({ limit: 100 });
       indexedDocuments = response.documents?.documents || [];
       
-      // Check indexing status
       const metadataOnlyCount = indexedDocuments.filter(
         (doc: any) => doc.processing_status === 'metadata_only'
       ).length;
       const indexedCount = indexedDocuments.filter(
         (doc: any) => doc.processing_status === 'indexed'
       ).length;
-      
-      // Metadata is indexed if we have any documents
-      if (indexedDocuments.length > 0) {
-        metadataIndexed.set(true);
-      }
-      
-      // Content indexing is in progress if we have metadata_only documents
-      if (metadataOnlyCount > 0) {
-        contentIndexingInProgress.set(true);
-      } else if (indexedCount > 0) {
-        // All documents are fully indexed
+      const total = indexedDocuments.length;
+
+      indexingProgress.set({ indexed: indexedCount, total });
+
+      if (indexedDocuments.length > 0) metadataIndexed.set(true);
+      if (metadataOnlyCount > 0) contentIndexingInProgress.set(true);
+      else if (indexedCount > 0) {
         contentIndexingInProgress.set(false);
         isIndexingInProgressStore.set(false);
       }
-      
     } catch (error) {
       console.error('Failed to load documents:', error);
       indexedDocuments = [];
@@ -200,66 +199,108 @@
     }
   }
 
+  /** Debounced document list load to prevent request storm from SSE + interval + clicks */
+  function loadIndexedDocuments() {
+    const now = Date.now();
+    const elapsed = now - lastDocumentLoadTime;
+    if (documentLoadScheduled) return; // already one scheduled
+    if (elapsed >= DOCUMENT_LOAD_DEBOUNCE_MS || lastDocumentLoadTime === 0) {
+      lastDocumentLoadTime = now;
+      loadIndexedDocumentsCore();
+      return;
+    }
+    const delay = DOCUMENT_LOAD_DEBOUNCE_MS - elapsed;
+    documentLoadScheduled = setTimeout(() => {
+      documentLoadScheduled = null;
+      lastDocumentLoadTime = Date.now();
+      loadIndexedDocumentsCore();
+    }, delay);
+  }
+
   async function handleDirectorySelect(event: CustomEvent<{ directoryPath: string }>) {
     const directoryPath = event.detail.directoryPath;
     if (!directoryPath.trim()) return;
-    
+
     isSettingDirectory = true;
     try {
       await apiService.setDirectory(directoryPath);
-      await testConnection();
-      await loadChatHistory();
-      
-      // Metadata indexing happens instantly (< 1 second)
-      // Wait a moment for metadata to be indexed
-      await new Promise(resolve => setTimeout(resolve, 500));
-      await loadIndexedDocuments();
-      
+
+      // Close modal immediately and show "indexing" state (don't show previous directory's list)
       showDirectoryModal = false;
-      
-      // Metadata is now indexed - allow queries immediately
+      isSettingDirectory = false;
+      indexedDocuments = [];
+      contentIndexingInProgress.set(true);
+      indexingProgress.set({ indexed: 0, total: 0 });
       metadataIndexed.set(true);
-      isIndexingInProgress = false; // Don't block queries
       isIndexingInProgressStore.set(false);
-      
-      // Reset completed count tracker for new directory
       lastCompletedCount = 0;
       lastProcessingCount = 0;
-      
-      // Monitor content indexing progress in background
-      let refreshCount = 0;
-      const maxRefreshes = 30; // Monitor longer for content indexing
-      let previousIndexedCount = indexedDocuments.filter(
-        (doc: any) => doc.processing_status === 'indexed'
-      ).length;
-      
-      const refreshInterval = setInterval(async () => {
-        refreshCount++;
-        await loadIndexedDocuments();
-        
-        const currentIndexedCount = indexedDocuments.filter(
-          (doc: any) => doc.processing_status === 'indexed'
-        ).length;
-        
-        const hasNewIndexed = currentIndexedCount > previousIndexedCount;
-        if (hasNewIndexed) {
-          previousIndexedCount = currentIndexedCount;
+
+      // Optimistic update so overlay and $effect don't reopen modal before testConnection() returns
+      systemStatus.update((s) => {
+        const prev = s ?? {
+          directory_set: false,
+          current_directory: null,
+          processor_ready: false,
+          file_monitor_status: '',
+          database_stats: { total_documents: 0, status_breakdown: {}, type_breakdown: {} },
+        };
+        return { ...prev, directory_set: true, current_directory: directoryPath };
+      });
+
+      // Load data in background (don't block the UI)
+      (async () => {
+        try {
+          if (contentRefreshIntervalId) {
+            clearInterval(contentRefreshIntervalId);
+            contentRefreshIntervalId = null;
+          }
+          if (documentLoadScheduled) {
+            clearTimeout(documentLoadScheduled);
+            documentLoadScheduled = null;
+          }
+
+          await testConnection();
+          await loadChatHistory();
+          await new Promise((r) => setTimeout(r, 200)); // Brief delay for backend metadata
+          lastDocumentLoadTime = 0; // allow immediate first load
+          await loadIndexedDocumentsCore();
+          lastDocumentLoadTime = Date.now();
+
+          let refreshCount = 0;
+          const maxRefreshes = 30;
+          let previousIndexedCount = indexedDocuments.filter(
+            (doc: any) => doc.processing_status === 'indexed'
+          ).length;
+
+          contentRefreshIntervalId = setInterval(async () => {
+            if (!contentRefreshIntervalId) return;
+            refreshCount++;
+            loadIndexedDocuments(); // debounced
+
+            const currentIndexedCount = indexedDocuments.filter(
+              (doc: any) => doc.processing_status === 'indexed'
+            ).length;
+            if (currentIndexedCount > previousIndexedCount) previousIndexedCount = currentIndexedCount;
+
+            const metadataOnlyCount = indexedDocuments.filter(
+              (doc: any) => doc.processing_status === 'metadata_only'
+            ).length;
+            if (metadataOnlyCount === 0 || refreshCount >= maxRefreshes) {
+              if (contentRefreshIntervalId) clearInterval(contentRefreshIntervalId);
+              contentRefreshIntervalId = null;
+              contentIndexingInProgress.set(false);
+            }
+          }, 3000);
+
+          startUpdateQueuePolling();
+        } catch (e) {
+          console.error('Background load after set-directory:', e);
         }
-        
-        // Stop monitoring if all documents are indexed or max refreshes reached
-        const metadataOnlyCount = indexedDocuments.filter(
-          (doc: any) => doc.processing_status === 'metadata_only'
-        ).length;
-        
-        if (metadataOnlyCount === 0 || refreshCount >= maxRefreshes) {
-          contentIndexingInProgress.set(false);
-          clearInterval(refreshInterval);
-        }
-      }, 3000); // Check every 3 seconds for content indexing progress
+      })();
     } catch (error: any) {
       console.error('Failed to set directory:', error);
       apiActions.setError(error?.message ?? 'Failed to set directory');
-    } finally {
       isSettingDirectory = false;
     }
   }

@@ -279,7 +279,7 @@
           <div class="text-center py-4">
             <div class="inline-flex items-center gap-3 text-blue-600">
               <div class="w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-              <span class="text-sm font-medium">Initializing directory and indexing documents...</span>
+              <span class="text-sm font-medium">Setting directory…</span>
             </div>
           </div>
         {/if}
