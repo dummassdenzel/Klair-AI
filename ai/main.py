@@ -522,7 +522,7 @@ async def get_status():
         # Add index stats if processor is available
         if doc_processor:
             try:
-                status_info["index_stats"] = doc_processor.get_stats()
+                status_info["index_stats"] = await doc_processor.get_stats()
             except Exception as e:
                 logger.warning(f"Could not get index stats: {e}")
                 status_info["index_stats"] = {"error": "Stats not available"}

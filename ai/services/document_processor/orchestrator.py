@@ -1,7 +1,8 @@
 import asyncio
 import logging
 import re
-from typing import Dict, List, Optional
+from collections import OrderedDict
+from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,54 @@ from database import DatabaseService
 
 
 logger = logging.getLogger(__name__)
+
+# Default max size for metadata cache (prevents unbounded memory with 1000+ files)
+DEFAULT_METADATA_CACHE_MAX_SIZE = 2000
+
+
+class MetadataCache:
+    """
+    Bounded LRU cache for file_path -> (hash, metadata).
+    Prevents unbounded memory growth; DB is source of truth on miss.
+    """
+    __slots__ = ("_cache", "max_size")
+
+    def __init__(self, max_size: int = DEFAULT_METADATA_CACHE_MAX_SIZE):
+        self.max_size = max(1, max_size)
+        self._cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+
+    def get(self, file_path: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Return (hash, metadata) or None. Moves entry to end (LRU)."""
+        if file_path not in self._cache:
+            return None
+        self._cache.move_to_end(file_path)
+        entry = self._cache[file_path]
+        return entry["hash"], entry["metadata"]
+
+    def set(self, file_path: str, hash_val: str, metadata: Dict[str, Any]) -> None:
+        """Set or update entry. Evicts oldest if at capacity."""
+        if file_path in self._cache:
+            self._cache.move_to_end(file_path)
+            self._cache[file_path] = {"hash": hash_val, "metadata": metadata}
+            return
+        while len(self._cache) >= self.max_size:
+            self._cache.popitem(last=False)
+        self._cache[file_path] = {"hash": hash_val, "metadata": metadata}
+
+    def remove(self, file_path: str) -> None:
+        self._cache.pop(file_path, None)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+    def __contains__(self, file_path: str) -> bool:
+        return file_path in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def keys(self):
+        return self._cache.keys()
 
 
 class DocumentProcessorOrchestrator:
@@ -116,9 +165,8 @@ class DocumentProcessorOrchestrator:
             text_extractor=self.text_extractor
         )
         
-        # State tracking
-        self.file_hashes: Dict[str, str] = {}
-        self.file_metadata: Dict[str, FileMetadata] = {}
+        # State tracking (bounded LRU cache; DB is source of truth)
+        self._metadata_cache = MetadataCache(max_size=DEFAULT_METADATA_CACHE_MAX_SIZE)
         self.current_directory: Optional[str] = None
         self.is_initializing: bool = False  # Flag to prevent file monitor events during initial indexing
         self.files_being_processed: set = set()  # Track files currently being indexed to prevent duplicate processing
@@ -132,45 +180,61 @@ class DocumentProcessorOrchestrator:
         asyncio.create_task(self.update_worker.start())
     
     async def _load_existing_metadata(self):
-        """Load existing indexed documents from database into memory"""
+        """Load existing documents: rebuild trie for all, fill LRU cache up to max_size."""
         try:
             from database.database import get_db
             from database.models import IndexedDocument
             from sqlalchemy import select
-            
+
             async for db_session in get_db():
-                # Load both indexed and metadata_only documents
                 stmt = select(IndexedDocument).where(
                     IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
                 )
                 result = await db_session.execute(stmt)
                 docs = result.scalars().all()
-                
+
                 for doc in docs:
-                    # Reconstruct file metadata
-                    self.file_metadata[doc.file_path] = {
-                        "file_type": doc.file_type,
-                        "size_bytes": doc.file_size,
-                        "modified_at": doc.last_modified,
-                        "chunks": doc.chunks_count,
-                        "processing_status": doc.processing_status
-                    }
-                    self.file_hashes[doc.file_path] = doc.file_hash
-                
-                    # Rebuild Filename Trie from existing documents
                     filename = Path(doc.file_path).name
                     self.filename_trie.add(filename, doc.file_path)
-                
-                indexed_count = sum(1 for doc in docs if doc.processing_status == "indexed")
-                metadata_only_count = sum(1 for doc in docs if doc.processing_status == "metadata_only")
-                logger.info(f"📚 Loaded {len(docs)} documents into memory "
-                          f"({indexed_count} indexed, {metadata_only_count} metadata-only)")
-                logger.info(f"📊 Filename Trie rebuilt with {len(docs)} files")
+                    # Fill LRU cache up to max_size (oldest-by-insertion order)
+                    if len(self._metadata_cache) < self._metadata_cache.max_size:
+                        meta = {
+                            "file_type": doc.file_type,
+                            "size_bytes": doc.file_size,
+                            "modified_at": doc.last_modified,
+                            "chunks": doc.chunks_count,
+                            "processing_status": doc.processing_status,
+                        }
+                        self._metadata_cache.set(doc.file_path, doc.file_hash or "", meta)
+
+                indexed_count = sum(1 for d in docs if d.processing_status == "indexed")
+                metadata_only_count = sum(1 for d in docs if d.processing_status == "metadata_only")
+                logger.info(
+                    f"📚 Loaded {len(docs)} documents (trie); cache has {len(self._metadata_cache)} entries "
+                    f"({indexed_count} indexed, {metadata_only_count} metadata-only)"
+                )
                 break
-                
         except Exception as e:
             logger.warning(f"Could not load existing metadata: {e}")
-    
+
+    async def _get_cached_or_db_hash_metadata(self, file_path: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        """Return (stored_hash, stored_metadata) from LRU cache or DB. Caches DB result."""
+        cached = self._metadata_cache.get(file_path)
+        if cached is not None:
+            return cached[0], cached[1]
+        doc = await self.database_service.get_document_by_path(file_path)
+        if doc is None:
+            return None, None
+        meta = {
+            "file_type": doc.file_type,
+            "size_bytes": doc.file_size,
+            "modified_at": doc.last_modified,
+            "chunks": doc.chunks_count,
+            "processing_status": doc.processing_status,
+        }
+        self._metadata_cache.set(file_path, doc.file_hash or "", meta)
+        return doc.file_hash, meta
+
     async def __aenter__(self):
         return self
     
@@ -188,9 +252,8 @@ class DocumentProcessorOrchestrator:
         
         # Clear vector store
         await self.vector_store.clear_collection()
-        self.file_hashes.clear()
-        self.file_metadata.clear()
-        self.files_being_processed.clear()  # Clear processing set to prevent stale entries
+        self._metadata_cache.clear()
+        self.files_being_processed.clear()
         logger.info("Vector store cleared")
         
         # Clear BM25 index
@@ -233,8 +296,8 @@ class DocumentProcessorOrchestrator:
                 logger.warning(f"Already initializing directory, skipping duplicate initialization")
                 return
             
-            if self.current_directory == directory_path and len(self.file_hashes) > 0:
-                logger.info(f"Directory {directory_path} already initialized with {len(self.file_hashes)} files, skipping re-initialization")
+            if self.current_directory == directory_path and self.filename_trie.file_count > 0:
+                logger.info(f"Directory {directory_path} already initialized with {self.filename_trie.file_count} files, skipping re-initialization")
                 return
             
             logger.info(f"Initializing from directory: {directory_path}")
@@ -415,15 +478,8 @@ class DocumentProcessorOrchestrator:
             file_metadata = self.file_validator.extract_file_metadata(file_path)
             file_size_bytes = file_metadata.get("size_bytes", 0)
             
-            # Get last queried time (if available)
-            last_queried = datetime.utcnow()  # Default to now
-            if file_path in self.file_metadata:
-                metadata = self.file_metadata[file_path]
-                if isinstance(metadata, dict):
-                    last_queried = metadata.get("modified_at", datetime.utcnow())
-                else:
-                    last_queried = metadata.modified_at if hasattr(metadata, 'modified_at') else datetime.utcnow()
-            
+            last_queried = file_metadata.get("modified_at") or datetime.utcnow()
+
             # Check if in active session (simplified - can be enhanced)
             is_in_active_session = False  # TODO: Track active sessions
             
@@ -459,10 +515,9 @@ class DocumentProcessorOrchestrator:
         """
         # Phase 3: Use queue for updates (unless it's initial indexing)
         if use_queue:
-            # Check if file has changed
             current_hash = self.file_validator.calculate_file_hash(file_path)
-            stored_hash = self.file_hashes.get(file_path)
-            
+            stored_hash, _ = await self._get_cached_or_db_hash_metadata(file_path)
+
             if not force_reindex and stored_hash == current_hash:
                 logger.debug(f"File {file_path} unchanged, skipping update")
                 return
@@ -485,7 +540,7 @@ class DocumentProcessorOrchestrator:
             current_hash = self.file_validator.calculate_file_hash(file_path)
             
             # Check if file has changed (incremental update)
-            stored_hash = self.file_hashes.get(file_path)
+            stored_hash, _ = await self._get_cached_or_db_hash_metadata(file_path)
             if not force_reindex and stored_hash == current_hash:
                 logger.debug(f"File {file_path} unchanged, skipping re-index")
                 # Remove from processing set before returning
@@ -506,10 +561,7 @@ class DocumentProcessorOrchestrator:
                 if existing_doc and existing_doc.processing_status == "indexed" and existing_doc.file_hash == current_hash:
                     if not force_reindex:
                         logger.debug(f"File {file_path} already fully indexed, skipping")
-                        # Update in-memory tracking
-                        self.file_hashes[file_path] = current_hash
-                        self.file_metadata[file_path] = file_metadata
-                        # Remove from processing set before returning
+                        self._metadata_cache.set(file_path, current_hash, file_metadata)
                         self.files_being_processed.discard(file_path)
                         return
                 
@@ -578,9 +630,8 @@ class DocumentProcessorOrchestrator:
             )
             
             # Update tracking
-            self.file_hashes[file_path] = current_hash
-            self.file_metadata[file_path] = file_metadata
-            
+            self._metadata_cache.set(file_path, current_hash, file_metadata)
+
         except Exception as e:
             logger.error(f"Error processing document {file_path}: {e}")
             # Update status to error
@@ -611,10 +662,8 @@ class DocumentProcessorOrchestrator:
             filename = Path(file_path).name
             self.filename_trie.remove(filename, file_path)
             
-            # Clean up tracking
-            self.file_hashes.pop(file_path, None)
-            self.file_metadata.pop(file_path, None)
-            
+            self._metadata_cache.remove(file_path)
+
             logger.info(f"Removed document: {file_path}")
             
         except Exception as e:
@@ -648,7 +697,7 @@ class DocumentProcessorOrchestrator:
             List of file paths if explicit filename found, None otherwise
         """
         try:
-            if not self.file_metadata:
+            if self.filename_trie.file_count == 0:
                 return None
             
             # Only check for explicit filenames (quoted or obvious patterns)
@@ -1165,21 +1214,20 @@ Be comprehensive and list ALL documents mentioned above."""
                 rerank_count=rerank_count if 'rerank_count' in locals() else 0
             )
     
-    def get_stats(self) -> Dict:
-        """Get comprehensive stats"""
+    async def get_stats(self) -> Dict:
+        """Get comprehensive stats (DB for totals; cache size bounded)."""
         try:
             collection_count = self.vector_store.get_collection_count()
-            # file_metadata entries are dicts already; avoid __dict__ access
+            db_stats = await self.database_service.get_document_stats()
+            total_files = db_stats.get("total_documents", 0) or 0
+            indexed_file_paths = await self.database_service.get_indexed_file_paths(limit=500)
             return {
-                "total_files": len(self.file_hashes),
+                "total_files": total_files,
                 "total_chunks": collection_count,
                 "current_directory": self.current_directory,
-                "indexed_files": list(self.file_hashes.keys()),
-                "file_metadata": {k: v for k, v in self.file_metadata.items()},
-                "avg_chunks_per_file": (
-                    collection_count / len(self.file_hashes)
-                    if self.file_hashes else 0
-                ),
+                "indexed_files": indexed_file_paths,
+                "metadata_cache_size": len(self._metadata_cache),
+                "avg_chunks_per_file": (collection_count / total_files) if total_files else 0,
                 "embedding_model": self.embedding_service.model_name,
                 "chunk_size": self.chunker.chunk_size,
                 "chunk_overlap": self.chunker.chunk_overlap
@@ -1196,10 +1244,8 @@ Be comprehensive and list ALL documents mentioned above."""
             self.vector_store.cleanup()
             self.embedding_service.cleanup()
             
-            # Clear in-memory data
-            self.file_hashes.clear()
-            self.file_metadata.clear()
-            
+            self._metadata_cache.clear()
+
             logger.info("DocumentProcessorOrchestrator cleaned up successfully")
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
@@ -1210,10 +1256,8 @@ Be comprehensive and list ALL documents mentioned above."""
             # Clear vector store
             await self.vector_store.clear_collection()
             
-            # Clear in-memory tracking
-            self.file_hashes.clear()
-            self.file_metadata.clear()
-            
+            self._metadata_cache.clear()
+
             logger.info("Document collection cleared successfully")
         except Exception as e:
             logger.error(f"Error clearing collection: {e}")

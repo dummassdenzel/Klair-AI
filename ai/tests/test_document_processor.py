@@ -66,7 +66,7 @@ Customer satisfaction: 95%"""
             await self.processor.initialize_from_directory(self.test_dir)
             
             # Check stats
-            stats = self.processor.get_stats()
+            stats = await self.processor.get_stats()
             print(f"📊 Index stats: {stats}")
             
             # Should have 2 supported files (txt files)
@@ -139,14 +139,14 @@ Customer satisfaction: 95%"""
         file_path = os.path.join(self.test_dir, "sales.txt")
         
         # Get initial document count
-        initial_stats = self.processor.get_stats()
+        initial_stats = await self.processor.get_stats()
         initial_count = initial_stats["total_chunks"]
         
         # Update the document
         await self.processor.add_document(file_path)
         
         # Get updated stats
-        updated_stats = self.processor.get_stats()
+        updated_stats = await self.processor.get_stats()
         updated_count = updated_stats["total_chunks"]
         
         # Should have same or more chunks (depending on chunking)
@@ -165,14 +165,14 @@ Customer satisfaction: 95%"""
         await self.processor.add_document(file_path)
         
         # Get initial document count
-        initial_stats = self.processor.get_stats()
+        initial_stats = await self.processor.get_stats()
         initial_count = initial_stats["total_chunks"]
         
         # Remove the document
         await self.processor.remove_document(file_path)
         
         # Get updated stats
-        updated_stats = self.processor.get_stats()
+        updated_stats = await self.processor.get_stats()
         updated_count = updated_stats["total_chunks"]
         
         # Should have fewer documents
@@ -207,7 +207,7 @@ Customer satisfaction: 95%"""
             assert hasattr(response, 'response_time'), "Response should have response_time"
             
             # Should have sources if documents are indexed
-            if self.processor.get_stats()["total_files"] > 0:
+            if (await self.processor.get_stats())["total_files"] > 0:
                 assert len(response.sources) > 0, "Query should return sources when documents are indexed"
             
             print("✅ Query functionality test passed")

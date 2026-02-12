@@ -157,18 +157,22 @@ async def test_3_full_orchestrator_selection():
         )
         
         print(f"✓ Orchestrator created")
-        
-        # Check if files are indexed
-        if not orchestrator.file_metadata:
+
+        # Check if files are indexed (trie has entries; stats from DB)
+        stats = await orchestrator.get_stats()
+        total = stats.get("total_files", 0)
+        if total == 0 or orchestrator.filename_trie.file_count == 0:
             print("⚠️  WARNING: No files indexed. Please index documents first.")
             print("   Run: python -m uvicorn main:app --reload")
             print("   Then use /api/set-directory to index documents")
             return None
-        
-        print(f"✓ Found {len(orchestrator.file_metadata)} indexed files:")
-        for idx, (file_path, metadata) in enumerate(orchestrator.file_metadata.items(), 1):
-            filename = Path(file_path).name
-            print(f"   {idx}. {filename}")
+
+        indexed_files = stats.get("indexed_files", [])
+        print(f"✓ Found {len(indexed_files)} indexed files:")
+        for idx, file_path in enumerate(indexed_files[:20], 1):
+            print(f"   {idx}. {Path(file_path).name}")
+        if len(indexed_files) > 20:
+            print(f"   ... and {len(indexed_files) - 20} more")
         
         # Test file selection
         question = "How many delivery receipts do we have?"

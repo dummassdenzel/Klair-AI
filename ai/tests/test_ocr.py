@@ -303,7 +303,7 @@ class TestOCR:
             await self.processor.add_document(str(test_pdf), use_queue=False)
             
             # Check stats
-            stats = self.processor.get_stats()
+            stats = await self.processor.get_stats()
             print(f"📊 Index stats: {stats['total_files']} files, {stats['total_chunks']} chunks")
             
             # Should have processed the file

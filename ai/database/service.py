@@ -126,6 +126,16 @@ class DatabaseService:
             chunks_count=0,  # Zero until content is indexed
             processing_status="metadata_only"  # Indicates content not yet indexed
         )
+
+    async def get_document_by_path(self, file_path: str) -> Optional[IndexedDocument]:
+        """Get a single document by file path (for hash/metadata lookup)."""
+        doc = None
+        async for session in get_db():
+            stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
+            result = await session.execute(stmt)
+            doc = result.scalar_one_or_none()
+            break
+        return doc
     
     async def link_document_to_chat(
         self, 
@@ -201,7 +211,19 @@ class DatabaseService:
                 }
             except Exception as e:
                 raise e
-    
+
+    async def get_indexed_file_paths(self, limit: int = 500) -> List[str]:
+        """Get list of indexed file paths (for stats). Capped for memory safety."""
+        paths = []
+        async for session in get_db():
+            stmt = select(IndexedDocument.file_path).where(
+                IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
+            ).limit(limit)
+            result = await session.execute(stmt)
+            paths = [row[0] for row in result.all()]
+            break
+        return paths
+
     # NEW: Chat Session Management Methods
     
     async def get_chat_sessions_by_directory(self, directory_path: str) -> List[Dict[str, Any]]:
