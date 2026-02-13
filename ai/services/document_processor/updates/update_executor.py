@@ -178,23 +178,22 @@ class UpdateExecutor:
         # Get old metadata from database
         old_metadata = None
         try:
-            from database.database import get_db
+            from database.database import AsyncSessionLocal
             from database.models import IndexedDocument
             from sqlalchemy import select
-            
-            async for db_session in get_db():
+
+            async with AsyncSessionLocal() as db_session:
                 stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
                 result = await db_session.execute(stmt)
                 doc = result.scalar_one_or_none()
-                if doc:
-                    old_metadata = {
-                        'file_hash': doc.file_hash,
-                        'file_size': doc.file_size,
-                        'chunks_count': doc.chunks_count,
-                        'content_preview': doc.content_preview,
-                        'processing_status': doc.processing_status
-                    }
-                break
+            if doc:
+                old_metadata = {
+                    'file_hash': doc.file_hash,
+                    'file_size': doc.file_size,
+                    'chunks_count': doc.chunks_count,
+                    'content_preview': doc.content_preview,
+                    'processing_status': doc.processing_status
+                }
         except Exception as e:
             logger.warning(f"Could not get old metadata for checkpoint: {e}")
         
@@ -474,19 +473,17 @@ class UpdateExecutor:
             raise ValueError(f"No chunks found in vector store for {file_path} after update")
         
         # Check that metadata exists in database
-        from database.database import get_db
+        from database.database import AsyncSessionLocal
         from database.models import IndexedDocument
         from sqlalchemy import select
-        
-        async for db_session in get_db():
+
+        async with AsyncSessionLocal() as db_session:
             stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
             result = await db_session.execute(stmt)
             doc = result.scalar_one_or_none()
-            if not doc:
-                raise ValueError(f"No metadata found in database for {file_path} after update")
-            if doc.processing_status != "indexed":
-                raise ValueError(f"Document status is {doc.processing_status}, expected 'indexed'")
-            break
-        
+        if not doc:
+            raise ValueError(f"No metadata found in database for {file_path} after update")
+        if doc.processing_status != "indexed":
+            raise ValueError(f"Document status is {doc.processing_status}, expected 'indexed'")
         logger.debug(f"Update verification passed for {file_path}")
 

@@ -182,38 +182,36 @@ class DocumentProcessorOrchestrator:
     async def _load_existing_metadata(self):
         """Load existing documents: rebuild trie for all, fill LRU cache up to max_size."""
         try:
-            from database.database import get_db
+            from database.database import AsyncSessionLocal
             from database.models import IndexedDocument
             from sqlalchemy import select
 
-            async for db_session in get_db():
+            async with AsyncSessionLocal() as db_session:
                 stmt = select(IndexedDocument).where(
                     IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
                 )
                 result = await db_session.execute(stmt)
                 docs = result.scalars().all()
 
-                for doc in docs:
-                    filename = Path(doc.file_path).name
-                    self.filename_trie.add(filename, doc.file_path)
-                    # Fill LRU cache up to max_size (oldest-by-insertion order)
-                    if len(self._metadata_cache) < self._metadata_cache.max_size:
-                        meta = {
-                            "file_type": doc.file_type,
-                            "size_bytes": doc.file_size,
-                            "modified_at": doc.last_modified,
-                            "chunks": doc.chunks_count,
-                            "processing_status": doc.processing_status,
-                        }
-                        self._metadata_cache.set(doc.file_path, doc.file_hash or "", meta)
+            for doc in docs:
+                filename = Path(doc.file_path).name
+                self.filename_trie.add(filename, doc.file_path)
+                if len(self._metadata_cache) < self._metadata_cache.max_size:
+                    meta = {
+                        "file_type": doc.file_type,
+                        "size_bytes": doc.file_size,
+                        "modified_at": doc.last_modified,
+                        "chunks": doc.chunks_count,
+                        "processing_status": doc.processing_status,
+                    }
+                    self._metadata_cache.set(doc.file_path, doc.file_hash or "", meta)
 
-                indexed_count = sum(1 for d in docs if d.processing_status == "indexed")
-                metadata_only_count = sum(1 for d in docs if d.processing_status == "metadata_only")
-                logger.info(
-                    f"📚 Loaded {len(docs)} documents (trie); cache has {len(self._metadata_cache)} entries "
-                    f"({indexed_count} indexed, {metadata_only_count} metadata-only)"
-                )
-                break
+            indexed_count = sum(1 for d in docs if d.processing_status == "indexed")
+            metadata_only_count = sum(1 for d in docs if d.processing_status == "metadata_only")
+            logger.info(
+                f"📚 Loaded {len(docs)} documents (trie); cache has {len(self._metadata_cache)} entries "
+                f"({indexed_count} indexed, {metadata_only_count} metadata-only)"
+            )
         except Exception as e:
             logger.warning(f"Could not load existing metadata: {e}")
 
@@ -266,16 +264,19 @@ class DocumentProcessorOrchestrator:
         
         # Clear database records
         try:
-            from database.database import get_db
+            from database.database import AsyncSessionLocal
             from database.models import IndexedDocument
             from sqlalchemy import delete
-            
-            async for session in get_db():
-                stmt = delete(IndexedDocument)
-                await session.execute(stmt)
-                await session.commit()
-                logger.info("Database document index records cleared")
-                break
+
+            async with AsyncSessionLocal() as session:
+                try:
+                    stmt = delete(IndexedDocument)
+                    await session.execute(stmt)
+                    await session.commit()
+                    logger.info("Database document index records cleared")
+                except Exception:
+                    await session.rollback()
+                    raise
         except Exception as e:
             logger.warning(f"Failed to clear database records: {e}")
     
@@ -548,28 +549,21 @@ class DocumentProcessorOrchestrator:
                 return
             
             # Check if document exists in database and get current status
-            from database.database import get_db
+            from database.database import AsyncSessionLocal
             from database.models import IndexedDocument
             from sqlalchemy import select
-            
-            async for db_session in get_db():
+
+            async with AsyncSessionLocal() as db_session:
                 stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
                 result = await db_session.execute(stmt)
                 existing_doc = result.scalar_one_or_none()
-                
-                # If document exists and is already fully indexed with same hash, skip
-                if existing_doc and existing_doc.processing_status == "indexed" and existing_doc.file_hash == current_hash:
-                    if not force_reindex:
-                        logger.debug(f"File {file_path} already fully indexed, skipping")
-                        self._metadata_cache.set(file_path, current_hash, file_metadata)
-                        self.files_being_processed.discard(file_path)
-                        return
-                
-                # If document exists with metadata_only status, it needs to be upgraded to indexed
-                # Continue processing to upgrade from metadata_only to indexed
-                # (No need to check files_being_processed here since we already added it above)
-                
-                break
+
+            if existing_doc and existing_doc.processing_status == "indexed" and existing_doc.file_hash == current_hash:
+                if not force_reindex:
+                    logger.debug(f"File {file_path} already fully indexed, skipping")
+                    self._metadata_cache.set(file_path, current_hash, file_metadata)
+                    self.files_being_processed.discard(file_path)
+                    return
             
             # Remove old chunks if re-indexing
             if stored_hash and stored_hash != current_hash:
@@ -953,19 +947,17 @@ Your response:"""
         Used for document_listing queries.
         """
         try:
-            from database.database import get_db
+            from database.database import AsyncSessionLocal
             from database.models import IndexedDocument
             from sqlalchemy import select
-            
-            all_docs = []
-            async for db_session in get_db():
+
+            async with AsyncSessionLocal() as db_session:
                 stmt = select(IndexedDocument).where(
                     IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
                 )
                 result = await db_session.execute(stmt)
                 all_docs = result.scalars().all()
-                break
-            
+
             if not all_docs:
                 return QueryResult(
                     message="No documents are currently indexed.",

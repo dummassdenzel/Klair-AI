@@ -41,6 +41,35 @@ def create_test_chunk(text: str, chunk_id: int, file_path: str = "test.txt") -> 
     )
 
 
+def make_mock_async_session_local(mock_doc=None):
+    """
+    Create a mock for AsyncSessionLocal (used by update_executor instead of get_db).
+    Returns an object that when called returns an async context manager yielding a session
+    whose execute().scalar_one_or_none() returns mock_doc.
+    """
+    mock_session = AsyncMock()
+    mock_result = AsyncMock()
+    if mock_doc is None:
+        mock_doc = Mock()
+        mock_doc.file_hash = "hash123"
+        mock_doc.file_size = 1024
+        mock_doc.chunks_count = 2
+        mock_doc.content_preview = "Preview"
+        mock_doc.processing_status = "indexed"
+    mock_result.scalar_one_or_none = Mock(return_value=mock_doc)
+    mock_session.execute = AsyncMock(return_value=mock_result)
+
+    class MockSessionCM:
+        def __init__(self, session):
+            self.session = session
+        async def __aenter__(self):
+            return self.session
+        async def __aexit__(self, *args):
+            return None
+
+    return MagicMock(return_value=MockSessionCM(mock_session))
+
+
 def create_diff_result(unchanged: int, modified: int, added: int, removed: int) -> ChunkDiffResult:
     """Helper to create ChunkDiffResult for testing"""
     unchanged_matches = [
@@ -106,21 +135,8 @@ async def test_1_checkpoint_creation():
         chunk_differ=chunk_differ
     )
     
-    # Mock database query
-    async def mock_get_db_generator():
-        mock_session = AsyncMock()
-        mock_result = AsyncMock()
-        mock_doc = Mock()
-        mock_doc.file_hash = "hash123"
-        mock_doc.file_size = 1024
-        mock_doc.chunks_count = 2
-        mock_doc.content_preview = "Preview"
-        mock_doc.processing_status = "indexed"
-        mock_result.scalar_one_or_none = Mock(return_value=mock_doc)
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        yield mock_session
-    
-    with patch('database.database.get_db', return_value=mock_get_db_generator()):
+    # Mock AsyncSessionLocal (update_executor uses this instead of get_db)
+    with patch('database.database.AsyncSessionLocal', make_mock_async_session_local()):
         checkpoint = await executor._create_checkpoint("test.txt")
         
         assert checkpoint.file_path == "test.txt", "Checkpoint should have correct file path"
@@ -314,21 +330,14 @@ async def test_4_rollback_on_failure():
         chunk_differ=chunk_differ
     )
     
-    # Mock database query for checkpoint
-    async def mock_get_db_generator():
-        mock_session = AsyncMock()
-        mock_result = AsyncMock()
-        mock_doc = Mock()
-        mock_doc.file_hash = "hash123"
-        mock_doc.file_size = 1024
-        mock_doc.chunks_count = 1
-        mock_doc.content_preview = "Preview"
-        mock_doc.processing_status = "indexed"
-        mock_result.scalar_one_or_none = Mock(return_value=mock_doc)
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        yield mock_session
-    
-    with patch('database.database.get_db', return_value=mock_get_db_generator()):
+    # Mock AsyncSessionLocal for checkpoint in execute_update
+    mock_doc = Mock()
+    mock_doc.file_hash = "hash123"
+    mock_doc.file_size = 1024
+    mock_doc.chunks_count = 1
+    mock_doc.content_preview = "Preview"
+    mock_doc.processing_status = "indexed"
+    with patch('database.database.AsyncSessionLocal', make_mock_async_session_local(mock_doc)):
         task = UpdateTask(
             priority=500,
             file_path="test.txt",
@@ -380,18 +389,10 @@ async def test_5_update_verification():
         chunk_differ=chunk_differ
     )
     
-    # Mock database query
-    async def mock_get_db_generator():
-        mock_session = AsyncMock()
-        mock_result = AsyncMock()
-        mock_doc = Mock()
-        mock_doc.processing_status = "indexed"
-        mock_result.scalar_one_or_none = Mock(return_value=mock_doc)
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        yield mock_session
-    
-    with patch('database.database.get_db', return_value=mock_get_db_generator()):
-        # Should not raise exception
+    # Mock AsyncSessionLocal for _verify_update
+    mock_doc = Mock()
+    mock_doc.processing_status = "indexed"
+    with patch('database.database.AsyncSessionLocal', make_mock_async_session_local(mock_doc)):
         await executor._verify_update("test.txt")
         
         print("✅ Verification passed")

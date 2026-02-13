@@ -28,7 +28,7 @@ from tenant_registry import (
 from query_cache import QueryCache, get_query_cache_key
 
 # NEW: Add database imports
-from database import DatabaseService, get_db
+from database import DatabaseService, AsyncSessionLocal
 from database.models import ChatSession, ChatMessage, IndexedDocument
 from datetime import datetime
 from sqlalchemy import select, func, or_, and_, desc
@@ -417,38 +417,32 @@ async def chat(chat_request: ChatRequest, request: Request, ctx: TenantContext =
             file_path = source.get("file_path")
             if file_path:
                 try:
-                    # Get existing document record from database
-                    async for db_session in get_db():
+                    async with AsyncSessionLocal() as db_session:
                         stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
                         result = await db_session.execute(stmt)
                         existing_doc = result.scalar_one_or_none()
-                        
-                        if existing_doc:
-                            # Document already exists with complete metadata - just link it
-                            await db_service.link_document_to_chat(
-                                document_id=existing_doc.id,
-                                chat_session_id=chat_session.id
-                            )
-                            logger.debug(f"Linked existing document {file_path} to chat session {chat_session.id}")
-                        else:
-                            # Document doesn't exist in database (shouldn't happen, but handle gracefully)
-                            logger.warning(f"Document {file_path} not found in database during chat linking")
-                            # Create minimal record for linking (fallback)
-                            doc = await db_service.store_document_metadata(
-                                file_path=file_path,
-                                file_hash="",  # Will be updated when file is processed
-                                file_type=source.get("file_type", "unknown"),
-                                file_size=0,  # Will be updated when file is processed
-                                last_modified=datetime.utcnow(),  # Will be updated when file is processed
-                                content_preview=source.get("content_snippet", "")[:500],
-                                chunks_count=source.get("chunks_found", 0)
-                            )
-                            await db_service.link_document_to_chat(
-                                document_id=doc.id,
-                                chat_session_id=chat_session.id
-                            )
-                            logger.info(f"Created fallback document record for {file_path}")
-                
+                    if existing_doc:
+                        await db_service.link_document_to_chat(
+                            document_id=existing_doc.id,
+                            chat_session_id=chat_session.id
+                        )
+                        logger.debug(f"Linked existing document {file_path} to chat session {chat_session.id}")
+                    else:
+                        logger.warning(f"Document {file_path} not found in database during chat linking")
+                        doc = await db_service.store_document_metadata(
+                            file_path=file_path,
+                            file_hash="",
+                            file_type=source.get("file_type", "unknown"),
+                            file_size=0,
+                            last_modified=datetime.utcnow(),
+                            content_preview=source.get("content_snippet", "")[:500],
+                            chunks_count=source.get("chunks_found", 0)
+                        )
+                        await db_service.link_document_to_chat(
+                            document_id=doc.id,
+                            chat_session_id=chat_session.id
+                        )
+                        logger.info(f"Created fallback document record for {file_path}")
                 except Exception as e:
                     logger.error(f"Error linking document {file_path} to chat: {e}")
                     # Continue with other documents - don't fail the entire chat
@@ -914,49 +908,54 @@ async def get_document_file(request: Request, document_id: int, ctx: TenantConte
     Returns the file content with appropriate content-type headers.
     """
     try:
-        async for db_session in get_db():
+        async with AsyncSessionLocal() as db_session:
             stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
             result = await db_session.execute(stmt)
             document = result.scalar_one_or_none()
-
-            if not document:
-                raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
-
-            file_path = document.file_path
-            file_type = document.file_type.lower()
-
-            path_obj = Path(file_path)
-            if not path_obj.exists() or not path_obj.is_file():
-                logger.error(f"Document file not found on disk: {file_path}")
+        if not document:
+            raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
+        file_path = document.file_path
+        file_type = document.file_type.lower()
+        path_obj = Path(file_path)
+        if not path_obj.exists() or not path_obj.is_file():
+            logger.error(f"Document file not found on disk: {file_path}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document file not found on disk: {path_obj.name}"
+            )
+        _validate_file_under_directory(path_obj, ctx.current_directory)
+        content_type_map = {
+            'pdf': 'application/pdf',
+            'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'txt': 'text/plain',
+            'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'xls': 'application/vnd.ms-excel',
+            'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        }
+        content_type = content_type_map.get(file_type, 'application/octet-stream')
+        if file_type == 'txt':
+            MAX_TEXT_FILE_DISPLAY_BYTES = 10 * 1024 * 1024  # 10 MB
+            file_size_bytes = path_obj.stat().st_size
+            if file_size_bytes > MAX_TEXT_FILE_DISPLAY_BYTES:
                 raise HTTPException(
-                    status_code=404,
-                    detail=f"Document file not found on disk: {path_obj.name}"
+                    status_code=413,
+                    detail=f"File too large to display. Maximum size is {MAX_TEXT_FILE_DISPLAY_BYTES // (1024 * 1024)} MB."
                 )
-            _validate_file_under_directory(path_obj, ctx.current_directory)
-
-            # Determine content type based on file extension
-            content_type_map = {
-                'pdf': 'application/pdf',
-                'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                'txt': 'text/plain',
-                'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                'xls': 'application/vnd.ms-excel',
-                'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-            }
-            
-            content_type = content_type_map.get(file_type, 'application/octet-stream')
-            
-            # For TXT files, read and return as text response (with size limit to prevent DoS)
-            if file_type == 'txt':
-                MAX_TEXT_FILE_DISPLAY_BYTES = 10 * 1024 * 1024  # 10 MB
-                file_size_bytes = path_obj.stat().st_size
-                if file_size_bytes > MAX_TEXT_FILE_DISPLAY_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"File too large to display. Maximum size is {MAX_TEXT_FILE_DISPLAY_BYTES // (1024 * 1024)} MB."
-                    )
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                return Response(
+                    content=content,
+                    media_type=content_type,
+                    headers={
+                        "Content-Disposition": f'inline; filename="{path_obj.name}"',
+                        "X-Document-Id": str(document_id),
+                        "X-File-Type": file_type
+                    }
+                )
+            except UnicodeDecodeError:
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
+                    with open(file_path, 'r', encoding='latin-1') as f:
                         content = f.read()
                     return Response(
                         content=content,
@@ -967,36 +966,19 @@ async def get_document_file(request: Request, document_id: int, ctx: TenantConte
                             "X-File-Type": file_type
                         }
                     )
-                except UnicodeDecodeError:
-                    # Try with different encoding if UTF-8 fails
-                    try:
-                        with open(file_path, 'r', encoding='latin-1') as f:
-                            content = f.read()
-                        return Response(
-                            content=content,
-                            media_type=content_type,
-                            headers={
-                                "Content-Disposition": f'inline; filename="{path_obj.name}"',
-                                "X-Document-Id": str(document_id),
-                                "X-File-Type": file_type
-                            }
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to read TXT file {file_path}: {e}")
-                        raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
-            
-            # For PDF, DOCX, and Excel files, return file response
-            return FileResponse(
-                path=file_path,
-                media_type=content_type,
-                filename=path_obj.name,
-                headers={
-                    "X-Document-Id": str(document_id),
-                    "X-File-Type": file_type,
-                    "X-File-Size": str(document.file_size) if document.file_size else "0"
-                }
-            )
-            
+                except Exception as e:
+                    logger.error(f"Failed to read TXT file {file_path}: {e}")
+                    raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+        return FileResponse(
+            path=file_path,
+            media_type=content_type,
+            filename=path_obj.name,
+            headers={
+                "X-Document-Id": str(document_id),
+                "X-File-Type": file_type,
+                "X-File-Size": str(document.file_size) if document.file_size else "0"
+            }
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -1033,43 +1015,35 @@ async def get_document_preview(request: Request, document_id: int, format: str =
         )
     
     try:
-        # Get document from database
-        async for db_session in get_db():
+        async with AsyncSessionLocal() as db_session:
             stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
             result = await db_session.execute(stmt)
             document = result.scalar_one_or_none()
-            
-            if not document:
-                raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
-            
-            file_path = document.file_path
-            file_type = document.file_type.lower().replace('.', '')
-            
-            # Validate file exists
-            path_obj = Path(file_path)
-            if not path_obj.exists() or not path_obj.is_file():
-                logger.error(f"Document file not found on disk: {file_path}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Document file not found on disk: {path_obj.name}"
-                )
-            _validate_file_under_directory(path_obj, ctx.current_directory)
+        if not document:
+            raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
+        file_path = document.file_path
+        file_type = document.file_type.lower().replace('.', '')
+        path_obj = Path(file_path)
+        if not path_obj.exists() or not path_obj.is_file():
+            logger.error(f"Document file not found on disk: {file_path}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document file not found on disk: {path_obj.name}"
+            )
+        _validate_file_under_directory(path_obj, ctx.current_directory)
 
-            # Currently only support PPTX -> PDF conversion
-            if file_type != 'pptx':
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Preview not supported for file type: {file_type}. Currently only PPTX files are supported."
-                )
-            
-            if format != 'pdf':
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Preview format '{format}' not supported. Only 'pdf' is currently supported."
-                )
-            
-            # Convert PPTX to PDF
-            try:
+        # Currently only support PPTX -> PDF conversion
+        if file_type != 'pptx':
+            raise HTTPException(
+                status_code=400,
+                detail=f"Preview not supported for file type: {file_type}. Currently only PPTX files are supported."
+            )
+        if format != 'pdf':
+            raise HTTPException(
+                status_code=400,
+                detail=f"Preview format '{format}' not supported. Only 'pdf' is currently supported."
+            )
+        try:
                 use_cache = settings.PPTX_CACHE_ENABLED and not force_refresh
                 pdf_path = await pptx_converter.convert_pptx_to_pdf(
                     file_path,
@@ -1088,23 +1062,21 @@ async def get_document_preview(request: Request, document_id: int, format: str =
                         "X-Cache-Used": "true" if use_cache and pptx_converter.get_cached_pdf(file_path) else "false"
                     }
                 )
-                
-            except FileNotFoundError as e:
-                logger.error(f"PPTX file not found: {e}")
-                raise HTTPException(status_code=404, detail=f"PPTX file not found: {str(e)}")
-            except RuntimeError as e:
-                logger.error(f"PPTX conversion failed: {e}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to convert PPTX to PDF: {str(e)}"
-                )
-            except Exception as e:
-                logger.error(f"Unexpected error during PPTX conversion: {e}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Unexpected error during preview generation: {str(e)}"
-                )
-            
+        except FileNotFoundError as e:
+            logger.error(f"PPTX file not found: {e}")
+            raise HTTPException(status_code=404, detail=f"PPTX file not found: {str(e)}")
+        except RuntimeError as e:
+            logger.error(f"PPTX conversion failed: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to convert PPTX to PDF: {str(e)}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error during PPTX conversion: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected error during preview generation: {str(e)}"
+            )
     except HTTPException:
         raise
     except Exception as e:
@@ -1182,28 +1154,26 @@ async def get_document_metadata(document_id: int):
     Returns document information without the file content.
     """
     try:
-        async for db_session in get_db():
+        async with AsyncSessionLocal() as db_session:
             stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
             result = await db_session.execute(stmt)
             document = result.scalar_one_or_none()
-            
-            if not document:
-                raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
-            
-            return {
-                "status": "success",
-                "document": {
-                    "id": document.id,
-                    "file_path": document.file_path,
-                    "file_type": document.file_type,
-                    "file_size": document.file_size,
-                    "last_modified": document.last_modified.isoformat() if document.last_modified else None,
-                    "content_preview": document.content_preview,
-                    "chunks_count": document.chunks_count,
-                    "processing_status": document.processing_status,
-                    "indexed_at": document.indexed_at.isoformat() if document.indexed_at else None
-                }
+        if not document:
+            raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
+        return {
+            "status": "success",
+            "document": {
+                "id": document.id,
+                "file_path": document.file_path,
+                "file_type": document.file_type,
+                "file_size": document.file_size,
+                "last_modified": document.last_modified.isoformat() if document.last_modified else None,
+                "content_preview": document.content_preview,
+                "chunks_count": document.chunks_count,
+                "processing_status": document.processing_status,
+                "indexed_at": document.indexed_at.isoformat() if document.indexed_at else None
             }
+        }
             
     except HTTPException:
         raise

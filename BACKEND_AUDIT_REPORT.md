@@ -45,55 +45,22 @@ conditions.append(
 ## ⚠️ HIGH PRIORITY ISSUES
 ---
 
-### 9. No Query Result Caching — RESOLVED
-**Location**: `ai/main.py` (`chat` endpoint), `ai/query_cache.py`
+### 10. Database Connection Management — RESOLVED
+**Location**: `ai/database/service.py`, `ai/main.py`, orchestrator, update_executor
 
 **Issue** (was):
-- Every query ran full pipeline (classification, retrieval, LLM)
-- Identical queries processed multiple times
-- Expensive LLM calls repeated unnecessarily
-
-**Risk**: MEDIUM (Performance/Cost)
-
-**Resolution**:
-- **`ai/query_cache.py`**: `QueryCache` — in-memory, bounded LRU (default 500 entries), TTL (default 1 hour). Key includes `tenant_id` + `session_id` + normalized message so caches are tenant-scoped and session-scoped; no cross-user leakage.
-- **Lifespan**: `app.state.query_cache = QueryCache(max_entries=500, ttl_seconds=3600)`.
-- **Chat endpoint**: Before running the RAG pipeline, compute cache key and check `query_cache.get(key)`. On hit, return `ChatResponse(**cached)` and skip LLM/retrieval. After a successful query, store `{"message", "sources"}` in the cache.
-- Cache hit does not write a duplicate row to chat history (first occurrence already stored). Optional: swap to Redis later by replacing `QueryCache` with a backend that implements `get`/`set` with the same key/value contract.
-
----
-
-### 10. Database Connection Management
-**Location**: `ai/database/service.py` (multiple methods)
-
-**Issue**:
-- Using `async for session in get_db()` pattern
-- If exception occurs before `break`, connection may not close properly
-- Multiple database calls in loops could exhaust connection pool
+- Using `async for session in get_db(): ... break` pattern
+- If exception occurred before `break`, connection could stay open
+- Risk of connection pool exhaustion in loops
 
 **Risk**: MEDIUM (Resource leaks)
 
-**Current Pattern**:
-```python
-async for session in get_db():
-    # ... operations
-    break  # Must break or connection stays open
-```
-
-**Fix Required**:
-```python
-# Better pattern: explicit context manager
-async def store_document_metadata(...):
-    async with AsyncSessionLocal() as session:
-        try:
-            # ... operations
-            await session.commit()
-            return result
-        except Exception:
-            await session.rollback()
-            raise
-        # Session automatically closed
-```
+**Resolution**:
+- **`ai/database/__init__.py`**: Exported `AsyncSessionLocal` for explicit session use.
+- **`ai/database/service.py`**: All methods now use `async with AsyncSessionLocal() as session:` instead of `async for session in get_db(): ... break`. Write operations use `try: ... await session.commit(); return ... except Exception: await session.rollback(); raise`. Read-only operations use the context manager without commit. Session is always closed on exit (success or exception).
+- **`ai/main.py`**: Replaced every `async for db_session in get_db():` with `async with AsyncSessionLocal() as db_session:` (chat document linking, get_document_file, get_document_preview, get_document_metadata).
+- **Orchestrator and update_executor**: Same pattern — `AsyncSessionLocal()` context manager; commit/rollback where needed.
+- **`get_db()`** remains in `database.py` for FastAPI `Depends(get_db)` if used by any route; production paths now use explicit sessions.
 
 ---
 
