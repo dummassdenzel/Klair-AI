@@ -10,33 +10,16 @@
 
 ---
 
-### 3. SQL Injection Risk (Low - SQLAlchemy protects, but pattern is risky)
-**Location**: `ai/database/service.py:310` (`search_documents`)
+### 3. SQL Injection Risk — RESOLVED
+**Location**: `ai/database/service.py` (`search_documents`)
 
-**Issue**:
-- Using `ilike` with user input directly in f-string
-- While SQLAlchemy parameterizes, the pattern is risky
+**Issue** (was):
+- Using `ilike` with user input in f-string pattern (risky-looking even though SQLAlchemy binds)
 
-**Risk**: LOW (SQLAlchemy protects, but pattern is bad practice)
+**Risk**: LOW (SQLAlchemy protects, but pattern was bad practice)
 
-**Current Code**:
-```python
-IndexedDocument.file_path.ilike(f"%{query}%")  # User input in f-string
-```
-
-**Fix Required**:
-```python
-# Already safe due to SQLAlchemy, but better pattern:
-from sqlalchemy import func
-conditions.append(
-    or_(
-        func.lower(IndexedDocument.file_path).contains(func.lower(query)),
-        func.lower(IndexedDocument.content_preview).contains(func.lower(query))
-    )
-)
-```
-
-**Note**: SQLAlchemy does protect against injection, but the pattern should be clearer.
+**Resolution**:
+- Replaced with `func.lower(column).contains(func.lower(literal(query)))` using `literal(query)` so the search term is explicitly a bound parameter. Text search is case-insensitive and avoids the f-string pattern.
 
 ---
 
@@ -58,7 +41,7 @@ conditions.append(
 **Resolution**:
 - **`ai/database/__init__.py`**: Exported `AsyncSessionLocal` for explicit session use.
 - **`ai/database/service.py`**: All methods now use `async with AsyncSessionLocal() as session:` instead of `async for session in get_db(): ... break`. Write operations use `try: ... await session.commit(); return ... except Exception: await session.rollback(); raise`. Read-only operations use the context manager without commit. Session is always closed on exit (success or exception).
-- **`ai/main.py`**: Replaced every `async for db_session in get_db():` with `async with AsyncSessionLocal() as db_session:` (chat document linking, get_document_file, get_document_preview, get_document_metadata).
+- **`ai/main.py`**: Replaced every `async for db_session in get_db():` with `async with AsyncSessionLocal() as db_session:` (chat document linking, get_documen t_file, get_document_preview, get_document_metadata).
 - **Orchestrator and update_executor**: Same pattern — `AsyncSessionLocal()` context manager; commit/rollback where needed.
 - **`get_db()`** remains in `database.py` for FastAPI `Depends(get_db)` if used by any route; production paths now use explicit sessions.
 

@@ -45,8 +45,8 @@ class IndexedDocument(Base):
     indexed_at = Column(DateTime, default=datetime.utcnow)
     last_processed = Column(DateTime, default=datetime.utcnow)
     
-    # Add relationship to chat sessions that used this document
-    chat_sessions = relationship("ChatSession", secondary="document_chat_usage")
+    # Add relationship to chat sessions that used this document (overlaps with ChatSession.document_usage)
+    chat_sessions = relationship("ChatSession", secondary="document_chat_usage", overlaps="document_usage")
 
 class DocumentChatUsage(Base):
     """Many-to-many relationship between documents and chat sessions"""

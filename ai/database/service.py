@@ -4,6 +4,7 @@ Database service layer for document processor integration
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func, and_, or_, desc
+from sqlalchemy.sql.expression import literal
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import uuid
@@ -289,10 +290,12 @@ class DatabaseService:
             stmt = select(IndexedDocument)
             conditions = []
             if query:
+                # Use bound parameter (literal) + func for clear parameterization; avoids risky f-string pattern
+                search_val = func.lower(literal(query))
                 conditions.append(
                     or_(
-                        IndexedDocument.file_path.ilike(f"%{query}%"),
-                        IndexedDocument.content_preview.ilike(f"%{query}%")
+                        func.lower(IndexedDocument.file_path).contains(search_val),
+                        func.lower(IndexedDocument.content_preview).contains(search_val)
                     )
                 )
             if file_type:
