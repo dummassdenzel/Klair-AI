@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import Optional
 import asyncio
 
+from .file_validator import BASE_SUPPORTED_EXTENSIONS, IMAGE_EXTENSIONS_OCR
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,10 +18,9 @@ class TextExtractor:
         Args:
             ocr_service: Optional OCRService instance for scanned document processing
         """
-        self.supported_extensions = {".pdf", ".docx", ".txt", ".xlsx", ".xls", ".pptx"}
-        # Add image extensions if OCR is available
+        self.supported_extensions = set(BASE_SUPPORTED_EXTENSIONS)
         if ocr_service and ocr_service.is_available():
-            self.supported_extensions.update({".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"})
+            self.supported_extensions.update(IMAGE_EXTENSIONS_OCR)
         
         self.ocr_service = ocr_service
         

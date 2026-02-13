@@ -7,6 +7,16 @@ from pathlib import Path
 import logging
 import time  # Use time.time() instead of asyncio.get_event_loop().time()
 
+# Sync with FileValidator: use same extension constants so monitor and processor stay in sync
+try:
+    from services.document_processor.extraction.file_validator import (
+        BASE_SUPPORTED_EXTENSIONS,
+        IMAGE_EXTENSIONS_OCR,
+    )
+    _DEFAULT_EXTENSIONS = set(BASE_SUPPORTED_EXTENSIONS) | set(IMAGE_EXTENSIONS_OCR)
+except ImportError:
+    _DEFAULT_EXTENSIONS = {".pdf", ".docx", ".txt", ".xlsx", ".xls", ".pptx", ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}
+
 logger = logging.getLogger(__name__)
 
 class DocumentFileHandler(FileSystemEventHandler):
@@ -49,9 +59,6 @@ class DocumentFileHandler(FileSystemEventHandler):
             logger.warning(f"Event queue full, dropping {event_type} event for {file_path}")
 
 class FileMonitorService:
-    # Fallback when document processor has no file_validator (e.g. in tests)
-    _DEFAULT_SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".xlsx", ".xls", ".pptx"}
-
     def __init__(self, document_processor, max_queue_size: int = 100):
         self.document_processor = document_processor
         self.max_queue_size = max_queue_size
@@ -62,12 +69,12 @@ class FileMonitorService:
         self.debounce_delay = 2.0  # seconds
         self.processor_task = None
 
-        # Supported file extensions: use validator's set so we stay in sync (includes .pptx and OCR image exts when available)
+        # Use validator's extensions when available (single source of truth); else same set as FileValidator
         validator = getattr(document_processor, "file_validator", None)
-        if validator is not None and hasattr(validator, "supported_extensions") and validator.supported_extensions:
+        if validator is not None and getattr(validator, "supported_extensions", None):
             self.supported_extensions = set(validator.supported_extensions)
         else:
-            self.supported_extensions = set(self._DEFAULT_SUPPORTED_EXTENSIONS)
+            self.supported_extensions = set(_DEFAULT_EXTENSIONS)
 
         # Create file handler
         self.file_handler = DocumentFileHandler(self.event_queue, self.supported_extensions)

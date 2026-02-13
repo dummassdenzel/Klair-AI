@@ -8,6 +8,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Single source of truth for supported extensions (synced with FileMonitor and TextExtractor)
+BASE_SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt", ".xlsx", ".xls", ".pptx"})
+IMAGE_EXTENSIONS_OCR = frozenset({".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"})
+
 
 class FileValidator:
     """Service for validating files and managing file metadata"""
@@ -21,11 +25,9 @@ class FileValidator:
             ocr_service: Optional OCRService instance (if provided, adds image extensions)
         """
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
-        self.supported_extensions = {".pdf", ".docx", ".txt", ".xlsx", ".xls", ".pptx"}
-        
-        # Add image extensions if OCR is available
+        self.supported_extensions = set(BASE_SUPPORTED_EXTENSIONS)
         if ocr_service and ocr_service.is_available():
-            self.supported_extensions.update({".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"})
+            self.supported_extensions.update(IMAGE_EXTENSIONS_OCR)
     
     def validate_file(self, file_path: str) -> Tuple[bool, str]:
         """Validate file and return (is_valid, error_message)"""

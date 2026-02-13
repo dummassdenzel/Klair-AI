@@ -137,26 +137,17 @@ async def process_with_timeout(coro, timeout=300):
 
 ---
 
-### 15. File Monitor Extension Mismatch
-**Location**: `ai/services/file_monitor.py:63`
+### 15. File Monitor Extension Mismatch — RESOLVED
+**Location**: `ai/services/file_monitor.py`, `ai/services/document_processor/extraction/file_validator.py`
 
-**Issue**:
-- File monitor has hardcoded extensions
-- Doesn't sync with FileValidator/TextExtractor
-- Missing `.pptx` and image extensions
+**Issue** (was):
+- File monitor had its own hardcoded extensions; could drift from FileValidator/TextExtractor
+- Missing `.pptx` and image extensions in a single fallback list
 
-**Current Code**:
-```python
-self.supported_extensions = {".pdf", ".docx", ".txt", ".xlsx", ".xls"}  # Missing .pptx and images
-```
-
-**Fix**:
-```python
-# Sync with FileValidator
-from services.document_processor.extraction import FileValidator
-file_validator = FileValidator(max_file_size_mb=50, ocr_service=ocr_service)
-self.supported_extensions = file_validator.supported_extensions
-```
+**Resolution**:
+- **Single source of truth** in `file_validator.py`: `BASE_SUPPORTED_EXTENSIONS` (`.pdf`, `.docx`, `.txt`, `.xlsx`, `.xls`, `.pptx`) and `IMAGE_EXTENSIONS_OCR` (`.jpg`, `.jpeg`, `.png`, `.tiff`, `.tif`, `.bmp`). `FileValidator` builds `supported_extensions` from these (adds images when OCR is available).
+- **TextExtractor** now imports and uses the same constants so it stays in sync.
+- **FileMonitorService**: Imports `BASE_SUPPORTED_EXTENSIONS` and `IMAGE_EXTENSIONS_OCR` for its fallback set; when `document_processor.file_validator` is present it uses `validator.supported_extensions`. Default (no validator) includes both base and image extensions so the monitor watches all types the processor can accept.
 
 ---
 
