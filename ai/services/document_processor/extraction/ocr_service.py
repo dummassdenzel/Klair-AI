@@ -28,23 +28,23 @@ class OCRService:
         self,
         tesseract_path: Optional[str] = None,
         cache_dir: str = "./ocr_cache",
-        languages: str = "eng"
+        languages: str = "eng",
+        ocr_timeout: int = 300,
     ):
         """
         Initialize OCR service.
-        
+
         Args:
             tesseract_path: Path to Tesseract executable. If None, will auto-detect.
             cache_dir: Directory to store cached OCR results
             languages: Comma-separated language codes (e.g., "eng,spa,fra")
+            ocr_timeout: Max seconds for a single OCR operation (prevents indefinite hang).
         """
         self.tesseract_path = tesseract_path or self._detect_tesseract()
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.languages = languages
-        
-        # OCR timeout (seconds) - longer for large images
-        self.ocr_timeout = 300  # 5 minutes
+        self.ocr_timeout = ocr_timeout
         
         # Supported image formats
         self.supported_image_extensions = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}
@@ -359,40 +359,42 @@ class OCRService:
     async def extract_text_from_image(self, image_path: str, use_cache: bool = True) -> str:
         """
         Asynchronously extract text from an image file.
-        
-        Args:
-            image_path: Path to image file
-            use_cache: Whether to use cached result if available
-            
-        Returns:
-            Extracted text from image
+        Raises RuntimeError if OCR times out (after ocr_timeout seconds).
         """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            self._extract_text_from_image_sync,
-            image_path,
-            use_cache
-        )
-    
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    self._extract_text_from_image_sync,
+                    image_path,
+                    use_cache,
+                ),
+                timeout=self.ocr_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"OCR timed out after {self.ocr_timeout}s for image {image_path}")
+            raise RuntimeError(f"OCR timed out after {self.ocr_timeout} seconds")
+
     async def extract_text_from_scanned_pdf(self, pdf_path: str, use_cache: bool = True) -> str:
         """
         Asynchronously extract text from a scanned PDF.
-        
-        Args:
-            pdf_path: Path to PDF file
-            use_cache: Whether to use cached result if available
-            
-        Returns:
-            Extracted text from all pages
+        Raises RuntimeError if OCR times out (after ocr_timeout seconds).
         """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            self._extract_text_from_scanned_pdf_sync,
-            pdf_path,
-            use_cache
-        )
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    self._extract_text_from_scanned_pdf_sync,
+                    pdf_path,
+                    use_cache,
+                ),
+                timeout=self.ocr_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"OCR timed out after {self.ocr_timeout}s for PDF {pdf_path}")
+            raise RuntimeError(f"OCR timed out after {self.ocr_timeout} seconds")
     
     def get_cached_text(self, file_path: str) -> Optional[str]:
         """

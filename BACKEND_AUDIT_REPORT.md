@@ -96,44 +96,31 @@ else:
 
 ---
 
-### 13. Missing File Type Validation in Preview Endpoint
-**Location**: `ai/main.py:987` (`get_document_preview`)
+### 13. Missing File Type Validation in Preview Endpoint — RESOLVED
+**Location**: `ai/main.py` (`get_document_preview`, `get_document_file`)
 
-**Issue**:
-- Only checks file_type from database
-- Doesn't validate actual file extension matches
-- Could serve wrong file type
+**Issue** (was):
+- Only used file_type from database; did not validate that the file on disk had the same extension
+- Risk of serving the wrong type if the file was replaced or the record was stale
 
-**Fix**:
-```python
-# Validate file extension matches database record
-actual_extension = path_obj.suffix.lower()
-if actual_extension != f".{file_type}":
-    logger.warning(f"File extension mismatch: DB says {file_type}, file is {actual_extension}")
-    # Decide: trust DB or file? For security, validate both
-```
+**Resolution**:
+- **Preview endpoint**: After resolving the document and path, compare `path_obj.suffix.lower().lstrip(".")` with `file_type.lower().lstrip(".")`. On mismatch, log a warning and return `400` with a clear message so the wrong file is never served.
+- **File endpoint**: Same check added so both “serve file by ID” endpoints validate extension vs DB before serving. Rejects with `400` when extension does not match the document record.
 
 ---
 
-### 14. No Timeout on Long-Running Operations
-**Location**: OCR, PPTX conversion, document processing
+### 14. No Timeout on Long-Running Operations — RESOLVED
+**Location**: OCR service, main.py (preview, set-directory)
 
-**Issue**:
-- No timeout on OCR operations (could hang indefinitely)
-- No timeout on document processing
-- Could cause resource exhaustion
+**Issue** (was):
+- No timeout on OCR (could hang indefinitely)
+- No timeout on PPTX conversion or directory initialization
+- Risk of resource exhaustion
 
-**Fix**:
-```python
-import asyncio
-
-async def process_with_timeout(coro, timeout=300):
-    try:
-        return await asyncio.wait_for(coro, timeout=timeout)
-    except asyncio.TimeoutError:
-        logger.error(f"Operation timed out after {timeout}s")
-        raise HTTPException(status_code=504, detail="Operation timed out")
-```
+**Resolution**:
+- **OCR** (`ocr_service.py`): `OCRService` accepts `ocr_timeout` (default 300s). `extract_text_from_image` and `extract_text_from_scanned_pdf` wrap `run_in_executor` in `asyncio.wait_for(..., timeout=self.ocr_timeout)`. On timeout they raise `RuntimeError("OCR timed out after ... seconds")`. Orchestrator passes `settings.OCR_TIMEOUT` when creating `OCRService`.
+- **PPTX preview** (`main.py`): `get_document_preview` wraps `convert_pptx_to_pdf` in `asyncio.wait_for(..., timeout=settings.PPTX_CONVERSION_TIMEOUT)`. On `TimeoutError` returns **504** with message "Preview conversion timed out after ... seconds". `HTTPException` is re-raised so 504 is not turned into 500.
+- **Directory initialization** (`main.py`): `set_directory` wraps `initialize_from_directory` in `asyncio.wait_for(..., timeout=settings.INITIALIZE_DIRECTORY_TIMEOUT)` (default 600s). On timeout returns **504** with a clear message. Config adds `INITIALIZE_DIRECTORY_TIMEOUT` (env: `INITIALIZE_DIRECTORY_TIMEOUT`, default 600).
 
 ---
 

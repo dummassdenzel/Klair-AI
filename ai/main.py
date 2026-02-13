@@ -326,7 +326,18 @@ async def set_directory(request: Request):
 
         await doc_processor.clear_all_data()
         file_monitor = FileMonitorService(doc_processor)
-        await doc_processor.initialize_from_directory(directory_path)
+        init_timeout = settings.INITIALIZE_DIRECTORY_TIMEOUT
+        try:
+            await asyncio.wait_for(
+                doc_processor.initialize_from_directory(directory_path),
+                timeout=init_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Directory initialization timed out after {init_timeout}s for {directory_path}")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Directory initialization timed out after {init_timeout} seconds. Try a smaller directory or increase INITIALIZE_DIRECTORY_TIMEOUT."
+            )
         await file_monitor.start_monitoring(directory_path)
 
         new_ctx = TenantContext(
@@ -924,6 +935,19 @@ async def get_document_file(request: Request, document_id: int, ctx: TenantConte
                 detail=f"Document file not found on disk: {path_obj.name}"
             )
         _validate_file_under_directory(path_obj, ctx.current_directory)
+
+        # Validate actual file extension matches DB record
+        actual_ext = path_obj.suffix.lower().lstrip(".")
+        db_ext = file_type.lower().lstrip(".")
+        if actual_ext != db_ext:
+            logger.warning(
+                f"File extension mismatch document_id={document_id}: DB file_type={file_type}, actual={path_obj.suffix}"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="File extension does not match document record."
+            )
+
         content_type_map = {
             'pdf': 'application/pdf',
             'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -1032,6 +1056,19 @@ async def get_document_preview(request: Request, document_id: int, format: str =
             )
         _validate_file_under_directory(path_obj, ctx.current_directory)
 
+        # Validate actual file extension matches DB record (avoid serving wrong type)
+        actual_extension = path_obj.suffix.lower().lstrip(".")
+        db_extension_normalized = file_type.lower().lstrip(".")
+        if actual_extension != db_extension_normalized:
+            logger.warning(
+                f"Preview extension mismatch for document_id={document_id}: "
+                f"DB file_type={file_type}, actual suffix={path_obj.suffix}"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="File extension does not match document record. The file may have been replaced or the record is stale."
+            )
+
         # Currently only support PPTX -> PDF conversion
         if file_type != 'pptx':
             raise HTTPException(
@@ -1045,10 +1082,18 @@ async def get_document_preview(request: Request, document_id: int, format: str =
             )
         try:
                 use_cache = settings.PPTX_CACHE_ENABLED and not force_refresh
-                pdf_path = await pptx_converter.convert_pptx_to_pdf(
-                    file_path,
-                    use_cache=use_cache
-                )
+                pptx_timeout = settings.PPTX_CONVERSION_TIMEOUT
+                try:
+                    pdf_path = await asyncio.wait_for(
+                        pptx_converter.convert_pptx_to_pdf(file_path, use_cache=use_cache),
+                        timeout=pptx_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"PPTX conversion timed out after {pptx_timeout}s for {path_obj.name}")
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"Preview conversion timed out after {pptx_timeout} seconds.",
+                    )
                 
                 # Return PDF file
                 return FileResponse(
@@ -1062,6 +1107,8 @@ async def get_document_preview(request: Request, document_id: int, format: str =
                         "X-Cache-Used": "true" if use_cache and pptx_converter.get_cached_pdf(file_path) else "false"
                     }
                 )
+        except HTTPException:
+            raise
         except FileNotFoundError as e:
             logger.error(f"PPTX file not found: {e}")
             raise HTTPException(status_code=404, detail=f"PPTX file not found: {str(e)}")

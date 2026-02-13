@@ -107,10 +107,10 @@ class DocumentProcessorOrchestrator:
             ocr_service = OCRService(
                 tesseract_path=settings.TESSERACT_PATH if settings.TESSERACT_PATH else None,
                 cache_dir=settings.OCR_CACHE_DIR,
-                languages=settings.OCR_LANGUAGES
+                languages=settings.OCR_LANGUAGES,
+                ocr_timeout=getattr(settings, "OCR_TIMEOUT", 300),
             )
         except (ImportError, AttributeError):
-            # Settings not available, use defaults
             logger.info("OCR settings not available, using defaults")
             ocr_service = OCRService()
         

@@ -41,7 +41,10 @@ class Settings:
     OCR_CACHE_ENABLED: bool = os.getenv("OCR_CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
     OCR_LANGUAGES: str = os.getenv("OCR_LANGUAGES", "eng")  # Comma-separated: "eng,spa,fra"
     OCR_TIMEOUT: int = int(os.getenv("OCR_TIMEOUT", "300"))  # 5 minutes for large images
-    
+
+    # Directory initialization (set-directory) max time before 504
+    INITIALIZE_DIRECTORY_TIMEOUT: int = int(os.getenv("INITIALIZE_DIRECTORY_TIMEOUT", "600"))  # 10 minutes
+
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FORMAT: str = os.getenv("LOG_FORMAT", "human")  # 'json' or 'human'
