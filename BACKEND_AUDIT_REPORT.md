@@ -45,85 +45,21 @@ conditions.append(
 ## ⚠️ HIGH PRIORITY ISSUES
 ---
 
+### 9. No Query Result Caching — RESOLVED
+**Location**: `ai/main.py` (`chat` endpoint), `ai/query_cache.py`
 
-### 8. Shared Vector Store (Data Leakage Risk)
-**Location**: `ai/main.py:256` (DocumentProcessorOrchestrator initialization)
-
-**Issue**:
-- All documents share same ChromaDB instance
-- Queries can leak data across users/directories
-- No isolation
-
-**Risk**: HIGH (Security/Privacy)
-
-**Current Code**:
-```python
-doc_processor = DocumentProcessorOrchestrator(
-    persist_dir=config.persist_dir,  # "./chroma_db" - SHARED!
-    # ...
-)
-```
-
-**Fix Required**:
-```python
-# Per-directory isolation
-import hashlib
-
-def get_directory_hash(directory_path: str) -> str:
-    return hashlib.sha256(directory_path.encode()).hexdigest()[:16]
-
-persist_dir = f"./chroma_db/{get_directory_hash(directory_path)}"
-doc_processor = DocumentProcessorOrchestrator(
-    persist_dir=persist_dir,  # Isolated per directory
-    # ...
-)
-```
-
----
-
-### 9. No Query Result Caching
-**Location**: `ai/main.py:299` (`chat` endpoint)
-
-**Issue**:
-- Every query runs full pipeline (classification, retrieval, LLM)
+**Issue** (was):
+- Every query ran full pipeline (classification, retrieval, LLM)
 - Identical queries processed multiple times
 - Expensive LLM calls repeated unnecessarily
 
 **Risk**: MEDIUM (Performance/Cost)
 
-**Fix Required**:
-```python
-from functools import lru_cache
-import hashlib
-import json
-
-# Simple in-memory cache (or use Redis for production)
-query_cache = {}
-
-def get_query_cache_key(message: str, session_id: int) -> str:
-    return hashlib.md5(f"{session_id}:{message}".encode()).hexdigest()
-
-@app.post("/api/chat")
-async def chat(request: ChatRequest):
-    cache_key = get_query_cache_key(request.message, request.session_id or 0)
-    
-    # Check cache
-    if cache_key in query_cache:
-        cached_result = query_cache[cache_key]
-        if time.time() - cached_result['timestamp'] < 3600:  # 1 hour TTL
-            return cached_result['response']
-    
-    # Process query
-    response = await doc_processor.query(request.message, ...)
-    
-    # Cache result
-    query_cache[cache_key] = {
-        'response': response,
-        'timestamp': time.time()
-    }
-    
-    return response
-```
+**Resolution**:
+- **`ai/query_cache.py`**: `QueryCache` — in-memory, bounded LRU (default 500 entries), TTL (default 1 hour). Key includes `tenant_id` + `session_id` + normalized message so caches are tenant-scoped and session-scoped; no cross-user leakage.
+- **Lifespan**: `app.state.query_cache = QueryCache(max_entries=500, ttl_seconds=3600)`.
+- **Chat endpoint**: Before running the RAG pipeline, compute cache key and check `query_cache.get(key)`. On hit, return `ChatResponse(**cached)` and skip LLM/retrieval. After a successful query, store `{"message", "sources"}` in the cache.
+- Cache hit does not write a duplicate row to chat history (first occurrence already stored). Optional: swap to Redis later by replacing `QueryCache` with a backend that implements `get`/`set` with the same key/value contract.
 
 ---
 

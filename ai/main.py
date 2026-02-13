@@ -25,6 +25,7 @@ from tenant_registry import (
     get_tenant_persist_dir,
     DEFAULT_TENANT_ID,
 )
+from query_cache import QueryCache, get_query_cache_key
 
 # NEW: Add database imports
 from database import DatabaseService, get_db
@@ -104,6 +105,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting AI Document Assistant...")
 
     app.state.tenant_registry = TenantRegistry()
+    app.state.query_cache = QueryCache(max_entries=500, ttl_seconds=3600)
 
     libreoffice_path = settings.LIBREOFFICE_PATH if settings.LIBREOFFICE_PATH else None
     pptx_converter = PPTXConverter(
@@ -305,6 +307,7 @@ async def set_directory(request: Request):
             if not evicted:
                 raise HTTPException(status_code=503, detail="Too many active tenants; try again later.")
 
+        # Per-tenant ChromaDB/BM25 path: prevents shared vector store and data leakage across tenants (audit §8).
         persist_dir = get_tenant_persist_dir(config.persist_dir, tenant_id)
         doc_processor = DocumentProcessorOrchestrator(
             persist_dir=persist_dir,
@@ -375,6 +378,14 @@ async def chat(chat_request: ChatRequest, request: Request, ctx: TenantContext =
                 title=f"Chat about: {chat_request.message[:50]}..."
             )
 
+        cache = getattr(request.app.state, "query_cache", None)
+        cache_key = get_query_cache_key(ctx.tenant_id, chat_session.id, chat_request.message) if cache else None
+        if cache and cache_key:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                logger.info(f"Query cache hit for session {chat_session.id}")
+                return ChatResponse(message=cached["message"], sources=cached["sources"])
+
         conversation_history = []
         try:
             previous_messages = await db_service.get_chat_history(chat_session.id)
@@ -388,7 +399,10 @@ async def chat(chat_request: ChatRequest, request: Request, ctx: TenantContext =
             conversation_history = []
 
         response = await ctx.doc_processor.query(chat_request.message, conversation_history=conversation_history)
-        
+
+        if cache and cache_key:
+            cache.set(cache_key, {"message": response.message, "sources": response.sources})
+
         # Store chat message in database
         await db_service.add_chat_message(
             session_id=chat_session.id,
