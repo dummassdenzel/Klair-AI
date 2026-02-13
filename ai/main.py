@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +18,13 @@ from services.document_processor.extraction import PPTXConverter
 from config import settings
 from services.file_monitor import FileMonitorService
 from schemas.chat import ChatRequest, ChatResponse
+from tenant_registry import (
+    TenantRegistry,
+    TenantContext,
+    get_tenant_id_from_request,
+    get_tenant_persist_dir,
+    DEFAULT_TENANT_ID,
+)
 
 # NEW: Add database imports
 from database import DatabaseService, get_db
@@ -38,20 +45,30 @@ setup_logging(
 
 logger = logging.getLogger(__name__)
 
-# Global state
-doc_processor: Optional[DocumentProcessorOrchestrator] = None
-file_monitor: Optional[FileMonitorService] = None
-current_directory: Optional[str] = None
-metrics_service = MetricsService(max_history=1000)  # Store last 1000 queries
+# Shared services (not tenant-scoped)
+metrics_service = MetricsService(max_history=1000)
 rag_analytics = RAGAnalytics(metrics_service)
 prewarming_complete = False
 prewarming_task = None
- 
-# NEW: Add database service
 db_service = DatabaseService()
-
-# PPTX Converter for preview functionality
 pptx_converter: Optional[PPTXConverter] = None
+
+
+def _get_tenant_context(request: Request) -> Optional[TenantContext]:
+    """Resolve tenant from X-Tenant-ID header and return its context (or None)."""
+    registry = getattr(request.app.state, "tenant_registry", None)
+    if not registry:
+        return None
+    return registry.get(get_tenant_id_from_request(request))
+
+
+def require_tenant_context(request: Request) -> TenantContext:
+    """Dependency: require tenant context or raise 400."""
+    ctx = _get_tenant_context(request)
+    if ctx is None:
+        raise HTTPException(status_code=400, detail="No directory set")
+    ctx.touch()
+    return ctx
 
 
 def _validate_file_under_directory(file_path: Path, directory: Optional[str]) -> None:
@@ -82,13 +99,12 @@ def _validate_file_under_directory(file_path: Path, directory: Optional[str]) ->
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
-    global prewarming_complete, prewarming_task
-    
-    # Startup
+    global prewarming_complete, prewarming_task, pptx_converter
+
     logger.info("Starting AI Document Assistant...")
-    
-    # Initialize PPTX converter
-    global pptx_converter
+
+    app.state.tenant_registry = TenantRegistry()
+
     libreoffice_path = settings.LIBREOFFICE_PATH if settings.LIBREOFFICE_PATH else None
     pptx_converter = PPTXConverter(
         libreoffice_path=libreoffice_path,
@@ -98,21 +114,17 @@ async def lifespan(app: FastAPI):
         logger.info("PPTX preview functionality enabled")
     else:
         logger.warning("PPTX preview disabled: LibreOffice not found")
-    
-    # Start pre-warming immediately
+
     prewarming_task = asyncio.create_task(prewarm_services())
-    
+
     yield
-    
-    # Shutdown
+
     logger.info("Shutting down AI Document Assistant...")
-    global file_monitor, doc_processor
-    if file_monitor:
-        await file_monitor.stop_monitoring()
-    if doc_processor:
-        await doc_processor.cleanup()
-    
-    # Cancel pre-warming if still running
+    registry = getattr(app.state, "tenant_registry", None)
+    if registry:
+        for tenant_id in list(registry.tenant_ids()):
+            await registry.evict_and_cleanup(tenant_id)
+
     if prewarming_task and not prewarming_task.done():
         prewarming_task.cancel()
 
@@ -259,40 +271,43 @@ async def select_directory():
 @app.post("/api/set-directory")
 @limiter.limit("10/minute")
 async def set_directory(request: Request):
-    """Set the directory to monitor and process documents from"""
+    """Set the directory to monitor and process documents from (tenant-scoped)."""
     import os
-    global doc_processor, file_monitor, current_directory
+    tenant_id = get_tenant_id_from_request(request)
+    registry = request.app.state.tenant_registry
+    ctx = registry.get(tenant_id)
 
     body = await request.json()
     directory_path = body.get("path")
     if not directory_path:
         raise HTTPException(status_code=400, detail="Directory path required")
-    
-    # Normalize directory path for consistent storage and comparison
+
     directory_path = os.path.normpath(os.path.abspath(directory_path))
-    
+    normalized_new_path = os.path.normpath(os.path.abspath(directory_path))
+
     try:
-        # Normalize both paths for comparison (case-insensitive on Windows)
-        normalized_new_path = os.path.normpath(os.path.abspath(directory_path))
-        normalized_current_path = os.path.normpath(os.path.abspath(current_directory)) if current_directory else None
-        
-        # Check if it's the same directory - if so, skip re-initialization
-        if normalized_current_path and normalized_current_path.lower() == normalized_new_path.lower():
-            logger.info(f"Directory {directory_path} is already set, skipping re-initialization")
-            return {
-                "status": "success",
-                "message": "Directory is already set. No re-initialization needed.",
-                "directory": directory_path,
-                "processing_status": "already_initialized"
-            }
-        
-        # Stop existing file monitor
-        if file_monitor:
-            await file_monitor.stop_monitoring()
-        
-        # Initialize document processor with configuration
+        if ctx and ctx.current_directory:
+            normalized_current = os.path.normpath(os.path.abspath(ctx.current_directory))
+            if normalized_current.lower() == normalized_new_path.lower():
+                logger.info(f"[{tenant_id}] Directory already set, skipping re-initialization")
+                return {
+                    "status": "success",
+                    "message": "Directory is already set. No re-initialization needed.",
+                    "directory": directory_path,
+                    "processing_status": "already_initialized"
+                }
+
+        if ctx and ctx.file_monitor:
+            await ctx.file_monitor.stop_monitoring()
+
+        while len(registry) >= registry.max_tenants:
+            evicted = await registry.evict_one_lru()
+            if not evicted:
+                raise HTTPException(status_code=503, detail="Too many active tenants; try again later.")
+
+        persist_dir = get_tenant_persist_dir(config.persist_dir, tenant_id)
         doc_processor = DocumentProcessorOrchestrator(
-            persist_dir=config.persist_dir,
+            persist_dir=persist_dir,
             embed_model_name=config.embed_model_name,
             max_file_size_mb=config.max_file_size_mb,
             chunk_size=config.chunk_size,
@@ -303,94 +318,76 @@ async def set_directory(request: Request):
             gemini_model=settings.GEMINI_MODEL,
             llm_provider=settings.LLM_PROVIDER
         )
-        
-        logger.info(f"Initializing document processor for directory: {directory_path}")
-        
-        # Clear old directory data synchronously (prevents race conditions)
-        logger.info("Clearing previous directory data...")
+
+        logger.info(f"[{tenant_id}] Initializing document processor for directory: {directory_path}")
+
         await doc_processor.clear_all_data()
-        logger.info("Previous directory data cleared successfully")
-        
-        current_directory = directory_path
-        
-        # Process existing documents first (before starting file monitor to avoid duplicate events)
-        # Wait for metadata indexing to complete before starting file monitor
-        logger.info("Starting initial directory indexing...")
-        await doc_processor.initialize_from_directory(directory_path)
-        logger.info("Initial directory indexing complete, starting file monitor...")
-        
-        # Start file monitoring after initial indexing is complete
         file_monitor = FileMonitorService(doc_processor)
+        await doc_processor.initialize_from_directory(directory_path)
         await file_monitor.start_monitoring(directory_path)
-        
+
+        new_ctx = TenantContext(
+            tenant_id=tenant_id,
+            doc_processor=doc_processor,
+            file_monitor=file_monitor,
+            current_directory=directory_path,
+        )
+        registry.set(tenant_id, new_ctx)
+
         return {
             "status": "success",
             "message": "Directory set successfully. Documents are being processed in the background.",
             "directory": directory_path,
             "processing_status": "background_processing"
         }
-        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to set directory {directory_path}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to set directory: {str(e)}")
 
 @app.post("/api/chat", response_model=ChatResponse)
 @limiter.limit("10/minute")
-async def chat(chat_request: ChatRequest, request: Request):
+async def chat(chat_request: ChatRequest, request: Request, ctx: TenantContext = Depends(require_tenant_context)):
     """Query the document index with natural language"""
-    if not doc_processor:
-        raise HTTPException(status_code=400, detail="No directory set")
-    
     try:
         logger.info(f"Processing chat query: {chat_request.message[:100]}...")
-        
-        # FIX: Check if session_id exists, create new only if needed
+
         if chat_request.session_id:
-            # Try to get existing session
             try:
                 chat_session = await db_service.get_chat_session_by_id(chat_request.session_id)
                 if chat_session:
                     logger.info(f"Using existing session: {chat_request.session_id}")
                 else:
-                    logger.warning(f"Session {chat_request.session_id} not found, creating new one")
                     chat_session = await db_service.create_chat_session(
-                        directory_path=current_directory,
+                        directory_path=ctx.current_directory,
                         title=f"Chat about: {chat_request.message[:50]}..."
                     )
             except Exception as e:
                 logger.error(f"Error getting session {chat_request.session_id}: {e}")
-                # Fallback to creating new session
                 chat_session = await db_service.create_chat_session(
-                    directory_path=current_directory,
+                    directory_path=ctx.current_directory,
                     title=f"Chat about: {chat_request.message[:50]}..."
                 )
         else:
-            # No session_id provided, create new session
             chat_session = await db_service.create_chat_session(
-                directory_path=current_directory,
+                directory_path=ctx.current_directory,
                 title=f"Chat about: {chat_request.message[:50]}..."
             )
-        
-        # Get conversation history for context (last 3 messages for efficiency)
+
         conversation_history = []
         try:
             previous_messages = await db_service.get_chat_history(chat_session.id)
-            # Get last 3 messages for context (balance between context and speed)
             recent_messages = previous_messages[-3:] if len(previous_messages) > 3 else previous_messages
-            
-            # Interleave user and assistant messages properly
-            conversation_history = []
             for msg in recent_messages:
                 conversation_history.append({"role": "user", "content": msg.user_message})
                 conversation_history.append({"role": "assistant", "content": msg.ai_response})
-            
             logger.info(f"Including {len(recent_messages)} previous messages in conversation context")
         except Exception as e:
             logger.warning(f"Could not fetch conversation history: {e}")
             conversation_history = []
-        
-        # Query RAG system with conversation context
-        response = await doc_processor.query(chat_request.message, conversation_history=conversation_history)
+
+        response = await ctx.doc_processor.query(chat_request.message, conversation_history=conversation_history)
         
         # Store chat message in database
         await db_service.add_chat_message(
@@ -488,24 +485,23 @@ async def chat(chat_request: ChatRequest, request: Request):
         raise HTTPException(status_code=500, detail="Query failed: {str(e)}")
 
 @app.get("/api/status")
-async def get_status():
-    """Get current system status and configuration"""
+async def get_status(request: Request):
+    """Get current system status and configuration (tenant-scoped when directory set)."""
     try:
+        ctx = _get_tenant_context(request)
         status_info = {
-        "directory_set": current_directory is not None,
-        "current_directory": current_directory,
-            "processor_ready": doc_processor is not None and doc_processor.is_ready() if doc_processor else False,
-        "monitor_running": file_monitor is not None and file_monitor.is_running if file_monitor else False,
+            "directory_set": ctx is not None and ctx.current_directory is not None,
+            "current_directory": ctx.current_directory if ctx else None,
+            "processor_ready": ctx.doc_processor.is_ready() if ctx and ctx.doc_processor else False,
+            "monitor_running": ctx.file_monitor.is_running if ctx and ctx.file_monitor else False,
         }
-        
-        # Add configuration info safely
+
         try:
             status_info["configuration"] = config.to_dict()
         except Exception as e:
             logger.warning(f"Could not get configuration: {e}")
             status_info["configuration"] = {"error": "Configuration not available"}
-        
-        # Add active LLM provider/model info
+
         try:
             provider = (settings.LLM_PROVIDER or "ollama").lower()
             if provider == "gemini":
@@ -518,11 +514,10 @@ async def get_status():
             }
         except Exception as e:
             logger.warning(f"Could not determine LLM provider/model: {e}")
-        
-        # Add index stats if processor is available
-        if doc_processor:
+
+        if ctx and ctx.doc_processor:
             try:
-                status_info["index_stats"] = await doc_processor.get_stats()
+                status_info["index_stats"] = await ctx.doc_processor.get_stats()
             except Exception as e:
                 logger.warning(f"Could not get index stats: {e}")
                 status_info["index_stats"] = {"error": "Stats not available"}
@@ -589,66 +584,37 @@ async def update_configuration(request: dict):
         raise HTTPException(status_code=500, detail=f"Configuration update failed: {str(e)}")
 
 @app.post("/api/clear-index")
-async def clear_index():
-    """Clear the entire index and database records"""
-    global doc_processor
-    if doc_processor:
-        try:
-            await doc_processor.clear_all_data()
-            
-            logger.info("Document index and database records cleared successfully")
-            return {"status": "success", "message": "Index and database records cleared"}
-            
-        except Exception as e:
-            logger.error(f"Failed to clear index: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to clear index: {str(e)}")
-    else:
-        raise HTTPException(status_code=400, detail="No processor initialized")
+async def clear_index(ctx: TenantContext = Depends(require_tenant_context)):
+    """Clear the entire index and database records for the current tenant."""
+    try:
+        await ctx.doc_processor.clear_all_data()
+        logger.info("Document index and database records cleared successfully")
+        return {"status": "success", "message": "Index and database records cleared"}
+    except Exception as e:
+        logger.error(f"Failed to clear index: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear index: {str(e)}")
 
 @app.post("/api/reload-embedding-model")
-async def reload_embedding_model(request: dict):
+async def reload_embedding_model(request: dict, ctx: TenantContext = Depends(require_tenant_context)):
     """Reload the embedding model with new configuration"""
-    global doc_processor
-    
-    if not doc_processor:
-        raise HTTPException(status_code=400, detail="No processor initialized")
-    
     try:
         new_model = request.get("model_name")
         if not new_model:
             raise HTTPException(status_code=400, detail="Model name required")
-        
-        # Reload the embedding model
-        doc_processor.embedding_service.reload_model(new_model)
-        
+        ctx.doc_processor.embedding_service.reload_model(new_model)
         logger.info(f"Embedding model reloaded to: {new_model}")
         return {"status": "success", "message": f"Model reloaded to {new_model}"}
-        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to reload embedding model: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to reload model: {str(e)}")
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    global doc_processor, file_monitor
-    logger.info("Shutting down services...")
-    
-    if file_monitor:
-        await file_monitor.stop_monitoring()
-    if doc_processor:
-        await doc_processor.cleanup()
-    
-    logger.info("Shutdown complete")
-
 @app.get("/api/chat-sessions")
-async def get_chat_sessions():
+async def get_chat_sessions(ctx: TenantContext = Depends(require_tenant_context)):
     """Get all chat sessions for the current directory"""
-    if not current_directory:
-        raise HTTPException(status_code=400, detail="No directory set")
-    
     try:
-        sessions = await db_service.get_chat_sessions_by_directory(current_directory)
+        sessions = await db_service.get_chat_sessions_by_directory(ctx.current_directory)
         return {"status": "success", "sessions": sessions}
     except Exception as e:
         logger.error(f"Failed to get chat sessions: {e}")
@@ -688,13 +654,11 @@ async def update_chat_title(session_id: int, request: UpdateTitleRequest):
         raise HTTPException(status_code=500, detail=f"Failed to update title: {str(e)}")
 
 @app.post("/api/chat-sessions")
-async def create_chat_session(request: CreateSessionRequest):
+async def create_chat_session(request: CreateSessionRequest, ctx: TenantContext = Depends(require_tenant_context)):
     """Create a chat session for the current directory and return it"""
-    if not current_directory:
-        raise HTTPException(status_code=400, detail="No directory set")
     try:
         session = await db_service.create_chat_session(
-            directory_path=current_directory,
+            directory_path=ctx.current_directory,
             title=request.title
         )
         return session
@@ -907,20 +871,16 @@ async def search_documents(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/documents/autocomplete")
-async def autocomplete_filenames(q: str = "", limit: int = 10):
+async def autocomplete_filenames(q: str = "", limit: int = 10, ctx: TenantContext = Depends(require_tenant_context)):
     """
     Get autocomplete suggestions for filenames using Trie.
     Fast O(m) search where m = query length.
     """
-    if not doc_processor:
-        raise HTTPException(status_code=400, detail="No directory set")
-    
     if not q or len(q.strip()) < 1:
         return {"status": "success", "suggestions": []}
-    
+
     try:
-        # Use Trie for instant autocomplete
-        suggestions = doc_processor.filename_trie.autocomplete(q.strip(), max_suggestions=limit)
+        suggestions = ctx.doc_processor.filename_trie.autocomplete(q.strip(), max_suggestions=limit)
         
         return {
             "status": "success",
@@ -934,33 +894,31 @@ async def autocomplete_filenames(q: str = "", limit: int = 10):
 
 @app.get("/api/documents/{document_id}/file")
 @limiter.limit("30/minute")
-async def get_document_file(request: Request, document_id: int):
+async def get_document_file(request: Request, document_id: int, ctx: TenantContext = Depends(require_tenant_context)):
     """
     Serve a document file by its ID.
     Returns the file content with appropriate content-type headers.
     """
     try:
-        # Get document from database
         async for db_session in get_db():
             stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
             result = await db_session.execute(stmt)
             document = result.scalar_one_or_none()
-            
+
             if not document:
                 raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
-            
+
             file_path = document.file_path
             file_type = document.file_type.lower()
-            
-            # Validate file exists
+
             path_obj = Path(file_path)
             if not path_obj.exists() or not path_obj.is_file():
                 logger.error(f"Document file not found on disk: {file_path}")
                 raise HTTPException(
-                    status_code=404, 
+                    status_code=404,
                     detail=f"Document file not found on disk: {path_obj.name}"
                 )
-            _validate_file_under_directory(path_obj, current_directory)
+            _validate_file_under_directory(path_obj, ctx.current_directory)
 
             # Determine content type based on file extension
             content_type_map = {
@@ -1033,21 +991,21 @@ async def get_document_file(request: Request, document_id: int):
 
 @app.get("/api/documents/{document_id}/preview")
 @limiter.limit("30/minute")
-async def get_document_preview(request: Request, document_id: int, format: str = "pdf", force_refresh: bool = False):
+async def get_document_preview(request: Request, document_id: int, format: str = "pdf", force_refresh: bool = False, ctx: TenantContext = Depends(require_tenant_context)):
     """
     Get a preview of a document in a viewable format.
     Currently supports PPTX -> PDF conversion for PowerPoint files.
-    
+
     Args:
         document_id: ID of the document
         format: Requested preview format (default: "pdf")
         force_refresh: If True, bypass cache and regenerate preview
-        
+
     Returns:
         Preview file (PDF for PPTX files)
     """
     global pptx_converter
-    
+
     if not pptx_converter:
         raise HTTPException(
             status_code=503, 
@@ -1081,7 +1039,7 @@ async def get_document_preview(request: Request, document_id: int, format: str =
                     status_code=404,
                     detail=f"Document file not found on disk: {path_obj.name}"
                 )
-            _validate_file_under_directory(path_obj, current_directory)
+            _validate_file_under_directory(path_obj, ctx.current_directory)
 
             # Currently only support PPTX -> PDF conversion
             if file_type != 'pptx':
@@ -1250,15 +1208,14 @@ async def get_usage_analytics():
 
 # Phase 3: Update Queue API Endpoints
 @app.get("/api/updates/queue")
-async def get_update_queue_status():
+async def get_update_queue_status(ctx: TenantContext = Depends(require_tenant_context)):
     """Get update queue status"""
-    if not doc_processor or not hasattr(doc_processor, 'update_queue'):
+    if not hasattr(ctx.doc_processor, 'update_queue'):
         raise HTTPException(status_code=400, detail="Update queue not available")
-    
+
     try:
-        status = doc_processor.update_queue.get_status()
-        pending_tasks = doc_processor.update_queue.get_pending_tasks(limit=10)
-        
+        status = ctx.doc_processor.update_queue.get_status()
+        pending_tasks = ctx.doc_processor.update_queue.get_pending_tasks(limit=10)
         return {
             "status": "success",
             "queue": {
@@ -1274,18 +1231,16 @@ async def get_update_queue_status():
         raise HTTPException(status_code=500, detail=f"Failed to get update queue status: {str(e)}")
 
 @app.get("/api/updates/status/{file_path:path}")
-async def get_update_status(file_path: str):
+async def get_update_status(file_path: str, ctx: TenantContext = Depends(require_tenant_context)):
     """Get update status for a specific file"""
-    if not doc_processor or not hasattr(doc_processor, 'update_queue'):
+    if not hasattr(ctx.doc_processor, 'update_queue'):
         raise HTTPException(status_code=400, detail="Update queue not available")
-    
+
     try:
-        status = doc_processor.update_queue.get_status()
-        
-        # Check if file is in active updates
+        status = ctx.doc_processor.update_queue.get_status()
         active_file = None
-        if file_path in doc_processor.update_queue.active_updates:
-            task = doc_processor.update_queue.active_updates[file_path]
+        if file_path in ctx.doc_processor.update_queue.active_updates:
+            task = ctx.doc_processor.update_queue.active_updates[file_path]
             active_file = {
                 "file_path": task.file_path,
                 "priority": task.priority,
@@ -1293,11 +1248,9 @@ async def get_update_status(file_path: str):
                 "strategy": task.strategy.value if task.strategy else None,
                 "enqueued_at": task.enqueued_at.isoformat()
             }
-        
-        # Check if file has completed update
         completed_result = None
-        if file_path in doc_processor.update_queue.completed_updates:
-            result = doc_processor.update_queue.completed_updates[file_path]
+        if file_path in ctx.doc_processor.update_queue.completed_updates:
+            result = ctx.doc_processor.update_queue.completed_updates[file_path]
             completed_result = {
                 "success": result.success,
                 "chunks_updated": result.chunks_updated,
@@ -1305,7 +1258,6 @@ async def get_update_status(file_path: str):
                 "completed_at": result.completed_at.isoformat() if result.completed_at else None,
                 "error_message": result.error_message
             }
-        
         return {
             "status": "success",
             "file_path": file_path,
@@ -1317,51 +1269,50 @@ async def get_update_status(file_path: str):
         raise HTTPException(status_code=500, detail=f"Failed to get update status: {str(e)}")
 
 @app.post("/api/updates/force")
-async def force_update(request: dict):
+async def force_update(request: dict, ctx: TenantContext = Depends(require_tenant_context)):
     """Force update a file (high priority)"""
-    if not doc_processor or not hasattr(doc_processor, 'enqueue_update'):
+    if not hasattr(ctx.doc_processor, 'enqueue_update'):
         raise HTTPException(status_code=400, detail="Update queue not available")
-    
+
     file_path = request.get("file_path")
     if not file_path:
         raise HTTPException(status_code=400, detail="file_path required")
-    
+
     try:
-        success = await doc_processor.enqueue_update(
+        success = await ctx.doc_processor.enqueue_update(
             file_path=file_path,
             update_type="modified",
             user_requested=True  # High priority
         )
-        
         if success:
             return {
                 "status": "success",
                 "message": f"Update enqueued for {file_path} with high priority"
             }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to enqueue update (queue may be full)")
+        raise HTTPException(status_code=500, detail="Failed to enqueue update (queue may be full)")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to force update {file_path}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to force update: {str(e)}")
 
 # Phase 3: Server-Sent Events for real-time update notifications
 @app.get("/api/updates/stream")
-async def stream_update_status():
+async def stream_update_status(ctx: TenantContext = Depends(require_tenant_context)):
     """
     Server-Sent Events stream for real-time update queue status.
     Much more efficient than polling - only sends updates when status changes.
     """
-    if not doc_processor or not hasattr(doc_processor, 'update_queue'):
+    if not hasattr(ctx.doc_processor, 'update_queue'):
         raise HTTPException(status_code=400, detail="Update queue not available")
-    
+
     async def event_generator():
         """Generate SSE events when queue status changes"""
         last_status = None
-        
+
         try:
             while True:
-                # Get current status
-                status = doc_processor.update_queue.get_status()
+                status = ctx.doc_processor.update_queue.get_status()
                 current_status = {
                     "pending": status["pending"],
                     "processing": status["processing"],
