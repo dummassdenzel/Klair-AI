@@ -162,7 +162,7 @@ else:
 
 ---
 
-### 18. Missing Indexes on Database
+### 18. Missing Indexes on Database — RESOLVED
 **Location**: Database models
 
 **Issue**:
@@ -177,6 +177,8 @@ class IndexedDocument(Base):
     file_type = Column(String, index=True)  # Add index
     last_modified = Column(DateTime, index=True)  # Add index
 ```
+
+**Resolution**: In `ai/database/models.py`, `IndexedDocument` already had `file_path` indexed. Added `index=True` to `file_type`, `last_modified`, and (for query performance) to `processing_status` and `indexed_at`. Added Alembic migration `f1a2b3c4d5e6_add_indexed_document_indexes.py` to create the new indexes on existing databases.
 
 ---
 

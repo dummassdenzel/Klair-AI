@@ -36,13 +36,13 @@ class IndexedDocument(Base):
     id = Column(Integer, primary_key=True, index=True)
     file_path = Column(String, unique=True, nullable=False, index=True)
     file_hash = Column(String, nullable=False)
-    file_type = Column(String, nullable=False)
+    file_type = Column(String, nullable=False, index=True)
     file_size = Column(BigInteger)
-    last_modified = Column(DateTime)
+    last_modified = Column(DateTime, index=True)
     content_preview = Column(Text)  # First 500 chars for preview
     chunks_count = Column(Integer, default=0)
-    processing_status = Column(String, default="indexed")  # indexed, error, processing
-    indexed_at = Column(DateTime, default=datetime.utcnow)
+    processing_status = Column(String, default="indexed", index=True)  # indexed, error, processing
+    indexed_at = Column(DateTime, default=datetime.utcnow, index=True)
     last_processed = Column(DateTime, default=datetime.utcnow)
     
     # Add relationship to chat sessions that used this document (overlaps with ChatSession.document_usage)
