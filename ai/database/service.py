@@ -11,6 +11,7 @@ import uuid
 
 from .models import ChatSession, ChatMessage, IndexedDocument, DocumentChatUsage
 from .database import AsyncSessionLocal
+from utils import utc_isoformat
 
 class DatabaseService:
     """Service for database operations"""
@@ -238,8 +239,8 @@ class DatabaseService:
                     "id": chat_session.id,
                     "title": chat_session.title,
                     "directory_path": chat_session.directory_path,
-                    "created_at": chat_session.created_at.isoformat(),
-                    "updated_at": chat_session.updated_at.isoformat(),
+                    "created_at": utc_isoformat(chat_session.created_at),
+                    "updated_at": utc_isoformat(chat_session.updated_at),
                     "message_count": msg_count or 0
                 })
             return sessions_data
@@ -330,11 +331,11 @@ class DatabaseService:
                     "file_path": doc.file_path,
                     "file_type": doc.file_type,
                     "file_size": doc.file_size,
-                    "last_modified": doc.last_modified.isoformat() if doc.last_modified else None,
+                    "last_modified": utc_isoformat(doc.last_modified),
                     "content_preview": doc.content_preview,
                     "chunks_count": doc.chunks_count,
                     "processing_status": doc.processing_status,
-                    "indexed_at": doc.indexed_at.isoformat() if doc.indexed_at else None
+                    "indexed_at": utc_isoformat(doc.indexed_at)
                 }
                 for doc in documents
             ]

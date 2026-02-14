@@ -263,7 +263,6 @@
                 </svg>
                 {selectedFilesCount} file(s) found
               </p>
-              <p class="text-sm text-gray-500 mb-4">Setting directory...</p>
             </div>
           {/if}
         </div>

@@ -27,6 +27,7 @@ from tenant_registry import (
     DEFAULT_TENANT_ID,
 )
 from query_cache import QueryCache, get_query_cache_key
+from utils import utc_isoformat
 
 # NEW: Add database imports
 from database import DatabaseService, AsyncSessionLocal
@@ -698,7 +699,7 @@ async def get_chat_messages(session_id: int):
                     "ai_response": msg.ai_response,
                     "sources": msg.sources,
                     "response_time": msg.response_time,
-                    "timestamp": msg.timestamp.isoformat()
+                    "timestamp": utc_isoformat(msg.timestamp)
                 }
                 for msg in messages
             ]
@@ -1212,11 +1213,11 @@ async def get_document_metadata(document_id: int):
                 "file_path": document.file_path,
                 "file_type": document.file_type,
                 "file_size": document.file_size,
-                "last_modified": document.last_modified.isoformat() if document.last_modified else None,
+                "last_modified": utc_isoformat(document.last_modified),
                 "content_preview": document.content_preview,
                 "chunks_count": document.chunks_count,
                 "processing_status": document.processing_status,
-                "indexed_at": document.indexed_at.isoformat() if document.indexed_at else None
+                "indexed_at": utc_isoformat(document.indexed_at)
             }
         }
             
@@ -1354,7 +1355,7 @@ async def stream_update_status(ctx: TenantContext = Depends(require_tenant_conte
                     event_data = {
                         "status": "success",
                         "queue": current_status,
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": utc_isoformat(datetime.utcnow())
                     }
                     
                     # Format as SSE
