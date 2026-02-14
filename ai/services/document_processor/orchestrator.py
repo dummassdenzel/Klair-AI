@@ -171,7 +171,9 @@ class DocumentProcessorOrchestrator:
         self.current_directory: Optional[str] = None
         self.is_initializing: bool = False  # Flag to prevent file monitor events during initial indexing
         self.files_being_processed: set = set()  # Track files currently being indexed to prevent duplicate processing
-        
+        self._indexing_task: Optional[asyncio.Task] = None  # So caller can cancel when switching directory
+        self._shutdown: bool = False  # Set when directory is switched so background indexing exits
+
         logger.info("DocumentProcessorOrchestrator initialized with hybrid search (semantic + keyword) and incremental updates")
         
         # Load existing indexed documents into memory
@@ -280,6 +282,20 @@ class DocumentProcessorOrchestrator:
                     raise
         except Exception as e:
             logger.warning(f"Failed to clear database records: {e}")
+
+    async def cancel_background_work(self) -> None:
+        """
+        Cancel in-flight background content indexing (e.g. when user switches directory).
+        Prevents the old orchestrator from writing to the DB after the new one has cleared it.
+        """
+        self._shutdown = True
+        if self._indexing_task and not self._indexing_task.done():
+            self._indexing_task.cancel()
+            try:
+                await self._indexing_task
+            except asyncio.CancelledError:
+                pass
+        self._indexing_task = None
     
     async def initialize_from_directory(self, directory_path: str):
         """Initialize processor with documents from directory using metadata-first indexing"""
@@ -320,7 +336,8 @@ class DocumentProcessorOrchestrator:
             
             # PHASE 2: Background content indexing (non-blocking)
             logger.info(f"🔄 Starting background content indexing for {len(metadata_files)} files...")
-            asyncio.create_task(
+            self._shutdown = False
+            self._indexing_task = asyncio.create_task(
                 self._index_content_background(metadata_files, directory_path)
             )
             
@@ -394,42 +411,39 @@ class DocumentProcessorOrchestrator:
         """
         Background content indexing. Processes files in batches without blocking.
         Updates documents from 'metadata_only' to 'indexed' status.
+        Exits early if _shutdown is set (e.g. user switched to another directory).
         """
         logger.info(f"🔄 Background content indexing started for {len(file_paths)} files")
-        
         batch_size = 10
         processed = 0
         failed = 0
-        
         try:
             for i in range(0, len(file_paths), batch_size):
+                if self._shutdown:
+                    logger.info("Background content indexing cancelled (directory was changed)")
+                    return
                 batch = file_paths[i:i + batch_size]
-                
-                # Process batch concurrently
                 tasks = [self._process_single_file(file_path) for file_path in batch]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Count results
                 for result in results:
                     if isinstance(result, Exception):
                         failed += 1
                         logger.error(f"Background indexing failed: {result}")
                     else:
                         processed += 1
-                
-                # Log progress every batch
                 if (i + batch_size) % 50 == 0 or i + batch_size >= len(file_paths):
                     logger.info(f"📊 Background indexing progress: {processed + failed}/{len(file_paths)} files "
-                              f"({processed} indexed, {failed} failed)")
-                
-                # Small delay between batches to avoid overwhelming the system
+                               f"({processed} indexed, {failed} failed)")
                 if i + batch_size < len(file_paths):
                     await asyncio.sleep(0.1)
-            
             logger.info(f"✅ Background content indexing complete: {processed} indexed, {failed} failed")
-                
+        except asyncio.CancelledError:
+            logger.info("Background content indexing task was cancelled")
+            raise
         except Exception as e:
             logger.error(f"Background content indexing error: {e}")
+        finally:
+            self._indexing_task = None
     
     async def _process_single_file(self, file_path: str) -> ProcessingResult:
         """Process a single file (used in batch processing)"""

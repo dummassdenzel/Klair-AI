@@ -63,6 +63,7 @@
   let lastDocumentLoadTime = 0;
   let documentLoadScheduled: ReturnType<typeof setTimeout> | null = null;
   let contentRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
+  let loadRequestedWhileLoading = false; // Request one more load after current finishes
 
   function startUpdateQueuePolling() {
     // Use SSE (Server-Sent Events) for push-based updates - no polling
@@ -72,40 +73,38 @@
           const currentCompleted = data.queue.completed || 0;
           const currentProcessing = data.queue.processing || 0;
           
-          // Check if updates completed (new documents indexed)
-          if (currentCompleted > lastCompletedCount) {
-            // New documents were indexed - refresh the document list
-            console.debug(`Updates completed: ${currentCompleted} (was ${lastCompletedCount}), refreshing document list`);
-            // Debounce refresh to avoid multiple rapid refreshes
-            if (refreshTimeout) clearTimeout(refreshTimeout);
-            refreshTimeout = setTimeout(() => {
-              loadIndexedDocuments();
-            }, 500); // Small delay to ensure database is updated
-            lastCompletedCount = currentCompleted;
-          } else if (currentCompleted > 0 && lastCompletedCount === 0) {
-            // Initialize the count on first SSE message
-            lastCompletedCount = currentCompleted;
-          }
-          
-          // Also refresh when processing drops from >0 to 0 (all updates finished)
+          // Single coalesced refresh: prefer "all updates finished" to avoid storm
           if (lastProcessingCount > 0 && currentProcessing === 0) {
-            // All updates finished - refresh to catch any new documents
-            console.debug('All updates finished, refreshing document list');
+            lastCompletedCount = currentCompleted;
+            console.debug('All updates finished, scheduling one document list refresh');
+            if (contentRefreshIntervalId) {
+              clearInterval(contentRefreshIntervalId);
+              contentRefreshIntervalId = null;
+            }
+            contentIndexingInProgress.set(false);
             if (refreshTimeout) clearTimeout(refreshTimeout);
             refreshTimeout = setTimeout(() => {
+              refreshTimeout = null;
               loadIndexedDocuments();
-            }, 1000); // Small delay to ensure database is updated
-          }
-          
-          // Fallback: If updates just started (processing went from 0 to >0),
-          // refresh after a delay to catch new files that are being indexed
-          if (lastProcessingCount === 0 && currentProcessing > 0) {
-            // Updates just started - refresh after a delay to catch new files
-            console.debug('Updates started, will refresh document list when complete');
-            if (refreshTimeout) clearTimeout(refreshTimeout);
-            refreshTimeout = setTimeout(() => {
-              loadIndexedDocuments();
-            }, 3000); // Refresh 3 seconds after updates start (gives time for indexing)
+            }, 1500);
+          } else if (currentProcessing === 0 && currentCompleted > 0) {
+            // Queue idle with work done – stop content-indexing polling so we don't loop forever
+            if (contentRefreshIntervalId) {
+              clearInterval(contentRefreshIntervalId);
+              contentRefreshIntervalId = null;
+            }
+            contentIndexingInProgress.set(false);
+          } else if (currentCompleted > lastCompletedCount) {
+            lastCompletedCount = currentCompleted;
+            // During indexing, only schedule a refresh if we don't already have one
+            if (!refreshTimeout && currentProcessing > 0) {
+              refreshTimeout = setTimeout(() => {
+                refreshTimeout = null;
+                loadIndexedDocuments();
+              }, 2500);
+            }
+          } else if (currentCompleted > 0 && lastCompletedCount === 0) {
+            lastCompletedCount = currentCompleted;
           }
           
           lastProcessingCount = currentProcessing;
@@ -171,6 +170,7 @@
 
   async function loadIndexedDocumentsCore() {
     isLoadingDocuments = true;
+    loadRequestedWhileLoading = false;
     try {
       const response = await apiService.searchDocuments({ limit: 100 });
       indexedDocuments = response.documents?.documents || [];
@@ -196,24 +196,32 @@
       indexedDocuments = [];
     } finally {
       isLoadingDocuments = false;
+      // Debounce from completion so we don't start another load 2.5s from *start*
+      lastDocumentLoadTime = Date.now();
+      if (loadRequestedWhileLoading) {
+        loadRequestedWhileLoading = false;
+        loadIndexedDocuments();
+      }
     }
   }
 
-  /** Debounced document list load to prevent request storm from SSE + interval + clicks */
+  /** Debounced document list load; never runs concurrently to prevent request storm */
   function loadIndexedDocuments() {
+    if (isLoadingDocuments) {
+      loadRequestedWhileLoading = true;
+      return;
+    }
     const now = Date.now();
     const elapsed = now - lastDocumentLoadTime;
-    if (documentLoadScheduled) return; // already one scheduled
+    if (documentLoadScheduled) return;
     if (elapsed >= DOCUMENT_LOAD_DEBOUNCE_MS || lastDocumentLoadTime === 0) {
-      lastDocumentLoadTime = now;
       loadIndexedDocumentsCore();
       return;
     }
     const delay = DOCUMENT_LOAD_DEBOUNCE_MS - elapsed;
     documentLoadScheduled = setTimeout(() => {
       documentLoadScheduled = null;
-      lastDocumentLoadTime = Date.now();
-      loadIndexedDocumentsCore();
+      if (!isLoadingDocuments) loadIndexedDocumentsCore();
     }, delay);
   }
 
@@ -269,9 +277,11 @@
 
           let refreshCount = 0;
           const maxRefreshes = 30;
+          const noProgressTicksBeforeStop = 3;
           let previousIndexedCount = indexedDocuments.filter(
             (doc: any) => doc.processing_status === 'indexed'
           ).length;
+          let noProgressTicks = 0;
 
           contentRefreshIntervalId = setInterval(async () => {
             if (!contentRefreshIntervalId) return;
@@ -281,12 +291,23 @@
             const currentIndexedCount = indexedDocuments.filter(
               (doc: any) => doc.processing_status === 'indexed'
             ).length;
-            if (currentIndexedCount > previousIndexedCount) previousIndexedCount = currentIndexedCount;
-
             const metadataOnlyCount = indexedDocuments.filter(
               (doc: any) => doc.processing_status === 'metadata_only'
             ).length;
-            if (metadataOnlyCount === 0 || refreshCount >= maxRefreshes) {
+
+            if (currentIndexedCount > previousIndexedCount) {
+              previousIndexedCount = currentIndexedCount;
+              noProgressTicks = 0;
+            } else if (indexedDocuments.length > 0) {
+              noProgressTicks++;
+            }
+
+            const total = indexedDocuments.length;
+            const allIndexed = metadataOnlyCount === 0 && total > 0;
+            const stuck = noProgressTicks >= noProgressTicksBeforeStop && total > 0;
+            const hitMax = refreshCount >= maxRefreshes;
+
+            if (allIndexed || stuck || hitMax) {
               if (contentRefreshIntervalId) clearInterval(contentRefreshIntervalId);
               contentRefreshIntervalId = null;
               contentIndexingInProgress.set(false);

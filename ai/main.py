@@ -300,6 +300,8 @@ async def set_directory(request: Request):
 
         if ctx and ctx.file_monitor:
             await ctx.file_monitor.stop_monitoring()
+        if ctx and getattr(ctx, "doc_processor", None):
+            await ctx.doc_processor.cancel_background_work()
 
         while len(registry) >= registry.max_tenants:
             evicted = await registry.evict_one_lru()
