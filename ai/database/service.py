@@ -285,12 +285,10 @@ class DatabaseService:
         limit: int = 50,
         offset: int = 0
     ) -> Dict[str, Any]:
-        """Search documents with various filters"""
+        """Search documents with various filters. Uses one query with a window count for total."""
         async with AsyncSessionLocal() as session:
-            stmt = select(IndexedDocument)
             conditions = []
             if query:
-                # Use bound parameter (literal) + func for clear parameterization; avoids risky f-string pattern
                 search_val = func.lower(literal(query))
                 conditions.append(
                     or_(
@@ -312,15 +310,20 @@ class DatabaseService:
                     conditions.append(IndexedDocument.last_modified <= to_date)
                 except ValueError:
                     pass
+
+            # Single query: rows + total count via window function (avoids separate count query)
+            stmt = select(
+                IndexedDocument,
+                func.count(IndexedDocument.id).over().label("total_count"),
+            )
             if conditions:
                 stmt = stmt.where(and_(*conditions))
             stmt = stmt.order_by(desc(IndexedDocument.indexed_at)).limit(limit).offset(offset)
             result = await session.execute(stmt)
-            documents = result.scalars().all()
-            count_stmt = select(func.count(IndexedDocument.id))
-            if conditions:
-                count_stmt = count_stmt.where(and_(*conditions))
-            total_count = await session.scalar(count_stmt)
+            rows = result.all()
+
+            total_count = int(rows[0].total_count) if rows else 0
+            documents = [row[0] for row in rows]
             docs_data = [
                 {
                     "id": doc.id,

@@ -140,42 +140,25 @@ else:
 
 ## 🟢 LOW PRIORITY / OPTIMIZATION OPPORTUNITIES
 
-### 16. Inefficient Database Queries
-**Location**: `ai/database/service.py:290` (`search_documents`)
+### 16. Inefficient Database Queries — RESOLVED
+**Location**: `ai/database/service.py` (`search_documents`)
 
-**Issue**:
-- Separate count query (N+1 pattern)
-- Could be optimized with single query using window functions
+**Issue** (was):
+- Separate `COUNT(*)` query after the main select (two round-trips for list + total count)
 
-**Optimization**:
-```python
-# Use window function for count
-from sqlalchemy import func, over
-
-stmt = select(
-    IndexedDocument,
-    func.count(IndexedDocument.id).over().label('total_count')
-).where(...).limit(limit).offset(offset)
-
-# Get both results and count in one query
-```
+**Resolution**:
+- One query: `select(IndexedDocument, func.count(IndexedDocument.id).over().label("total_count"))` with the same `where`/`order_by`/`limit`/`offset`. The window function returns the total number of rows matching the filter on every row; we use the first row’s `total_count` and build the document list from the first column. This removes the extra count query and keeps the same API and pagination behavior.
 
 ---
 
-### 17. Redundant Path Normalization
-**Location**: `ai/main.py:234-238`
+### 17. Redundant Path Normalization — RESOLVED
+**Location**: `ai/main.py` (`set_directory`)
 
-**Issue**:
-- Path normalized twice
-- Redundant computation
+**Issue** (was):
+- `directory_path` was normalized, then `normalized_new_path` was set to `normpath(abspath(directory_path))` again (redundant).
 
-**Fix**:
-```python
-# Normalize once
-directory_path = os.path.normpath(os.path.abspath(directory_path))
-normalized_current_path = os.path.normpath(os.path.abspath(current_directory)) if current_directory else None
-# Remove second normalization
-```
+**Resolution**:
+- Normalize once: `directory_path = os.path.normpath(os.path.abspath(directory_path))`. Removed `normalized_new_path` and use `directory_path` in the "already set" comparison (`normalized_current.lower() == directory_path.lower()`).
 
 ---
 

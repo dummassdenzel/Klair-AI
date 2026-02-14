@@ -285,12 +285,11 @@ async def set_directory(request: Request):
         raise HTTPException(status_code=400, detail="Directory path required")
 
     directory_path = os.path.normpath(os.path.abspath(directory_path))
-    normalized_new_path = os.path.normpath(os.path.abspath(directory_path))
 
     try:
         if ctx and ctx.current_directory:
             normalized_current = os.path.normpath(os.path.abspath(ctx.current_directory))
-            if normalized_current.lower() == normalized_new_path.lower():
+            if normalized_current.lower() == directory_path.lower():
                 logger.info(f"[{tenant_id}] Directory already set, skipping re-initialization")
                 return {
                     "status": "success",
