@@ -182,7 +182,7 @@ class IndexedDocument(Base):
 
 ---
 
-### 19. Large File Metadata in Memory
+### 19. Large File Metadata in Memory — RESOLVED
 **Location**: `ai/services/document_processor/orchestrator.py:1177`
 
 **Issue**:
@@ -202,6 +202,8 @@ def get_stats(self) -> Dict:
         # ...
     }
 ```
+
+**Resolution**: `get_stats()` now requests only up to 20 file paths from the DB (`get_indexed_file_paths(limit=20)`) and returns them as `indexed_files` (backward compatible). Added `indexed_files_count` (same as `total_files`) for clarity. This avoids loading hundreds of paths into memory and keeps the response size bounded.
 
 ---
 

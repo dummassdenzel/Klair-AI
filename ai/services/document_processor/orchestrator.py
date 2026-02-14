@@ -1207,17 +1207,19 @@ Be comprehensive and list ALL documents mentioned above."""
             )
     
     async def get_stats(self) -> Dict:
-        """Get comprehensive stats (DB for totals; cache size bounded)."""
+        """Get comprehensive stats (DB for totals; only a small sample of paths to avoid large payloads)."""
         try:
             collection_count = self.vector_store.get_collection_count()
             db_stats = await self.database_service.get_document_stats()
             total_files = db_stats.get("total_documents", 0) or 0
-            indexed_file_paths = await self.database_service.get_indexed_file_paths(limit=500)
+            # Fetch only a small sample of paths for UI preview; avoid returning hundreds of paths
+            indexed_files_sample = await self.database_service.get_indexed_file_paths(limit=20)
             return {
                 "total_files": total_files,
                 "total_chunks": collection_count,
                 "current_directory": self.current_directory,
-                "indexed_files": indexed_file_paths,
+                "indexed_files_count": total_files,
+                "indexed_files": indexed_files_sample,
                 "metadata_cache_size": len(self._metadata_cache),
                 "avg_chunks_per_file": (collection_count / total_files) if total_files else 0,
                 "embedding_model": self.embedding_service.model_name,
