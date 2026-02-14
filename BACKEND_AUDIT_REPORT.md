@@ -268,7 +268,7 @@ engine = create_async_engine(
 
 ---
 
-### 24. Duplicate Code
+### 24. Duplicate Code — RESOLVED
 **Location**: File validation logic
 
 **Issue**:
@@ -276,6 +276,11 @@ engine = create_async_engine(
 - FileValidator exists but not always used
 
 **Recommendation**: Centralize validation
+
+**Resolution**:
+- **UpdateExecutor**: Added optional `file_validator` argument; when provided (by orchestrator) uses shared instance instead of creating a new `FileValidator()` in each of `_execute_full_reindex` and `_execute_chunk_update`. Introduced `_get_file_metadata_and_hash(file_path)` so metadata and hash are obtained in one place (and hash is taken from metadata when present to avoid double calculation).
+- **Orchestrator**: Passes `file_validator=self.file_validator` when constructing `UpdateExecutor`.
+- **main.py**: Directory picker file count now uses `BASE_SUPPORTED_EXTENSIONS` from `file_validator` instead of a hardcoded set, keeping extensions in sync with the rest of the app.
 
 ---
 

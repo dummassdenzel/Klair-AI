@@ -154,7 +154,8 @@ class DocumentProcessorOrchestrator:
             chunker=self.chunker,
             embedding_service=self.embedding_service,
             database_service=self.database_service,
-            chunk_differ=self.chunk_differ
+            chunk_differ=self.chunk_differ,
+            file_validator=self.file_validator,
         )
         self.update_worker = UpdateWorker(
             update_queue=self.update_queue,

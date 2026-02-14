@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 from services.document_processor import DocumentProcessorOrchestrator, config
 from services.document_processor.extraction import PPTXConverter
+from services.document_processor.extraction.file_validator import BASE_SUPPORTED_EXTENSIONS
 from config import settings
 from services.file_monitor import FileMonitorService
 from schemas.chat import ChatRequest, ChatResponse
@@ -229,14 +230,12 @@ async def select_directory():
             if not directory_path:
                 return None, 0
             
-            # Count supported files in the directory
+            # Count supported files in the directory (use single source of truth from FileValidator)
             dir_path = Path(directory_path)
-            supported_extensions = {'.pdf', '.docx', '.txt', '.xlsx', '.xls', '.pptx'}
             file_count = 0
-            
             if dir_path.exists() and dir_path.is_dir():
                 for file_path in dir_path.rglob('*'):
-                    if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
+                    if file_path.is_file() and file_path.suffix.lower() in BASE_SUPPORTED_EXTENSIONS:
                         file_count += 1
             
             return directory_path, file_count

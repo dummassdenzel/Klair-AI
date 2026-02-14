@@ -11,7 +11,7 @@ Executes document updates with:
 
 import logging
 import asyncio
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -24,6 +24,7 @@ from ..storage.bm25_service import BM25Service
 from ..extraction.text_extractor import TextExtractor
 from ..extraction.chunker import DocumentChunker
 from ..extraction.embedding_service import EmbeddingService
+from ..extraction.file_validator import FileValidator
 from database import DatabaseService
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,8 @@ class UpdateExecutor:
         chunker: DocumentChunker,
         embedding_service: EmbeddingService,
         database_service: DatabaseService,
-        chunk_differ: ChunkDiffer
+        chunk_differ: ChunkDiffer,
+        file_validator: Optional[FileValidator] = None,
     ):
         """
         Initialize UpdateExecutor
@@ -72,6 +74,7 @@ class UpdateExecutor:
             embedding_service: Embedding generation service
             database_service: Database service
             chunk_differ: Chunk differ for incremental updates
+            file_validator: Optional shared FileValidator (uses default if not provided)
         """
         self.vector_store = vector_store
         self.bm25_service = bm25_service
@@ -80,8 +83,15 @@ class UpdateExecutor:
         self.embedding_service = embedding_service
         self.database_service = database_service
         self.chunk_differ = chunk_differ
-        
+        self._file_validator = file_validator if file_validator is not None else FileValidator()
+
         logger.info("UpdateExecutor initialized")
+
+    def _get_file_metadata_and_hash(self, file_path: str) -> Tuple[Dict, str]:
+        """Centralized file metadata and hash using shared FileValidator."""
+        metadata = self._file_validator.extract_file_metadata(file_path)
+        file_hash = metadata.get("hash") or self._file_validator.calculate_file_hash(file_path)
+        return metadata, file_hash
     
     async def execute_update(
         self,
@@ -317,12 +327,8 @@ class UpdateExecutor:
         ]
         self.bm25_service.add_documents(bm25_documents)
         
-        # Update database
-        from ..extraction.file_validator import FileValidator
-        file_validator = FileValidator()
-        file_metadata = file_validator.extract_file_metadata(task.file_path)
-        file_hash = file_validator.calculate_file_hash(task.file_path)
-        
+        # Update database (use shared FileValidator)
+        file_metadata, file_hash = self._get_file_metadata_and_hash(task.file_path)
         await self.database_service.store_document_metadata(
             file_path=task.file_path,
             file_hash=file_hash,
@@ -414,12 +420,8 @@ class UpdateExecutor:
         ]
         self.bm25_service.add_documents(bm25_documents)
         
-        # Update database
-        from ..extraction.file_validator import FileValidator
-        file_validator = FileValidator()
-        file_metadata = file_validator.extract_file_metadata(task.file_path)
-        file_hash = file_validator.calculate_file_hash(task.file_path)
-        
+        # Update database (use shared FileValidator)
+        file_metadata, file_hash = self._get_file_metadata_and_hash(task.file_path)
         await self.database_service.store_document_metadata(
             file_path=task.file_path,
             file_hash=file_hash,
