@@ -131,6 +131,24 @@ class DatabaseService:
             processing_status="metadata_only"  # Indicates content not yet indexed
         )
 
+    async def set_documents_indexed(self, file_paths: List[str]) -> int:
+        """Set processing_status='indexed' for all given file paths. Returns count updated. Used after background indexing to ensure DB is consistent."""
+        if not file_paths:
+            return 0
+        async with AsyncSessionLocal() as session:
+            try:
+                stmt = (
+                    update(IndexedDocument)
+                    .where(IndexedDocument.file_path.in_(file_paths))
+                    .values(processing_status="indexed", last_processed=datetime.utcnow())
+                )
+                result = await session.execute(stmt)
+                await session.commit()
+                return result.rowcount or 0
+            except Exception:
+                await session.rollback()
+                raise
+
     async def get_document_by_path(self, file_path: str) -> Optional[IndexedDocument]:
         """Get a single document by file path (for hash/metadata lookup)."""
         async with AsyncSessionLocal() as session:

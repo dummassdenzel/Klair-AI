@@ -196,11 +196,15 @@
       indexedDocuments = [];
     } finally {
       isLoadingDocuments = false;
-      // Debounce from completion so we don't start another load 2.5s from *start*
       lastDocumentLoadTime = Date.now();
+      // Only chain one more load if something requested it and we're not already "all indexed"
+      // (avoids request storm when we keep getting 0 indexed from stale responses)
       if (loadRequestedWhileLoading) {
         loadRequestedWhileLoading = false;
-        loadIndexedDocuments();
+        const stillMetadataOnly = indexedDocuments.some(
+          (d: any) => d.processing_status === 'metadata_only'
+        );
+        if (stillMetadataOnly) loadIndexedDocuments();
       }
     }
   }
@@ -278,6 +282,7 @@
           let refreshCount = 0;
           const maxRefreshes = 30;
           const noProgressTicksBeforeStop = 3;
+          const zeroIndexedGiveUpTicks = 10; // stop after ~30s with 0 indexed to avoid infinite loop
           let previousIndexedCount = indexedDocuments.filter(
             (doc: any) => doc.processing_status === 'indexed'
           ).length;
@@ -304,10 +309,18 @@
 
             const total = indexedDocuments.length;
             const allIndexed = metadataOnlyCount === 0 && total > 0;
-            const stuck = noProgressTicks >= noProgressTicksBeforeStop && total > 0;
+            const stuck =
+              noProgressTicks >= noProgressTicksBeforeStop &&
+              total > 0 &&
+              metadataOnlyCount === 0;
             const hitMax = refreshCount >= maxRefreshes;
+            // Backend says done but we keep getting 0 indexed (stale/race): stop after N ticks to avoid infinite polling
+            const giveUpZeroIndexed =
+              currentIndexedCount === 0 &&
+              total > 0 &&
+              noProgressTicks >= zeroIndexedGiveUpTicks;
 
-            if (allIndexed || stuck || hitMax) {
+            if (allIndexed || stuck || hitMax || giveUpZeroIndexed) {
               if (contentRefreshIntervalId) clearInterval(contentRefreshIntervalId);
               contentRefreshIntervalId = null;
               contentIndexingInProgress.set(false);

@@ -444,6 +444,13 @@ class DocumentProcessorOrchestrator:
             logger.error(f"Background content indexing error: {e}")
         finally:
             self._indexing_task = None
+            if not self._shutdown and file_paths and processed > 0:
+                try:
+                    n = await self.database_service.set_documents_indexed(file_paths)
+                    if n:
+                        logger.debug(f"Synced {n} document(s) to indexed status for search consistency")
+                except Exception as e:
+                    logger.warning(f"Final sync of indexed status failed: {e}")
     
     async def _process_single_file(self, file_path: str) -> ProcessingResult:
         """Process a single file (used in batch processing)"""
