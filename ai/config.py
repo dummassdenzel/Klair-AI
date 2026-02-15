@@ -10,14 +10,15 @@ class Settings:
     DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/ai_assistant")
     
     # Document processor settings (from your new config)
-    CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-    EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-small-en-v1.5")
+    CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR") or os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
+    EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL_NAME") or os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
     MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     
-    # LLM settings
+    # LLM settings (supports cloud e.g. Gemini and local e.g. Ollama; set LLM_PROVIDER accordingly)
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")  # 'ollama' | 'gemini'
+    LLM_MAX_RESPONSE_TOKENS: int = int(os.getenv("LLM_MAX_RESPONSE_TOKENS", "8192"))  # Max tokens per reply; use 8192 for long lists (Gemini/Ollama)
     # Ollama
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "tinyllama")

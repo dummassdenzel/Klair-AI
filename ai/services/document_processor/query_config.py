@@ -39,9 +39,9 @@ class RetrievalConfig:
     # BM25 boost settings
     bm25_boost: float = 0.1
     
-    # Source limiting
-    max_sources_general: int = 10
-    max_sources_specific: int = 20  # No hard limit, but reasonable cap
+    # Source limiting (how many distinct files/sources are passed to the LLM)
+    max_sources_general: int = 25   # e.g. "list all delivery notes" — allow more so response can include all relevant files
+    max_sources_specific: int = 20  # when user selected specific file(s)
     
     def get_retrieval_params(self, query_type: str, is_listing: bool = False) -> Dict[str, int]:
         """

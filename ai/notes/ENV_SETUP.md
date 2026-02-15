@@ -37,13 +37,15 @@ GEMINI_MODEL=gemini-2.5-pro
 
 **Note:** You must have either Ollama running locally OR a valid Gemini API key depending on your `LLM_PROVIDER` setting.
 
+**Design:** The app supports both cloud LLMs (e.g. Gemini) for best performance and local LLMs (e.g. Ollama) as a privacy-focused fallback. Use `LLM_PROVIDER=gemini` with a Gemini API key for typical use; use `LLM_PROVIDER=ollama` when running models locally. `LLM_MAX_RESPONSE_TOKENS` (default 8192) applies to both; use 8192 or higher when you have many sources (e.g. "list all delivery notes") so the reply is not cut off.
+
 ## Embedding & Vector Store Configuration
 
 ```env
-# ChromaDB persistence directory
+# ChromaDB persistence directory (CHROMA_PERSIST_DIRECTORY also accepted)
 CHROMA_PERSIST_DIR=./chroma_db
 
-# Sentence Transformer embedding model
+# Sentence Transformer embedding model (EMBEDDING_MODEL also accepted)
 EMBED_MODEL_NAME=BAAI/bge-small-en-v1.5
 
 # Document processing settings
@@ -55,6 +57,9 @@ CHUNK_OVERLAP=200
 ## Optional Performance Settings
 
 ```env
+# Max tokens per LLM response (applies to both Gemini and Ollama). Use 8192 for long lists (e.g. many delivery notes).
+LLM_MAX_RESPONSE_TOKENS=8192
+
 # Concurrent processing limits
 BATCH_SIZE=10
 MAX_CONCURRENT_FILES=5

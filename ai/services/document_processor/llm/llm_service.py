@@ -32,13 +32,13 @@ class LLMService:
                 if not self.gemini_api_key:
                     raise RuntimeError("GEMINI_API_KEY is not set")
                 genai.configure(api_key=self.gemini_api_key)
-                # Configure model with sane defaults
+                max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
                 self._gemini = genai.GenerativeModel(
                     self.gemini_model,
                     generation_config={
                         "temperature": 0.7,
                         "top_p": 0.9,
-                        "max_output_tokens": 8192,  # Increased to handle longer responses
+                        "max_output_tokens": max_tokens,  # Same knob as Ollama; avoids cut-off for long lists
                     }
                 )
                 logger.info(f"Gemini initialized with model: {self.gemini_model}")
@@ -84,6 +84,7 @@ class LLMService:
                     return "I couldn't generate a response due to an AI provider error."
 
             # Default: Ollama
+            max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
             response = await self.http_client.post(
                 f"{self.base_url}/api/generate",
                 json={
@@ -93,7 +94,7 @@ class LLMService:
                     "options": {
                         "temperature": 0.7,
                         "top_p": 0.9,
-                        "max_tokens": 1000
+                        "max_tokens": max_tokens
                     }
                 }
             )
@@ -144,6 +145,7 @@ class LLMService:
                 return
 
             # Ollama: stream=true returns newline-delimited JSON
+            max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
             async with self.http_client.stream(
                 "POST",
                 f"{self.base_url}/api/generate",
@@ -154,7 +156,7 @@ class LLMService:
                     "options": {
                         "temperature": 0.7,
                         "top_p": 0.9,
-                        "max_tokens": 1000,
+                        "max_tokens": max_tokens,
                     },
                 },
                 timeout=60.0,
