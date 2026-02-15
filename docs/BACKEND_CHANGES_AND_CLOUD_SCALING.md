@@ -129,6 +129,7 @@ When moving from a single on-prem or dev server to a cloud-based, scalable deplo
 
 ## 3. References
 
+- **Scalability and production (general-purpose, current vs production)**: `SCALABILITY_AND_PRODUCTION.md`
 - **Backend audit (full list of issues and resolutions)**: `BACKEND_AUDIT_REPORT.md`
 - **Database migrations**: `ai/alembic/versions/`
 - **Config and env**: `ai/config.py`, `.env` (and §26 refactor suggestions in audit)

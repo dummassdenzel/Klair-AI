@@ -760,13 +760,14 @@ USER QUERY: "{question}"
 CATEGORIES:
 1. greeting - Greetings, pleasantries ("hello", "hi", "thanks", "goodbye")
 2. general - Questions about the AI itself, not documents ("what can you do?", "how does this work?")
-3. document_listing - Requests to list/show documents ("what files do we have?", "list all documents", "show me all PDFs")
-4. document_search - Questions requiring document content ("what's in sales_report.pdf?", "who attended?", "list all speakers")
+3. document_listing - Requests to list/show ALL documents with NO filter ("what files do we have?", "list all documents", "show me everything", "what's indexed?")
+4. document_search - Questions that need retrieval or a FILTERED list: by type/name/content ("list all delivery notes", "I need delivery notes", "show me receipts", "what's in X?", "who attended?", "list all speakers")
 
 IMPORTANT:
-- If query contains pronouns (that, it, this) or references previous context → document_search
-- If query asks to "list" or "show" documents/files → document_listing
-- If query asks about document CONTENT → document_search
+- If the user asks for a SUBSET of documents by type, name, or category (e.g. "delivery notes", "receipts", "invoices", "contracts") → document_search (so we can find only those).
+- If the user asks to list/show ALL documents with no filter → document_listing.
+- If query contains pronouns (that, it, this) or references previous context → document_search.
+- If query asks about document CONTENT or a specific kind of file → document_search.
 
 Respond with ONLY ONE WORD: greeting, general, document_listing, or document_search"""
 
