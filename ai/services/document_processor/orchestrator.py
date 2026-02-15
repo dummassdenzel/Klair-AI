@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 # Default max size for metadata cache (prevents unbounded memory with 1000+ files)
 DEFAULT_METADATA_CACHE_MAX_SIZE = 2000
 
+# Classification cache: reuse LLM result for same/similar query (domain-agnostic, reduces latency)
+CLASSIFICATION_CACHE_MAX_SIZE = 500
+CLASSIFICATION_CACHE_KEY_MAX_LEN = 300  # Normalized query truncated for cache key
+
 
 class MetadataCache:
     """
@@ -142,6 +146,10 @@ class DocumentProcessorOrchestrator:
         
         # Retrieval configuration
         self.retrieval_config = default_retrieval_config
+
+        # Classification cache (normalized query -> label); LRU-style, bounded
+        self._classification_cache: OrderedDict[str, str] = OrderedDict()
+        self._classification_cache_max = CLASSIFICATION_CACHE_MAX_SIZE
         
         # Phase 3: Incremental Updates components
         self.update_queue = UpdateQueue(max_queue_size=1000)
@@ -264,6 +272,8 @@ class DocumentProcessorOrchestrator:
         # Clear Filename Trie
         self.filename_trie.clear()
         logger.info("Filename Trie cleared")
+
+        self._classification_cache.clear()
         
         # Clear database records
         try:
@@ -733,18 +743,55 @@ class DocumentProcessorOrchestrator:
             logger.error(f"File selection failed: {e}, falling back to retrieval")
             return None
     
+    def _classify_query_fast_path(self, question: str) -> Optional[str]:
+        """
+        Domain-agnostic fast path: only for obvious greetings (1–3 tokens, universal words).
+        No document-type or listing keywords — all other classification goes to the LLM.
+        Returns classification or None if we should use the LLM or cache.
+        """
+        q = question.strip().lower()
+        if not q:
+            return None
+        # Strip trailing punctuation for comparison
+        q_clean = q.rstrip("?!.").strip()
+        tokens = [t for t in q_clean.split() if t]
+        if len(tokens) > 3:
+            return None
+        # Only universal greeting words (no domain-specific terms)
+        greeting_words = {"hi", "hello", "hey", "thanks", "thank", "you", "bye", "goodbye", "ok", "okay"}
+        if all(t in greeting_words for t in tokens) and len(tokens) >= 1:
+            return "greeting"
+        return None
+
+    def _classification_cache_key(self, question: str, conversation_history: list = None) -> str:
+        """Normalized cache key for classification (domain-agnostic)."""
+        q = question.strip().lower()[:CLASSIFICATION_CACHE_KEY_MAX_LEN]
+        if not conversation_history or len(conversation_history) == 0:
+            return q
+        # Include last turn for context (e.g. "that one" refers to previous)
+        last = conversation_history[-2:] if len(conversation_history) >= 2 else conversation_history
+        ctx = "|".join(m.get("content", "")[:80] for m in last if isinstance(m, dict))
+        return (q + "|" + ctx)[:CLASSIFICATION_CACHE_KEY_MAX_LEN]
+
     async def _classify_query(self, question: str, conversation_history: list = None) -> str:
         """
-        Unified query classification.
-        
-        Returns:
-            'greeting' - Simple greetings
-            'general' - General questions not about documents
-            'document_listing' - Requests to list/show all documents
-            'document_search' - Questions requiring document retrieval
+        Unified query classification. Domain-agnostic: LLM decides for all document types and intents.
+        Uses minimal greeting-only fast path and optional classification cache for efficiency.
         """
         try:
-            # Build conversation context
+            fast = self._classify_query_fast_path(question)
+            if fast is not None:
+                logger.info(f"Query classified as: {fast} (fast path)")
+                return fast
+
+            cache_key = self._classification_cache_key(question, conversation_history or [])
+            if cache_key in self._classification_cache:
+                classification = self._classification_cache[cache_key]
+                self._classification_cache.move_to_end(cache_key)
+                logger.info(f"Query classified as: {classification} (cache)")
+                return classification
+
+            # Build conversation context for LLM (domain-agnostic prompt)
             conversation_context = ""
             if conversation_history:
                 conversation_context = "\n\nRecent conversation:\n"
@@ -761,24 +808,29 @@ CATEGORIES:
 1. greeting - Greetings, pleasantries ("hello", "hi", "thanks", "goodbye")
 2. general - Questions about the AI itself, not documents ("what can you do?", "how does this work?")
 3. document_listing - Requests to list/show ALL documents with NO filter ("what files do we have?", "list all documents", "show me everything", "what's indexed?")
-4. document_search - Questions that need retrieval or a FILTERED list: by type/name/content ("list all delivery notes", "I need delivery notes", "show me receipts", "what's in X?", "who attended?", "list all speakers")
+4. document_search - Questions that need retrieval or a FILTERED list by type/name/content, or questions about document content ("list all X", "give me X", "what's in X?", "who attended?", any request for a subset of documents or content)
 
 IMPORTANT:
-- If the user asks for a SUBSET of documents by type, name, or category (e.g. "delivery notes", "receipts", "invoices", "contracts") → document_search (so we can find only those).
+- If the user asks for a SUBSET of documents (by type, name, or category) → document_search.
 - If the user asks to list/show ALL documents with no filter → document_listing.
 - If query contains pronouns (that, it, this) or references previous context → document_search.
-- If query asks about document CONTENT or a specific kind of file → document_search.
+- Work for any domain: documents can be permits, invoices, contracts, schoolwork, office work, etc. Apply the same rules.
 
 Respond with ONLY ONE WORD: greeting, general, document_listing, or document_search"""
 
             response = await self.llm_service.generate_simple(classification_prompt)
             classification = response.strip().lower()
             
-            # Validate and default to document_search if uncertain
             valid_types = ['greeting', 'general', 'document_listing', 'document_search']
             if classification not in valid_types:
                 logger.warning(f"Invalid classification '{classification}', defaulting to document_search")
-                return 'document_search'
+                classification = 'document_search'
+
+            # Store in cache (LRU eviction)
+            while len(self._classification_cache) >= self._classification_cache_max:
+                self._classification_cache.popitem(last=False)
+            self._classification_cache[cache_key] = classification
+            self._classification_cache.move_to_end(cache_key)
             
             logger.info(f"Query classified as: {classification}")
             return classification
@@ -825,7 +877,13 @@ Your response:"""
             logger.error(f"Direct response generation failed: {e}")
             return "Hello! I'm your document assistant. I can help you search and analyze your indexed documents. What would you like to know?"
     
-    async def _retrieve_chunks(self, query: str, query_type: str, explicit_filename: Optional[str] = None) -> tuple:
+    async def _retrieve_chunks(
+        self,
+        query: str,
+        query_type: str,
+        explicit_filename: Optional[str] = None,
+        query_embedding: Optional[List[float]] = None,
+    ) -> tuple:
         """
         Single retrieval pipeline for all document queries.
         
@@ -833,6 +891,7 @@ Your response:"""
             query: Search query
             query_type: Query classification type
             explicit_filename: Explicit filename if detected, None otherwise
+            query_embedding: Optional precomputed query embedding (avoids duplicate embed when run in parallel with classification)
             
         Returns:
             (documents, metadatas, scores, retrieval_count, rerank_count)
@@ -846,8 +905,9 @@ Your response:"""
         
         logger.info(f"Retrieval params: top_k={top_k}, rerank_top_k={rerank_top_k}, final_top_k={final_top_k}")
         
-        # Step 1: Embed query once, then run semantic and BM25 in parallel for lower latency
-        query_embedding = self.embedding_service.encode_single_text(query)
+        # Step 1: Use precomputed embedding or embed query once; then run semantic and BM25 in parallel
+        if query_embedding is None:
+            query_embedding = self.embedding_service.encode_single_text(query)
         semantic_task = asyncio.create_task(self.vector_store.search_similar(query_embedding, top_k))
         bm25_task = asyncio.to_thread(self.bm25_service.search, query, top_k)
         semantic_results, bm25_results = await asyncio.gather(semantic_task, bm25_task)
@@ -910,7 +970,7 @@ Your response:"""
             scores = [max(0.0, 1.0 - float(d)) for d in semantic_results['distances'][0]]
             logger.warning("Boosting produced no usable chunks, falling back to semantic-only results")
         
-        # Step 4: Re-ranking (if enabled)
+        # Step 4: Re-ranking (if enabled); run in thread to avoid blocking event loop
         rerank_count = 0
         if rerank_top_k > 0 and len(documents) > final_top_k:
             logger.info(f"🔄 Re-ranking top {min(rerank_top_k, len(documents))} of {len(documents)} results...")
@@ -919,12 +979,13 @@ Your response:"""
             metas_to_rerank = metadatas[:min(rerank_top_k, len(metadatas))]
             scores_to_rerank = scores[:min(rerank_top_k, len(scores))]
             
-            reranked_docs, reranked_metas, reranked_scores = self.reranker.rerank_with_metadata(
+            reranked_docs, reranked_metas, reranked_scores = await asyncio.to_thread(
+                self.reranker.rerank_with_metadata,
                 query=query,
                 documents=docs_to_rerank,
                 metadata_list=metas_to_rerank,
                 scores_list=scores_to_rerank,
-                top_k=final_top_k
+                top_k=final_top_k,
             )
             
             # Combine reranked + remaining
@@ -1069,8 +1130,11 @@ Be comprehensive and list ALL documents mentioned above."""
         start_time = asyncio.get_event_loop().time()
         
         try:
-            # Step 0: Classify query to determine if document retrieval is needed
-            query_type = await self._classify_query(question, conversation_history)
+            # Run classification and query embedding in parallel to reduce latency
+            classify_task = asyncio.create_task(self._classify_query(question, conversation_history))
+            embed_task = asyncio.to_thread(self.embedding_service.encode_single_text, question)
+            query_type = await classify_task
+            query_embedding = await embed_task
             
             # Handle non-document queries directly (fast path)
             if query_type in ['greeting', 'general']:
@@ -1108,9 +1172,9 @@ Be comprehensive and list ALL documents mentioned above."""
             explicit_filename = self._find_explicit_filename(question)
             selected_files = await self._select_relevant_files(question)
             
-            # Retrieve chunks using single pipeline
+            # Retrieve chunks (use precomputed query_embedding from parallel step)
             documents, metadatas, scores, retrieval_count, rerank_count = await self._retrieve_chunks(
-                retrieval_query, query_type, explicit_filename
+                retrieval_query, query_type, explicit_filename, query_embedding=query_embedding
             )
             
             if not documents:
@@ -1239,22 +1303,25 @@ Be comprehensive and list ALL documents mentioned above."""
         """
         start_time = asyncio.get_event_loop().time()
         try:
-            query_type = await self._classify_query(question, conversation_history)
+            classify_task = asyncio.create_task(self._classify_query(question, conversation_history))
+            embed_task = asyncio.to_thread(self.embedding_service.encode_single_text, question)
+            query_type = await classify_task
+            query_embedding = await embed_task
 
             if query_type in ["greeting", "general"]:
-                yield ("meta", {"sources": []})
+                yield ("meta", {"sources": [], "query_type": query_type})
                 response_text = await self._generate_direct_response(question, query_type)
                 response_time = asyncio.get_event_loop().time() - start_time
                 yield ("token", response_text)
-                yield ("done", {"message": response_text, "response_time": round(response_time, 3)})
+                yield ("done", {"message": response_text, "response_time": round(response_time, 3), "query_type": query_type, "retrieval_count": 0, "rerank_count": 0})
                 return
 
             if query_type == "document_listing":
                 result = await self._get_document_listing()
                 result.response_time = asyncio.get_event_loop().time() - start_time
-                yield ("meta", {"sources": result.sources})
+                yield ("meta", {"sources": result.sources, "query_type": query_type})
                 yield ("token", result.message)
-                yield ("done", {"message": result.message, "response_time": round(result.response_time, 3)})
+                yield ("done", {"message": result.message, "response_time": round(result.response_time, 3), "query_type": query_type, "retrieval_count": getattr(result, "retrieval_count", 0) or 0, "rerank_count": 0})
                 return
 
             # document_search
@@ -1263,7 +1330,7 @@ Be comprehensive and list ALL documents mentioned above."""
             explicit_filename = self._find_explicit_filename(question)
             selected_files = await self._select_relevant_files(question)
             documents, metadatas, scores, retrieval_count, rerank_count = await self._retrieve_chunks(
-                question, query_type, explicit_filename
+                question, query_type, explicit_filename, query_embedding=query_embedding
             )
 
             if not documents:
@@ -1326,7 +1393,7 @@ Be comprehensive and list ALL documents mentioned above."""
             sources = sources[:source_limit]
             context = "\n\n---\n\n".join(context_parts)
 
-            yield ("meta", {"sources": sources})
+            yield ("meta", {"sources": sources, "query_type": query_type})
             full_message_parts = []
             async for delta in self.llm_service.generate_response_stream(
                 question, context, conversation_history=conversation_history or []
@@ -1335,7 +1402,7 @@ Be comprehensive and list ALL documents mentioned above."""
                 yield ("token", delta)
             response_time = asyncio.get_event_loop().time() - start_time
             full_message = "".join(full_message_parts)
-            yield ("done", {"message": full_message, "response_time": round(response_time, 3)})
+            yield ("done", {"message": full_message, "response_time": round(response_time, 3), "query_type": query_type, "retrieval_count": retrieval_count, "rerank_count": rerank_count})
         except Exception as e:
             logger.error(f"Query stream failed: {e}")
             yield ("error", {"detail": str(e)})
@@ -1385,6 +1452,7 @@ Be comprehensive and list ALL documents mentioned above."""
             await self.vector_store.clear_collection()
             
             self._metadata_cache.clear()
+            self._classification_cache.clear()
 
             logger.info("Document collection cleared successfully")
         except Exception as e:

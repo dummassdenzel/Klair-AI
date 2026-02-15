@@ -23,7 +23,7 @@ class RetrievalConfig:
     
     # Comprehensive queries (enumeration-like, but using retrieval)
     comprehensive_top_k: int = 60
-    comprehensive_rerank_top_k: int = 30
+    comprehensive_rerank_top_k: int = 20   # Rerank fewer for speed (was 30); still good recall
     comprehensive_final_top_k: int = 20
     
     # Specific file queries

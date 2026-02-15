@@ -64,8 +64,11 @@ class LLMService:
 
             if self.provider == "gemini":
                 try:
-                    # Run blocking SDK call in a thread to avoid blocking the event loop
-                    result = await asyncio.to_thread(self._gemini.generate_content, prompt)
+                    max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
+                    generation_config = {"temperature": 0.7, "top_p": 0.9, "max_output_tokens": max_tokens}
+                    result = await asyncio.to_thread(
+                        self._gemini.generate_content, prompt, generation_config=generation_config
+                    )
                     text = getattr(result, "text", None)
                     if not text:
                         # Fallback: attempt to extract from candidates/parts
@@ -123,7 +126,11 @@ class LLMService:
             if self.provider == "gemini":
                 # Gemini SDK (google.generativeai) - no async stream in this codebase; yield full response as one chunk
                 try:
-                    result = await asyncio.to_thread(self._gemini.generate_content, prompt)
+                    max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
+                    generation_config = {"temperature": 0.7, "top_p": 0.9, "max_output_tokens": max_tokens}
+                    result = await asyncio.to_thread(
+                        self._gemini.generate_content, prompt, generation_config=generation_config
+                    )
                     text = getattr(result, "text", None)
                     if not text:
                         candidates = getattr(result, "candidates", []) or []

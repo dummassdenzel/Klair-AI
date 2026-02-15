@@ -551,18 +551,25 @@ async def chat_stream(chat_request: ChatRequest, request: Request, ctx: TenantCo
             sources = []
             final_message = ""
             response_time = 0.0
+            query_type = "document_search"
+            retrieval_count = 0
+            rerank_count = 0
             try:
                 async for event_type, payload in ctx.doc_processor.query_stream(
                     chat_request.message, conversation_history=conversation_history
                 ):
                     if event_type == "meta":
                         sources = payload.get("sources", [])
+                        query_type = payload.get("query_type", "document_search")
                         yield _format_sse("meta", {"sources": sources, "session_id": chat_session.id})
                     elif event_type == "token":
                         yield _format_sse("token", {"delta": payload})
                     elif event_type == "done":
                         final_message = payload.get("message", "")
                         response_time = payload.get("response_time", 0)
+                        query_type = payload.get("query_type", query_type)
+                        retrieval_count = payload.get("retrieval_count", 0)
+                        rerank_count = payload.get("rerank_count", 0)
                         yield _format_sse("done", payload)
                     elif event_type == "error":
                         yield _format_sse("error", payload)
@@ -605,19 +612,19 @@ async def chat_stream(chat_request: ChatRequest, request: Request, ctx: TenantCo
                 log_query_metrics(
                     logger=logger,
                     query=chat_request.message,
-                    query_type="document_search",
+                    query_type=query_type,
                     response_time=response_time,
                     sources_count=len(sources),
-                    retrieval_count=None,
-                    rerank_count=None,
+                    retrieval_count=retrieval_count,
+                    rerank_count=rerank_count,
                     session_id=chat_session.id,
                 )
                 metrics_service.record_query(
-                    query_type="document_search",
+                    query_type=query_type,
                     response_time_ms=response_time * 1000,
                     sources_count=len(sources),
-                    retrieval_count=0,
-                    rerank_count=0,
+                    retrieval_count=retrieval_count,
+                    rerank_count=rerank_count,
                     session_id=chat_session.id,
                     query_preview=chat_request.message[:100],
                 )
