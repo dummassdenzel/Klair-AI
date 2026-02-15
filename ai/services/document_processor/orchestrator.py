@@ -845,15 +845,16 @@ Your response:"""
         
         logger.info(f"Retrieval params: top_k={top_k}, rerank_top_k={rerank_top_k}, final_top_k={final_top_k}")
         
-        # Step 1: Semantic search
+        # Step 1: Embed query once, then run semantic and BM25 in parallel for lower latency
         query_embedding = self.embedding_service.encode_single_text(query)
-        semantic_results = await self.vector_store.search_similar(query_embedding, top_k)
+        semantic_task = asyncio.create_task(self.vector_store.search_similar(query_embedding, top_k))
+        bm25_task = asyncio.to_thread(self.bm25_service.search, query, top_k)
+        semantic_results, bm25_results = await asyncio.gather(semantic_task, bm25_task)
         
         if not semantic_results['documents'] or not semantic_results['documents'][0]:
             return ([], [], [], 0, 0)
         
-        # Step 2: BM25 boost
-        bm25_results = self.bm25_service.search(query, top_k=top_k)
+        # Step 2: Apply BM25 boost (results already fetched above)
         bm25_hits = set()
         for doc_id, score, meta in (bm25_results or []):
             fp = meta.get('file_path', '')

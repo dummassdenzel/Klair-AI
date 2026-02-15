@@ -424,41 +424,41 @@ async def chat(chat_request: ChatRequest, request: Request, ctx: TenantContext =
             response_time=response.response_time
         )
         
-        # Link documents used in this chat (FIXED: Use existing document records)
-        for source in response.sources:
-            file_path = source.get("file_path")
-            if file_path:
-                try:
-                    async with AsyncSessionLocal() as db_session:
-                        stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
-                        result = await db_session.execute(stmt)
-                        existing_doc = result.scalar_one_or_none()
-                    if existing_doc:
-                        await db_service.link_document_to_chat(
-                            document_id=existing_doc.id,
-                            chat_session_id=chat_session.id
-                        )
-                        logger.debug(f"Linked existing document {file_path} to chat session {chat_session.id}")
-                    else:
-                        logger.warning(f"Document {file_path} not found in database during chat linking")
-                        doc = await db_service.store_document_metadata(
-                            file_path=file_path,
-                            file_hash="",
-                            file_type=source.get("file_type", "unknown"),
-                            file_size=0,
-                            last_modified=datetime.utcnow(),
-                            content_preview=source.get("content_snippet", "")[:500],
-                            chunks_count=source.get("chunks_found", 0)
-                        )
-                        await db_service.link_document_to_chat(
-                            document_id=doc.id,
-                            chat_session_id=chat_session.id
-                        )
-                        logger.info(f"Created fallback document record for {file_path}")
-                except Exception as e:
-                    logger.error(f"Error linking document {file_path} to chat: {e}")
-                    # Continue with other documents - don't fail the entire chat
-        
+        # Link documents used in this chat (parallel to reduce latency)
+        async def link_one_source(src: dict, session_id: int) -> None:
+            file_path = src.get("file_path")
+            if not file_path:
+                return
+            try:
+                existing_doc = await db_service.get_document_by_path(file_path)
+                if existing_doc:
+                    await db_service.link_document_to_chat(
+                        document_id=existing_doc.id,
+                        chat_session_id=session_id
+                    )
+                    logger.debug(f"Linked existing document {file_path} to chat session {session_id}")
+                else:
+                    logger.warning(f"Document {file_path} not found in database during chat linking")
+                    doc = await db_service.store_document_metadata(
+                        file_path=file_path,
+                        file_hash="",
+                        file_type=src.get("file_type", "unknown"),
+                        file_size=0,
+                        last_modified=datetime.utcnow(),
+                        content_preview=(src.get("content_snippet") or "")[:500],
+                        chunks_count=src.get("chunks_found", 0)
+                    )
+                    await db_service.link_document_to_chat(
+                        document_id=doc.id,
+                        chat_session_id=session_id
+                    )
+                    logger.info(f"Created fallback document record for {file_path}")
+            except Exception as e:
+                logger.error(f"Error linking document {file_path} to chat: {e}")
+
+        if response.sources:
+            await asyncio.gather(*[link_one_source(src, chat_session.id) for src in response.sources], return_exceptions=True)
+
         # Log structured query metrics
         query_type = response.query_type or "unknown"
         log_query_metrics(
