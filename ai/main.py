@@ -504,6 +504,137 @@ async def chat(chat_request: ChatRequest, request: Request, ctx: TenantContext =
         
         raise HTTPException(status_code=500, detail="Query failed: {str(e)}")
 
+
+def _format_sse(event: str, data: dict) -> str:
+    """Format one SSE event: event name + JSON data."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@app.post("/api/chat/stream")
+@limiter.limit("10/minute")
+async def chat_stream(chat_request: ChatRequest, request: Request, ctx: TenantContext = Depends(require_tenant_context)):
+    """Stream chat response as Server-Sent Events (meta → token × N → done)."""
+    try:
+        logger.info(f"Processing streaming chat: {chat_request.message[:100]}...")
+
+        if chat_request.session_id:
+            try:
+                chat_session = await db_service.get_chat_session_by_id(chat_request.session_id)
+                if not chat_session:
+                    chat_session = await db_service.create_chat_session(
+                        directory_path=ctx.current_directory,
+                        title=f"Chat about: {chat_request.message[:50]}...",
+                    )
+            except Exception as e:
+                logger.error(f"Error getting session {chat_request.session_id}: {e}")
+                chat_session = await db_service.create_chat_session(
+                    directory_path=ctx.current_directory,
+                    title=f"Chat about: {chat_request.message[:50]}...",
+                )
+        else:
+            chat_session = await db_service.create_chat_session(
+                directory_path=ctx.current_directory,
+                title=f"Chat about: {chat_request.message[:50]}...",
+            )
+
+        conversation_history = []
+        try:
+            previous_messages = await db_service.get_chat_history(chat_session.id)
+            recent = previous_messages[-3:] if len(previous_messages) > 3 else previous_messages
+            for msg in recent:
+                conversation_history.append({"role": "user", "content": msg.user_message})
+                conversation_history.append({"role": "assistant", "content": msg.ai_response})
+        except Exception as e:
+            logger.warning(f"Could not fetch conversation history: {e}")
+
+        async def event_generator():
+            sources = []
+            final_message = ""
+            response_time = 0.0
+            try:
+                async for event_type, payload in ctx.doc_processor.query_stream(
+                    chat_request.message, conversation_history=conversation_history
+                ):
+                    if event_type == "meta":
+                        sources = payload.get("sources", [])
+                        yield _format_sse("meta", {"sources": sources, "session_id": chat_session.id})
+                    elif event_type == "token":
+                        yield _format_sse("token", {"delta": payload})
+                    elif event_type == "done":
+                        final_message = payload.get("message", "")
+                        response_time = payload.get("response_time", 0)
+                        yield _format_sse("done", payload)
+                    elif event_type == "error":
+                        yield _format_sse("error", payload)
+                        return
+
+                # Persist after stream completes
+                await db_service.add_chat_message(
+                    session_id=chat_session.id,
+                    user_message=chat_request.message,
+                    ai_response=final_message,
+                    sources=sources,
+                    response_time=response_time,
+                )
+
+                async def link_one(src: dict, sid: int) -> None:
+                    file_path = src.get("file_path")
+                    if not file_path:
+                        return
+                    try:
+                        existing = await db_service.get_document_by_path(file_path)
+                        if existing:
+                            await db_service.link_document_to_chat(document_id=existing.id, chat_session_id=sid)
+                        else:
+                            doc = await db_service.store_document_metadata(
+                                file_path=file_path,
+                                file_hash="",
+                                file_type=src.get("file_type", "unknown"),
+                                file_size=0,
+                                last_modified=datetime.utcnow(),
+                                content_preview=(src.get("content_snippet") or "")[:500],
+                                chunks_count=src.get("chunks_found", 0),
+                            )
+                            await db_service.link_document_to_chat(document_id=doc.id, chat_session_id=sid)
+                    except Exception as e:
+                        logger.error(f"Error linking document {file_path} to chat: {e}")
+
+                if sources:
+                    await asyncio.gather(*[link_one(src, chat_session.id) for src in sources], return_exceptions=True)
+
+                log_query_metrics(
+                    logger=logger,
+                    query=chat_request.message,
+                    query_type="document_search",
+                    response_time=response_time,
+                    sources_count=len(sources),
+                    retrieval_count=None,
+                    rerank_count=None,
+                    session_id=chat_session.id,
+                )
+                metrics_service.record_query(
+                    query_type="document_search",
+                    response_time_ms=response_time * 1000,
+                    sources_count=len(sources),
+                    retrieval_count=0,
+                    rerank_count=0,
+                    session_id=chat_session.id,
+                    query_preview=chat_request.message[:100],
+                )
+            except Exception as e:
+                logger.error(f"Stream failed: {e}")
+                yield _format_sse("error", {"detail": str(e)})
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    except Exception as e:
+        logger.error(f"Chat stream setup failed: {e}")
+        raise HTTPException(status_code=500, detail="Stream failed")
+
+
 @app.get("/api/status")
 async def get_status(request: Request):
     """Get current system status and configuration (tenant-scoped when directory set)."""

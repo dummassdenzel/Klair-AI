@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, AsyncIterator
 from datetime import datetime
 from pathlib import Path
 
@@ -1228,7 +1228,117 @@ Be comprehensive and list ALL documents mentioned above."""
                 retrieval_count=retrieval_count if 'retrieval_count' in locals() else 0,
                 rerank_count=rerank_count if 'rerank_count' in locals() else 0
             )
-    
+
+    async def query_stream(
+        self, question: str, max_results: int = 15, conversation_history: list = None
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Same pipeline as query() but yields SSE-style events: ("meta", {sources}),
+        ("token", delta), ("done", {message, response_time}), or ("error", {detail}).
+        """
+        start_time = asyncio.get_event_loop().time()
+        try:
+            query_type = await self._classify_query(question, conversation_history)
+
+            if query_type in ["greeting", "general"]:
+                yield ("meta", {"sources": []})
+                response_text = await self._generate_direct_response(question, query_type)
+                response_time = asyncio.get_event_loop().time() - start_time
+                yield ("token", response_text)
+                yield ("done", {"message": response_text, "response_time": round(response_time, 3)})
+                return
+
+            if query_type == "document_listing":
+                result = await self._get_document_listing()
+                result.response_time = asyncio.get_event_loop().time() - start_time
+                yield ("meta", {"sources": result.sources})
+                yield ("token", result.message)
+                yield ("done", {"message": result.message, "response_time": round(result.response_time, 3)})
+                return
+
+            # document_search
+            retrieval_count = 0
+            rerank_count = 0
+            explicit_filename = self._find_explicit_filename(question)
+            selected_files = await self._select_relevant_files(question)
+            documents, metadatas, scores, retrieval_count, rerank_count = await self._retrieve_chunks(
+                question, query_type, explicit_filename
+            )
+
+            if not documents:
+                yield ("meta", {"sources": []})
+                msg = "I don't have information about that in the current documents."
+                yield ("token", msg)
+                yield ("done", {"message": msg, "response_time": round(asyncio.get_event_loop().time() - start_time, 3)})
+                return
+
+            if selected_files:
+                prioritized_docs, prioritized_metas, prioritized_scores = [], [], []
+                other_docs, other_metas, other_scores = [], [], []
+                for doc, meta, score in zip(documents, metadatas, scores):
+                    file_path = meta.get("file_path", "")
+                    if any(sf in file_path for sf in selected_files):
+                        prioritized_docs.append(doc)
+                        prioritized_metas.append(meta)
+                        prioritized_scores.append(score)
+                    else:
+                        other_docs.append(doc)
+                        other_metas.append(meta)
+                        other_scores.append(score)
+                documents = prioritized_docs + other_docs
+                metadatas = prioritized_metas + other_metas
+                scores = prioritized_scores + other_scores
+
+            file_chunks = {}
+            for doc, metadata, score in zip(documents, metadatas, scores):
+                file_path = metadata.get("file_path", "Unknown")
+                if file_path not in file_chunks:
+                    file_chunks[file_path] = []
+                file_chunks[file_path].append({
+                    "text": doc,
+                    "score": score,
+                    "chunk_id": metadata.get("chunk_id", 0),
+                    "metadata": metadata,
+                })
+            sources = []
+            context_parts = []
+            files_to_process = file_chunks.items()
+            if selected_files:
+                selected_file_chunks = {fp: ch for fp, ch in file_chunks.items() if any(sf in fp for sf in selected_files)}
+                files_to_process = list(selected_file_chunks.items())
+            for file_path, chunks in files_to_process:
+                chunks.sort(key=lambda x: x["chunk_id"])
+                filename = Path(file_path).name
+                file_text = "\n".join([chunk["text"] for chunk in chunks])
+                context_parts.append(f"[Document: {filename}]\n{file_text}")
+                avg_score = sum(chunk["score"] for chunk in chunks) / len(chunks)
+                relevance_score = min(1.0, avg_score * 50)
+                sources.append({
+                    "file_path": file_path,
+                    "relevance_score": round(relevance_score, 3),
+                    "content_snippet": file_text[:300] + "..." if len(file_text) > 300 else file_text,
+                    "chunks_found": len(chunks),
+                    "file_type": chunks[0]["metadata"].get("file_type", "unknown"),
+                })
+            sources.sort(key=lambda x: x["relevance_score"], reverse=True)
+            source_limit = self.retrieval_config.get_source_limit(query_type, explicit_filename is not None)
+            sources = sources[:source_limit]
+            context = "\n\n---\n\n".join(context_parts)
+
+            yield ("meta", {"sources": sources})
+            full_message_parts = []
+            async for delta in self.llm_service.generate_response_stream(
+                question, context, conversation_history=conversation_history or []
+            ):
+                full_message_parts.append(delta)
+                yield ("token", delta)
+            response_time = asyncio.get_event_loop().time() - start_time
+            full_message = "".join(full_message_parts)
+            yield ("done", {"message": full_message, "response_time": round(response_time, 3)})
+        except Exception as e:
+            logger.error(f"Query stream failed: {e}")
+            yield ("error", {"detail": str(e)})
+
     async def get_stats(self) -> Dict:
         """Get comprehensive stats (DB for totals; only a small sample of paths to avoid large payloads)."""
         try:

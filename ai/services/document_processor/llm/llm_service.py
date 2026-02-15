@@ -1,7 +1,8 @@
 import logging
-from typing import Optional
+from typing import Optional, AsyncIterator
 from config import settings
 import asyncio
+import json
 
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,79 @@ class LLMService:
         except Exception as e:
             logger.error(f"Error generating LLM response: {e}")
             return "I couldn't generate a response due to an error."
-    
+
+    async def generate_response_stream(
+        self, query: str, context: str, conversation_history: list = None
+    ) -> AsyncIterator[str]:
+        """
+        Stream response tokens from the LLM. Yields text chunks.
+        Ollama: true streaming. Gemini: yields full message in one chunk (no streaming API in current SDK usage).
+        """
+        try:
+            self._initialize_client()
+            prompt = self._build_prompt(query, context, conversation_history or [])
+
+            if self.provider == "gemini":
+                # Gemini SDK (google.generativeai) - no async stream in this codebase; yield full response as one chunk
+                try:
+                    result = await asyncio.to_thread(self._gemini.generate_content, prompt)
+                    text = getattr(result, "text", None)
+                    if not text:
+                        candidates = getattr(result, "candidates", []) or []
+                        for c in candidates:
+                            content = getattr(c, "content", None)
+                            parts = getattr(content, "parts", []) if content else []
+                            part_texts = [getattr(p, "text", "") for p in parts]
+                            joined = "".join(part_texts).strip()
+                            if joined:
+                                text = joined
+                                break
+                    if text:
+                        yield text
+                    else:
+                        yield "I couldn't generate a response."
+                except Exception as ge:
+                    logger.error(f"Gemini generation error: {ge}")
+                    yield "I couldn't generate a response due to an AI provider error."
+                return
+
+            # Ollama: stream=true returns newline-delimited JSON
+            async with self.http_client.stream(
+                "POST",
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": True,
+                    "options": {
+                        "temperature": 0.7,
+                        "top_p": 0.9,
+                        "max_tokens": 1000,
+                    },
+                },
+                timeout=60.0,
+            ) as response:
+                if response.status_code != 200:
+                    logger.error(f"Ollama stream error: {response.status_code}")
+                    yield "I couldn't generate a response due to an API error."
+                    return
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        delta = data.get("response") or ""
+                        if delta:
+                            yield delta
+                        if data.get("done"):
+                            return
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            logger.error(f"Error in LLM stream: {e}")
+            yield "I couldn't generate a response due to an error."
+
     async def generate_simple(self, prompt: str) -> str:
         """
         Generate a simple response without context/prompt templating.

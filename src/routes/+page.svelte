@@ -153,34 +153,44 @@
     apiActions.setChatLoading(true);
 
     try {
-      const response = await apiService.sendChatMessage({
-        session_id: session.id,
-        message: message,
-      });
-
-      if (
-        response.message &&
-        response.message.includes(
-          "couldn't generate a response due to an error",
-        )
-      ) {
-        throw new Error(
-          "AI service temporarily unavailable. Please try again.",
-        );
-      }
-
-      const updatedMessage: ChatMessage = {
-        ...userMessage,
-        ai_response: response.message,
-        sources: response.sources,
-        response_time: response.response_time,
-      };
-
-      messages = messages.map((msg) =>
-        msg.id === userMessage.id ? updatedMessage : msg,
+      await apiService.sendChatMessageStream(
+        { session_id: session.id, message },
+        {
+          onMeta(sources) {
+            messages = messages.map((msg) =>
+              msg.id === userMessage.id ? { ...msg, sources } : msg,
+            );
+            setTimeout(() => scrollToBottom(true), 50);
+          },
+          onToken(delta) {
+            messages = messages.map((msg) =>
+              msg.id === userMessage.id
+                ? { ...msg, ai_response: msg.ai_response + delta }
+                : msg,
+            );
+            setTimeout(() => scrollToBottom(true), 0);
+          },
+          onDone(finalMessage, responseTime) {
+            messages = messages.map((msg) =>
+              msg.id === userMessage.id
+                ? { ...msg, ai_response: finalMessage, response_time: responseTime }
+                : msg,
+            );
+            setTimeout(() => scrollToBottom(true), 100);
+          },
+          onError(detail) {
+            throw new Error(detail || "Stream failed");
+          },
+        },
       );
-      // Scroll to bottom after AI response
-      setTimeout(() => scrollToBottom(true), 100);
+
+      const updated = messages.find((m) => m.id === userMessage.id);
+      if (
+        updated?.ai_response &&
+        updated.ai_response.includes("couldn't generate a response due to an error")
+      ) {
+        throw new Error("AI service temporarily unavailable. Please try again.");
+      }
 
       if (messages.length === 2) {
         const newTitle = `Chat about: ${message.substring(0, 50)}...`;
@@ -188,7 +198,7 @@
         session.title = newTitle;
         currentChatSession.set(session);
       }
-      
+
       await loadChatHistory();
     } catch (error) {
       console.error("❌ Failed to send message:", error);

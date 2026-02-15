@@ -34,6 +34,65 @@ export const apiService = {
     return response.data;
   },
 
+  /**
+   * Stream chat response via SSE. Callbacks: onMeta(sources, sessionId), onToken(delta), onDone(message, responseTime), onError(detail).
+   */
+  async sendChatMessageStream(
+    request: ChatRequest,
+    callbacks: {
+      onMeta?: (sources: ChatResponse['sources'], sessionId: number) => void;
+      onToken?: (delta: string) => void;
+      onDone?: (message: string, responseTime: number) => void;
+      onError?: (detail: string) => void;
+    }
+  ): Promise<void> {
+    const baseURL = apiClient.defaults.baseURL ?? '';
+    const url = `${baseURL}/chat/stream`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      callbacks.onError?.(err.detail ?? 'Request failed');
+      return;
+    }
+    const reader = res.body?.getReader();
+    if (!reader) {
+      callbacks.onError?.('No response body');
+      return;
+    }
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      let event = '';
+      for (const line of lines) {
+        if (line.startsWith('event: ')) event = line.slice(7).trim();
+        else if (line.startsWith('data: ') && event) {
+          try {
+            const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
+            if (event === 'meta') {
+              callbacks.onMeta?.((data.sources as ChatResponse['sources']) ?? [], (data.session_id as number) ?? 0);
+            } else if (event === 'token') {
+              callbacks.onToken?.((data.delta as string) ?? '');
+            } else if (event === 'done') {
+              callbacks.onDone?.((data.message as string) ?? '', (data.response_time as number) ?? 0);
+            } else if (event === 'error') {
+              callbacks.onError?.((data.detail as string) ?? 'Unknown error');
+            }
+          } catch (_) {}
+          event = '';
+        }
+      }
+    }
+  },
+
   // Document Management
   async getDocumentStats(): Promise<DocumentStats> {
     const response = await apiClient.get('/documents/stats');
