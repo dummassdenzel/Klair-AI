@@ -63,6 +63,8 @@ async def main():
         ollama_model="tinyllama",
         gemini_api_key=settings.GEMINI_API_KEY,
         gemini_model=settings.GEMINI_MODEL,
+        groq_api_key=getattr(settings, "GROQ_API_KEY", ""),
+        groq_model=getattr(settings, "GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
         llm_provider=settings.LLM_PROVIDER
     )
     

@@ -16,16 +16,23 @@ class Settings:
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
     
-    # LLM settings (supports cloud e.g. Gemini and local e.g. Ollama; set LLM_PROVIDER accordingly)
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")  # 'ollama' | 'gemini'
-    LLM_MAX_RESPONSE_TOKENS: int = int(os.getenv("LLM_MAX_RESPONSE_TOKENS", "8192"))  # Max tokens per reply; use 8192 for long lists (Gemini/Ollama)
-    # Ollama
+    # LLM settings (set LLM_PROVIDER to switch: ollama | gemini | groq)
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")
+    LLM_MAX_RESPONSE_TOKENS: int = int(os.getenv("LLM_MAX_RESPONSE_TOKENS", "8192"))
+    # Ollama (local)
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "tinyllama")
     OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "120"))
-    # Gemini
+    # Gemini (Google)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+    # Groq (https://console.groq.com). Default model: 30k TPM tier; adjust limits if you use a lower-TPM model.
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+    # Input limits (chars). Defaults tuned for 30k TPM; lower these if you hit 413 on a different tier.
+    GROQ_MAX_CONTEXT_CHARS: int = int(os.getenv("GROQ_MAX_CONTEXT_CHARS", "50000"))
+    GROQ_MAX_SIMPLE_PROMPT_CHARS: int = int(os.getenv("GROQ_MAX_SIMPLE_PROMPT_CHARS", "15000"))
+    GROQ_MAX_LISTING_CONTEXT_CHARS: int = int(os.getenv("GROQ_MAX_LISTING_CONTEXT_CHARS", "25000"))
     
     # File processing
     SUPPORTED_EXTENSIONS: List[str] = os.getenv("SUPPORTED_EXTENSIONS", ".pdf,.docx,.txt,.xlsx,.xls,.pptx").split(',')

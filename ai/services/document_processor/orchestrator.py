@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple, Any, AsyncIterator
@@ -23,18 +24,15 @@ from .updates.update_executor import UpdateExecutor
 from .updates.update_worker import UpdateWorker
 from .updates.chunk_differ import ChunkDiffer
 from .updates.update_strategy import UpdateStrategySelector
-from .query_config import RetrievalConfig, default_retrieval_config
+from .query_config import RetrievalConfig, default_retrieval_config, is_aggregation_query
 from database import DatabaseService
+from ..routing import Router, QueryClassifier, Route
 
 
 logger = logging.getLogger(__name__)
 
 # Default max size for metadata cache (prevents unbounded memory with 1000+ files)
 DEFAULT_METADATA_CACHE_MAX_SIZE = 2000
-
-# Classification cache: reuse LLM result for same/similar query (domain-agnostic, reduces latency)
-CLASSIFICATION_CACHE_MAX_SIZE = 500
-CLASSIFICATION_CACHE_KEY_MAX_LEN = 300  # Normalized query truncated for cache key
 
 
 class MetadataCache:
@@ -95,6 +93,8 @@ class DocumentProcessorOrchestrator:
                  ollama_model: str = "tinyllama",
                  gemini_api_key: Optional[str] = None,
                  gemini_model: str = "gemini-2.5-pro",
+                 groq_api_key: Optional[str] = None,
+                 groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
                  llm_provider: str = "ollama"):
         
         # Initialize OCR service (optional, for scanned documents and images)
@@ -129,6 +129,8 @@ class DocumentProcessorOrchestrator:
             ollama_model=ollama_model,
             gemini_api_key=gemini_api_key,
             gemini_model=gemini_model,
+            groq_api_key=groq_api_key,
+            groq_model=groq_model,
             provider=llm_provider
         )
         self.file_validator = FileValidator(max_file_size_mb, ocr_service=ocr_service)
@@ -147,14 +149,17 @@ class DocumentProcessorOrchestrator:
         # Retrieval configuration
         self.retrieval_config = default_retrieval_config
 
-        # Classification cache (normalized query -> label); LRU-style, bounded
-        self._classification_cache: OrderedDict[str, str] = OrderedDict()
-        self._classification_cache_max = CLASSIFICATION_CACHE_MAX_SIZE
+        # Agentic routing: classification + route resolution
+        self.router = Router(QueryClassifier(self.llm_service))
         
         # Phase 3: Incremental Updates components
         self.update_queue = UpdateQueue(max_queue_size=1000)
         self.chunk_differ = ChunkDiffer(self.embedding_service)
         self.strategy_selector = UpdateStrategySelector()
+        async def _classify_doc(preview: str, fp: str) -> Optional[str]:
+            out = await self.llm_service.classify_document_type(preview, Path(fp).name)
+            return out if out and out != "unknown" else None
+
         self.update_executor = UpdateExecutor(
             vector_store=self.vector_store,
             bm25_service=self.bm25_service,
@@ -164,6 +169,7 @@ class DocumentProcessorOrchestrator:
             database_service=self.database_service,
             chunk_differ=self.chunk_differ,
             file_validator=self.file_validator,
+            document_classifier=_classify_doc,
         )
         self.update_worker = UpdateWorker(
             update_queue=self.update_queue,
@@ -181,7 +187,7 @@ class DocumentProcessorOrchestrator:
         self.files_being_processed: set = set()  # Track files currently being indexed to prevent duplicate processing
         self._indexing_task: Optional[asyncio.Task] = None  # So caller can cancel when switching directory
         self._shutdown: bool = False  # Set when directory is switched so background indexing exits
-
+        
         logger.info("DocumentProcessorOrchestrator initialized with hybrid search (semantic + keyword) and incremental updates")
         
         # Load existing indexed documents into memory
@@ -196,26 +202,26 @@ class DocumentProcessorOrchestrator:
             from database.database import AsyncSessionLocal
             from database.models import IndexedDocument
             from sqlalchemy import select
-
+            
             async with AsyncSessionLocal() as db_session:
                 stmt = select(IndexedDocument).where(
                     IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
                 )
                 result = await db_session.execute(stmt)
                 docs = result.scalars().all()
-
-            for doc in docs:
-                filename = Path(doc.file_path).name
-                self.filename_trie.add(filename, doc.file_path)
-                if len(self._metadata_cache) < self._metadata_cache.max_size:
-                    meta = {
-                        "file_type": doc.file_type,
-                        "size_bytes": doc.file_size,
-                        "modified_at": doc.last_modified,
-                        "chunks": doc.chunks_count,
-                        "processing_status": doc.processing_status,
-                    }
-                    self._metadata_cache.set(doc.file_path, doc.file_hash or "", meta)
+                
+                for doc in docs:
+                    filename = Path(doc.file_path).name
+                    self.filename_trie.add(filename, doc.file_path)
+                    if len(self._metadata_cache) < self._metadata_cache.max_size:
+                        meta = {
+                            "file_type": doc.file_type,
+                            "size_bytes": doc.file_size,
+                            "modified_at": doc.last_modified,
+                            "chunks": doc.chunks_count,
+                            "processing_status": doc.processing_status,
+                        }
+                        self._metadata_cache.set(doc.file_path, doc.file_hash or "", meta)
 
             indexed_count = sum(1 for d in docs if d.processing_status == "indexed")
             metadata_only_count = sum(1 for d in docs if d.processing_status == "metadata_only")
@@ -225,7 +231,7 @@ class DocumentProcessorOrchestrator:
             )
         except Exception as e:
             logger.warning(f"Could not load existing metadata: {e}")
-
+    
     async def _get_cached_or_db_hash_metadata(self, file_path: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         """Return (stored_hash, stored_metadata) from LRU cache or DB. Caches DB result."""
         cached = self._metadata_cache.get(file_path)
@@ -273,14 +279,14 @@ class DocumentProcessorOrchestrator:
         self.filename_trie.clear()
         logger.info("Filename Trie cleared")
 
-        self._classification_cache.clear()
+        self.router.clear_cache()
         
         # Clear database records
         try:
             from database.database import AsyncSessionLocal
             from database.models import IndexedDocument
             from sqlalchemy import delete
-
+            
             async with AsyncSessionLocal() as session:
                 try:
                     stmt = delete(IndexedDocument)
@@ -443,7 +449,7 @@ class DocumentProcessorOrchestrator:
                         processed += 1
                 if (i + batch_size) % 50 == 0 or i + batch_size >= len(file_paths):
                     logger.info(f"📊 Background indexing progress: {processed + failed}/{len(file_paths)} files "
-                               f"({processed} indexed, {failed} failed)")
+                              f"({processed} indexed, {failed} failed)")
                 if i + batch_size < len(file_paths):
                     await asyncio.sleep(0.1)
             logger.info(f"✅ Background content indexing complete: {processed} indexed, {failed} failed")
@@ -512,7 +518,7 @@ class DocumentProcessorOrchestrator:
             file_size_bytes = file_metadata.get("size_bytes", 0)
             
             last_queried = file_metadata.get("modified_at") or datetime.utcnow()
-
+            
             # Check if in active session (simplified - can be enhanced)
             is_in_active_session = False  # TODO: Track active sessions
             
@@ -550,7 +556,7 @@ class DocumentProcessorOrchestrator:
         if use_queue:
             current_hash = self.file_validator.calculate_file_hash(file_path)
             stored_hash, _ = await self._get_cached_or_db_hash_metadata(file_path)
-
+            
             if not force_reindex and stored_hash == current_hash:
                 logger.debug(f"File {file_path} unchanged, skipping update")
                 return
@@ -584,15 +590,15 @@ class DocumentProcessorOrchestrator:
             from database.database import AsyncSessionLocal
             from database.models import IndexedDocument
             from sqlalchemy import select
-
+            
             async with AsyncSessionLocal() as db_session:
                 stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
                 result = await db_session.execute(stmt)
                 existing_doc = result.scalar_one_or_none()
-
-            if existing_doc and existing_doc.processing_status == "indexed" and existing_doc.file_hash == current_hash:
-                if not force_reindex:
-                    logger.debug(f"File {file_path} already fully indexed, skipping")
+                
+                if existing_doc and existing_doc.processing_status == "indexed" and existing_doc.file_hash == current_hash:
+                    if not force_reindex:
+                        logger.debug(f"File {file_path} already fully indexed, skipping")
                     self._metadata_cache.set(file_path, current_hash, file_metadata)
                     self.files_being_processed.discard(file_path)
                     return
@@ -624,13 +630,19 @@ class DocumentProcessorOrchestrator:
                 return
             
             chunks = self.chunker.create_chunks(text, file_path)
+            content_preview = text[:500]
+            document_category = None
+            try:
+                document_category = await self.llm_service.classify_document_type(content_preview, Path(file_path).name)
+                if document_category == "unknown":
+                    document_category = None
+            except Exception as e:
+                logger.warning(f"Document classification failed for {file_path}: {e}")
             embeddings = self.embedding_service.encode_texts([chunk.text for chunk in chunks])
-            await self.vector_store.batch_insert_chunks(chunks, embeddings)
-            
-            # Add to BM25 keyword index
+            await self.vector_store.batch_insert_chunks(chunks, embeddings, document_category=document_category)
             bm25_documents = [
                 {
-                    'id': f"{chunk.file_path}:{chunk.chunk_id}",  # Create unique ID
+                    'id': f"{chunk.file_path}:{chunk.chunk_id}",
                     'text': chunk.text,
                     'metadata': {
                         'file_path': chunk.file_path,
@@ -642,22 +654,21 @@ class DocumentProcessorOrchestrator:
             ]
             self.bm25_service.add_documents(bm25_documents)
             logger.debug(f"Added {len(chunks)} chunks to BM25 index for {file_path}")
-            
-            # Store complete metadata in database (updates from metadata_only to indexed)
             await self.database_service.store_document_metadata(
                 file_path=file_path,
                 file_hash=current_hash,
                 file_type=file_metadata["file_type"],
                 file_size=file_metadata["size_bytes"],
                 last_modified=file_metadata["modified_at"],
-                content_preview=text[:500],
+                content_preview=content_preview,
                 chunks_count=len(chunks),
-                processing_status="indexed"  # Mark as fully indexed
+                processing_status="indexed",
+                document_category=document_category,
             )
             
             # Update tracking
             self._metadata_cache.set(file_path, current_hash, file_metadata)
-
+            
         except Exception as e:
             logger.error(f"Error processing document {file_path}: {e}")
             # Update status to error
@@ -689,7 +700,7 @@ class DocumentProcessorOrchestrator:
             self.filename_trie.remove(filename, file_path)
             
             self._metadata_cache.remove(file_path)
-
+            
             logger.info(f"Removed document: {file_path}")
             
         except Exception as e:
@@ -743,102 +754,6 @@ class DocumentProcessorOrchestrator:
             logger.error(f"File selection failed: {e}, falling back to retrieval")
             return None
     
-    def _classify_query_fast_path(self, question: str) -> Optional[str]:
-        """
-        Domain-agnostic fast path: only for obvious greetings (1–3 tokens, universal words).
-        No document-type or listing keywords — all other classification goes to the LLM.
-        Returns classification or None if we should use the LLM or cache.
-        """
-        q = question.strip().lower()
-        if not q:
-            return None
-        # Strip trailing punctuation for comparison
-        q_clean = q.rstrip("?!.").strip()
-        tokens = [t for t in q_clean.split() if t]
-        if len(tokens) > 3:
-            return None
-        # Only universal greeting words (no domain-specific terms)
-        greeting_words = {"hi", "hello", "hey", "thanks", "thank", "you", "bye", "goodbye", "ok", "okay"}
-        if all(t in greeting_words for t in tokens) and len(tokens) >= 1:
-            return "greeting"
-        return None
-
-    def _classification_cache_key(self, question: str, conversation_history: list = None) -> str:
-        """Normalized cache key for classification (domain-agnostic)."""
-        q = question.strip().lower()[:CLASSIFICATION_CACHE_KEY_MAX_LEN]
-        if not conversation_history or len(conversation_history) == 0:
-            return q
-        # Include last turn for context (e.g. "that one" refers to previous)
-        last = conversation_history[-2:] if len(conversation_history) >= 2 else conversation_history
-        ctx = "|".join(m.get("content", "")[:80] for m in last if isinstance(m, dict))
-        return (q + "|" + ctx)[:CLASSIFICATION_CACHE_KEY_MAX_LEN]
-
-    async def _classify_query(self, question: str, conversation_history: list = None) -> str:
-        """
-        Unified query classification. Domain-agnostic: LLM decides for all document types and intents.
-        Uses minimal greeting-only fast path and optional classification cache for efficiency.
-        """
-        try:
-            fast = self._classify_query_fast_path(question)
-            if fast is not None:
-                logger.info(f"Query classified as: {fast} (fast path)")
-                return fast
-
-            cache_key = self._classification_cache_key(question, conversation_history or [])
-            if cache_key in self._classification_cache:
-                classification = self._classification_cache[cache_key]
-                self._classification_cache.move_to_end(cache_key)
-                logger.info(f"Query classified as: {classification} (cache)")
-                return classification
-
-            # Build conversation context for LLM (domain-agnostic prompt)
-            conversation_context = ""
-            if conversation_history:
-                conversation_context = "\n\nRecent conversation:\n"
-                for msg in conversation_history[-2:]:
-                    role = "User" if msg["role"] == "user" else "Assistant"
-                    conversation_context += f"{role}: {msg['content'][:150]}...\n"
-            
-            classification_prompt = f"""Classify this query into ONE category:
-
-{conversation_context}
-USER QUERY: "{question}"
-
-CATEGORIES:
-1. greeting - Greetings, pleasantries ("hello", "hi", "thanks", "goodbye")
-2. general - Questions about the AI itself, not documents ("what can you do?", "how does this work?")
-3. document_listing - Requests to list/show ALL documents with NO filter ("what files do we have?", "list all documents", "show me everything", "what's indexed?")
-4. document_search - Questions that need retrieval or a FILTERED list by type/name/content, or questions about document content ("list all X", "give me X", "what's in X?", "who attended?", any request for a subset of documents or content)
-
-IMPORTANT:
-- If the user asks for a SUBSET of documents (by type, name, or category) → document_search.
-- If the user asks to list/show ALL documents with no filter → document_listing.
-- If query contains pronouns (that, it, this) or references previous context → document_search.
-- Work for any domain: documents can be permits, invoices, contracts, schoolwork, office work, etc. Apply the same rules.
-
-Respond with ONLY ONE WORD: greeting, general, document_listing, or document_search"""
-
-            response = await self.llm_service.generate_simple(classification_prompt)
-            classification = response.strip().lower()
-            
-            valid_types = ['greeting', 'general', 'document_listing', 'document_search']
-            if classification not in valid_types:
-                logger.warning(f"Invalid classification '{classification}', defaulting to document_search")
-                classification = 'document_search'
-
-            # Store in cache (LRU eviction)
-            while len(self._classification_cache) >= self._classification_cache_max:
-                self._classification_cache.popitem(last=False)
-            self._classification_cache[cache_key] = classification
-            self._classification_cache.move_to_end(cache_key)
-            
-            logger.info(f"Query classified as: {classification}")
-            return classification
-            
-        except Exception as e:
-            logger.error(f"Classification failed: {e}, defaulting to document_search")
-            return 'document_search'
-    
     async def _generate_direct_response(self, question: str, response_type: str) -> str:
         """
         Generate a direct response without document retrieval.
@@ -869,49 +784,120 @@ Keep your response concise and helpful (2-3 sentences).
 Your response:"""
 
             # Use generate_simple for direct responses (not the Q&A method)
-            response = await self.llm_service.generate_simple(prompt)
+            response = await self.llm_service.generate_simple(prompt, prompt_type="short_direct")
             
             return response
             
         except Exception as e:
             logger.error(f"Direct response generation failed: {e}")
             return "Hello! I'm your document assistant. I can help you search and analyze your indexed documents. What would you like to know?"
-    
+
+    async def _get_requested_categories_for_query(
+        self, question: str, conversation_history: Optional[List[Dict[str, str]]] = None
+    ) -> List[str]:
+        """
+        Map the user question to document_category values in the index. Uses conversation
+        history so follow-ups like "total value of them?" resolve to the same category as the previous turn.
+        """
+        categories = await self.database_service.get_distinct_document_categories()
+        if not categories:
+            return []
+        context = ""
+        if conversation_history and len(conversation_history) >= 2:
+            last_two = conversation_history[-2:]
+            context = "\nPrevious exchange (use this to resolve 'them', 'those', 'these'):\n"
+            for msg in last_two:
+                role = "User" if msg.get("role") == "user" else "Assistant"
+                content = (msg.get("content") or "")[:500]
+                context += f"{role}: {content}\n"
+        prompt = f"""The user asked: "{question.strip()}"
+{context}
+Which document type(s) from this list are they asking for? Use the previous exchange if the user said "them", "those", or "these". Reply with exact value(s) from the list, comma-separated, or the single word none if none match.
+List: {', '.join(categories)}
+
+Reply:"""
+        try:
+            out = await self.llm_service.generate_simple(prompt, prompt_type="classification", max_completion_tokens=64)
+            out = (out or "").strip().lower()
+            if not out or out == "none":
+                return []
+            requested = [s.strip() for s in out.split(",") if s.strip()]
+            return [c for c in requested if c in categories]
+        except Exception as e:
+            logger.warning(f"Category resolution failed: {e}")
+            return []
+
     async def _retrieve_chunks(
         self,
         query: str,
         query_type: str,
         explicit_filename: Optional[str] = None,
         query_embedding: Optional[List[float]] = None,
+        is_aggregation: bool = False,
+        document_category_filter: Optional[List[str]] = None,
     ) -> tuple:
         """
         Single retrieval pipeline for all document queries.
-        
-        Args:
-            query: Search query
-            query_type: Query classification type
-            explicit_filename: Explicit filename if detected, None otherwise
-            query_embedding: Optional precomputed query embedding (avoids duplicate embed when run in parallel with classification)
-            
-        Returns:
-            (documents, metadatas, scores, retrieval_count, rerank_count)
+        When document_category_filter is set, fetch ALL chunks from ALL files in that category
+        so the document set is deterministic (same list for "what are our X?" and "total value of X?").
         """
-        # Get retrieval parameters
-        params = self.retrieval_config.get_retrieval_params(query_type, False)
-        
+        # Category-only path: get every document in the category (deterministic set). Fall back to semantic if no category data.
+        if document_category_filter:
+            file_paths = await self.database_service.get_file_paths_by_category(document_category_filter)
+            if explicit_filename and file_paths:
+                file_paths = [fp for fp in file_paths if explicit_filename.lower() in fp.lower()]
+            if file_paths:
+                logger.info(f"Category filter: fetching all chunks for {len(file_paths)} documents (deterministic set)")
+                documents, metadatas, scores = [], [], []
+
+                def _fetch_all_chunks_for_category():
+                    out_docs, out_metas, out_scores = [], [], []
+                    for fp in file_paths:
+                        # Try normalized path in case DB and Chroma differ (e.g. Windows \ vs /)
+                        fp_norm = os.path.normpath(fp)
+                        result = self.vector_store.get_document_chunks(fp_norm)
+                        if not result or not result.get("documents"):
+                            result = self.vector_store.get_document_chunks(fp)
+                        if not result or not result.get("documents"):
+                            continue
+                        for i, doc in enumerate(result["documents"]):
+                            if doc and (doc if isinstance(doc, str) else "").strip():
+                                out_docs.append(doc if isinstance(doc, str) else str(doc))
+                                meta = result["metadatas"][i] if result.get("metadatas") and i < len(result["metadatas"]) else {"file_path": fp}
+                                out_metas.append(meta)
+                                out_scores.append(1.0)
+                    return out_docs, out_metas, out_scores
+
+                documents, metadatas, scores = await asyncio.to_thread(_fetch_all_chunks_for_category)
+                if documents:
+                    retrieval_count = len(documents)
+                    return (documents, metadatas, scores, retrieval_count, 0)
+            # Fallback: no category data or 0 chunks (e.g. not yet indexed with category, or path mismatch) -> use semantic
+            logger.info("Category path yielded no chunks; falling back to semantic retrieval")
+
+        params = self.retrieval_config.get_retrieval_params(query_type, False, is_aggregation)
         top_k = params['top_k']
         rerank_top_k = params['rerank_top_k']
         final_top_k = params['final_top_k']
-        
         logger.info(f"Retrieval params: top_k={top_k}, rerank_top_k={rerank_top_k}, final_top_k={final_top_k}")
-        
-        # Step 1: Use precomputed embedding or embed query once; then run semantic and BM25 in parallel
+
         if query_embedding is None:
             query_embedding = self.embedding_service.encode_single_text(query)
-        semantic_task = asyncio.create_task(self.vector_store.search_similar(query_embedding, top_k))
+        where_filter = None
+        if document_category_filter:
+            where_filter = {"document_category": {"$in": document_category_filter}}
+        semantic_task = asyncio.create_task(
+            self.vector_store.search_similar(query_embedding, top_k, where=where_filter)
+        )
         bm25_task = asyncio.to_thread(self.bm25_service.search, query, top_k)
         semantic_results, bm25_results = await asyncio.gather(semantic_task, bm25_task)
-        
+        if document_category_filter and bm25_results:
+            file_paths_filter = set(await self.database_service.get_file_paths_by_category(document_category_filter))
+            if file_paths_filter:
+                bm25_results = [(did, sc, meta) for did, sc, meta in bm25_results if meta.get("file_path") in file_paths_filter]
+            else:
+                bm25_results = []
+
         if not semantic_results['documents'] or not semantic_results['documents'][0]:
             return ([], [], [], 0, 0)
         
@@ -1026,23 +1012,23 @@ Your response:"""
         
         return (documents, metadatas, scores, retrieval_count, rerank_count)
     
-    async def _get_document_listing(self) -> QueryResult:
+    async def _get_document_listing(self, question: str = "") -> QueryResult:
         """
         Get listing of all documents from database.
-        Used for document_listing queries.
+        Used for document_listing queries. Pass user question so the response can be tailored.
         """
         try:
             from database.database import AsyncSessionLocal
             from database.models import IndexedDocument
             from sqlalchemy import select
-
+            
             async with AsyncSessionLocal() as db_session:
                 stmt = select(IndexedDocument).where(
                     IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
                 )
                 result = await db_session.execute(stmt)
                 all_docs = result.scalars().all()
-
+            
             if not all_docs:
                 return QueryResult(
                     message="No documents are currently indexed.",
@@ -1053,19 +1039,22 @@ Your response:"""
                     rerank_count=0
                 )
             
-            # Build context from all documents
+            # Build context from all documents. Cap per-doc preview so all files fit under
+            # provider limit (from adapter); ensures "list all" shows every file.
             sources = []
             context_parts = []
+            listing_context_max = self.llm_service.get_max_listing_context_chars()
+            per_doc_max = max(80, listing_context_max // len(all_docs)) if all_docs else 500
             for doc in all_docs:
                 filename = Path(doc.file_path).name
-                
                 if doc.processing_status == "metadata_only":
                     preview = f"[Indexing in progress...] {filename}"
                 else:
                     preview = doc.content_preview if doc.content_preview else ""
                     if not preview and doc.chunks_count > 0:
                         preview = f"[File indexed with {doc.chunks_count} chunk(s)]"
-                
+                    if len(preview) > per_doc_max:
+                        preview = preview[:per_doc_max].rstrip() + "..."
                 context_parts.append(f"[Document: {filename}]\n{preview}")
                 sources.append({
                     "file_path": doc.file_path,
@@ -1078,22 +1067,20 @@ Your response:"""
             
             context = "\n\n---\n\n".join(context_parts)
             
-            # Generate response with comprehensive prompt
-            response_prompt = f"""You are a document assistant. The user asked to see all documents.
-
-Here are all indexed documents:
+            # Generate response tailored to the user's question (avoids same generic answer for different questions)
+            user_question_line = f'The user asked: "{question.strip()}"\n\n' if question and question.strip() else ""
+            response_prompt = f"""You are a document assistant. {user_question_line}Here are all indexed documents:
 
 {context}
 
-Provide a clear, organized list of all documents. For each document, mention:
-- The filename
-- Brief description if available
-- File type
-- Status (if still indexing)
+Tailor your response to what the user asked:
+- If they asked what kind or type of files: give a short summary by file format and document category (e.g. "You have PDFs, spreadsheets, Word docs: invoices, permits, reports, ...") and do NOT list every filename.
+- If they asked to list, show, or tell about all documents: list each document with filename, brief description, file type, and status.
+Be consistent: one style for "kind/type" (summary), another for "list/show all" (full list)."""
 
-Be comprehensive and list ALL documents mentioned above."""
-
-            response_text = await self.llm_service.generate_simple(response_prompt)
+            response_text = await self.llm_service.generate_simple(
+                response_prompt, prompt_type="document_listing"
+            )
             
             return QueryResult(
                 message=response_text,
@@ -1130,14 +1117,15 @@ Be comprehensive and list ALL documents mentioned above."""
         start_time = asyncio.get_event_loop().time()
         
         try:
-            # Run classification and query embedding in parallel to reduce latency
-            classify_task = asyncio.create_task(self._classify_query(question, conversation_history))
+            # Run routing and query embedding in parallel to reduce latency
+            route_task = asyncio.create_task(self.router.resolve(question, conversation_history))
             embed_task = asyncio.to_thread(self.embedding_service.encode_single_text, question)
-            query_type = await classify_task
+            route_result = await route_task
             query_embedding = await embed_task
+            query_type = route_result.query_type
             
             # Handle non-document queries directly (fast path)
-            if query_type in ['greeting', 'general']:
+            if route_result.route in (Route.GREETING, Route.GENERAL):
                 response_text = await self._generate_direct_response(question, query_type)
                 response_time = asyncio.get_event_loop().time() - start_time
                 
@@ -1145,7 +1133,7 @@ Be comprehensive and list ALL documents mentioned above."""
                 
                 return QueryResult(
                     message=response_text,
-                    sources=[],  # No document sources for greetings/general
+                    sources=[],
                     response_time=round(response_time, 3),
                     query_type=query_type,
                     retrieval_count=0,
@@ -1155,28 +1143,34 @@ Be comprehensive and list ALL documents mentioned above."""
             # Document query - proceed with RAG pipeline
             logger.info(f"📚 Document query detected, starting RAG pipeline...")
             
-            # Track metrics for structured logging
             retrieval_count = 0
             rerank_count = 0
-            
-            # Use original question for retrieval - modern LLMs handle context natively
             retrieval_query = question
             
             # Handle document_listing queries
-            if query_type == 'document_listing':
-                result = await self._get_document_listing()
+            if route_result.route == Route.DOCUMENT_LISTING:
+                result = await self._get_document_listing(question=question)
                 result.response_time = asyncio.get_event_loop().time() - start_time
                 return result
             
-            # Document search - check for explicit filename
+            # Document search - check for explicit filename and aggregation-style ("all X", "total value of X")
             explicit_filename = self._find_explicit_filename(question)
             selected_files = await self._select_relevant_files(question)
-            
-            # Retrieve chunks (use precomputed query_embedding from parallel step)
+            is_aggregation = is_aggregation_query(question)
+            document_category_filter = None
+            if is_aggregation:
+                logger.info("📊 Aggregation-style query detected: using higher recall and per-doc cap")
+                document_category_filter = await self._get_requested_categories_for_query(
+                    question, conversation_history=conversation_history
+                )
+                if document_category_filter:
+                    logger.info(f"📂 Filtering by category: {document_category_filter}")
             documents, metadatas, scores, retrieval_count, rerank_count = await self._retrieve_chunks(
-                retrieval_query, query_type, explicit_filename, query_embedding=query_embedding
+                retrieval_query, query_type, explicit_filename,
+                query_embedding=query_embedding,
+                is_aggregation=is_aggregation,
+                document_category_filter=document_category_filter,
             )
-            
             if not documents:
                 return QueryResult(
                     message="I don't have information about that in the current documents.",
@@ -1213,10 +1207,11 @@ Be comprehensive and list ALL documents mentioned above."""
                 
                 logger.info(f"✅ Prioritized {len(prioritized_docs)} chunks from {len(selected_files)} selected files")
             
-            # Group chunks by file
+            # Group chunks by file (normalize path so same file isn't split, e.g. different slashes)
             file_chunks = {}
             for doc, metadata, score in zip(documents, metadatas, scores):
-                file_path = metadata.get("file_path", "Unknown")
+                raw_path = metadata.get("file_path", "Unknown")
+                file_path = os.path.normpath(raw_path) if raw_path else "Unknown"
                 if file_path not in file_chunks:
                     file_chunks[file_path] = []
                 file_chunks[file_path].append({
@@ -1237,20 +1232,22 @@ Be comprehensive and list ALL documents mentioned above."""
                 files_to_process = list(selected_file_chunks.items())
                 logger.info(f"🎯 Focusing on {len(selected_file_chunks)} selected file(s)")
             
+            max_per_doc = self.retrieval_config.get_rag_max_per_doc_chars(is_aggregation)
             for file_path, chunks in files_to_process:
                 chunks.sort(key=lambda x: x["chunk_id"])
                 filename = Path(file_path).name
                 file_text = "\n".join([chunk["text"] for chunk in chunks])
-                
+                if max_per_doc > 0 and len(file_text) > max_per_doc:
+                    file_text = file_text[:max_per_doc].rstrip() + "\n[...]"
                 context_parts.append(f"[Document: {filename}]\n{file_text}")
                 
                 avg_score = sum(chunk["score"] for chunk in chunks) / len(chunks)
                 relevance_score = min(1.0, avg_score * 50)
-                
+                snippet = file_text[:300] + "..." if len(file_text) > 300 else file_text
                 sources.append({
                     "file_path": file_path,
                     "relevance_score": round(relevance_score, 3),
-                    "content_snippet": file_text[:300] + "..." if len(file_text) > 300 else file_text,
+                    "content_snippet": snippet,
                     "chunks_found": len(chunks),
                     "file_type": chunks[0]["metadata"].get("file_type", "unknown")
                 })
@@ -1258,21 +1255,19 @@ Be comprehensive and list ALL documents mentioned above."""
             sources.sort(key=lambda x: x["relevance_score"], reverse=True)
             
             # Limit sources
-            source_limit = self.retrieval_config.get_source_limit(query_type, explicit_filename is not None)
+            source_limit = self.retrieval_config.get_source_limit(query_type, explicit_filename is not None, is_aggregation)
             sources = sources[:source_limit]
             
-            # Generate response with enhanced prompt for comprehensive extraction
+            # When we filtered by category, tell the model to list every document (no omissions)
             context = "\n\n---\n\n".join(context_parts)
-            
-            # Enhanced prompt instructions are handled in LLM service, but we can add a note
+            if document_category_filter and context_parts:
+                context = f"The following {len(context_parts)} documents are all of the requested type. List every one in your answer.\n\n{context}"
             response_text = await self.llm_service.generate_response(
                 question,
                 context,
                 conversation_history=conversation_history or []
             )
-            
             response_time = asyncio.get_event_loop().time() - start_time
-            
             return QueryResult(
                 message=response_text,
                 sources=sources,
@@ -1293,7 +1288,7 @@ Be comprehensive and list ALL documents mentioned above."""
                 retrieval_count=retrieval_count if 'retrieval_count' in locals() else 0,
                 rerank_count=rerank_count if 'rerank_count' in locals() else 0
             )
-
+    
     async def query_stream(
         self, question: str, max_results: int = 15, conversation_history: list = None
     ) -> AsyncIterator[Tuple[str, Any]]:
@@ -1303,12 +1298,13 @@ Be comprehensive and list ALL documents mentioned above."""
         """
         start_time = asyncio.get_event_loop().time()
         try:
-            classify_task = asyncio.create_task(self._classify_query(question, conversation_history))
+            route_task = asyncio.create_task(self.router.resolve(question, conversation_history))
             embed_task = asyncio.to_thread(self.embedding_service.encode_single_text, question)
-            query_type = await classify_task
+            route_result = await route_task
             query_embedding = await embed_task
+            query_type = route_result.query_type
 
-            if query_type in ["greeting", "general"]:
+            if route_result.route in (Route.GREETING, Route.GENERAL):
                 yield ("meta", {"sources": [], "query_type": query_type})
                 response_text = await self._generate_direct_response(question, query_type)
                 response_time = asyncio.get_event_loop().time() - start_time
@@ -1316,8 +1312,8 @@ Be comprehensive and list ALL documents mentioned above."""
                 yield ("done", {"message": response_text, "response_time": round(response_time, 3), "query_type": query_type, "retrieval_count": 0, "rerank_count": 0})
                 return
 
-            if query_type == "document_listing":
-                result = await self._get_document_listing()
+            if route_result.route == Route.DOCUMENT_LISTING:
+                result = await self._get_document_listing(question=question)
                 result.response_time = asyncio.get_event_loop().time() - start_time
                 yield ("meta", {"sources": result.sources, "query_type": query_type})
                 yield ("token", result.message)
@@ -1329,10 +1325,21 @@ Be comprehensive and list ALL documents mentioned above."""
             rerank_count = 0
             explicit_filename = self._find_explicit_filename(question)
             selected_files = await self._select_relevant_files(question)
+            is_aggregation = is_aggregation_query(question)
+            document_category_filter = None
+            if is_aggregation:
+                logger.info("📊 Aggregation-style query detected (stream): using higher recall and per-doc cap")
+                document_category_filter = await self._get_requested_categories_for_query(
+                    question, conversation_history=conversation_history
+                )
+                if document_category_filter:
+                    logger.info(f"📂 Filtering by category: {document_category_filter}")
             documents, metadatas, scores, retrieval_count, rerank_count = await self._retrieve_chunks(
-                question, query_type, explicit_filename, query_embedding=query_embedding
+                question, query_type, explicit_filename,
+                query_embedding=query_embedding,
+                is_aggregation=is_aggregation,
+                document_category_filter=document_category_filter,
             )
-
             if not documents:
                 yield ("meta", {"sources": []})
                 msg = "I don't have information about that in the current documents."
@@ -1359,7 +1366,8 @@ Be comprehensive and list ALL documents mentioned above."""
 
             file_chunks = {}
             for doc, metadata, score in zip(documents, metadatas, scores):
-                file_path = metadata.get("file_path", "Unknown")
+                raw_path = metadata.get("file_path", "Unknown")
+                file_path = os.path.normpath(raw_path) if raw_path else "Unknown"
                 if file_path not in file_chunks:
                     file_chunks[file_path] = []
                 file_chunks[file_path].append({
@@ -1374,24 +1382,30 @@ Be comprehensive and list ALL documents mentioned above."""
             if selected_files:
                 selected_file_chunks = {fp: ch for fp, ch in file_chunks.items() if any(sf in fp for sf in selected_files)}
                 files_to_process = list(selected_file_chunks.items())
+            max_per_doc = self.retrieval_config.get_rag_max_per_doc_chars(is_aggregation)
             for file_path, chunks in files_to_process:
                 chunks.sort(key=lambda x: x["chunk_id"])
                 filename = Path(file_path).name
                 file_text = "\n".join([chunk["text"] for chunk in chunks])
+                if max_per_doc > 0 and len(file_text) > max_per_doc:
+                    file_text = file_text[:max_per_doc].rstrip() + "\n[...]"
                 context_parts.append(f"[Document: {filename}]\n{file_text}")
                 avg_score = sum(chunk["score"] for chunk in chunks) / len(chunks)
                 relevance_score = min(1.0, avg_score * 50)
+                snippet = file_text[:300] + "..." if len(file_text) > 300 else file_text
                 sources.append({
                     "file_path": file_path,
                     "relevance_score": round(relevance_score, 3),
-                    "content_snippet": file_text[:300] + "..." if len(file_text) > 300 else file_text,
+                    "content_snippet": snippet,
                     "chunks_found": len(chunks),
                     "file_type": chunks[0]["metadata"].get("file_type", "unknown"),
                 })
             sources.sort(key=lambda x: x["relevance_score"], reverse=True)
-            source_limit = self.retrieval_config.get_source_limit(query_type, explicit_filename is not None)
+            source_limit = self.retrieval_config.get_source_limit(query_type, explicit_filename is not None, is_aggregation)
             sources = sources[:source_limit]
             context = "\n\n---\n\n".join(context_parts)
+            if document_category_filter and context_parts:
+                context = f"The following {len(context_parts)} documents are all of the requested type. List every one in your answer.\n\n{context}"
 
             yield ("meta", {"sources": sources, "query_type": query_type})
             full_message_parts = []
@@ -1440,7 +1454,7 @@ Be comprehensive and list ALL documents mentioned above."""
             self.embedding_service.cleanup()
             
             self._metadata_cache.clear()
-
+            
             logger.info("DocumentProcessorOrchestrator cleaned up successfully")
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
@@ -1452,8 +1466,8 @@ Be comprehensive and list ALL documents mentioned above."""
             await self.vector_store.clear_collection()
             
             self._metadata_cache.clear()
-            self._classification_cache.clear()
-
+            self.router.clear_cache()
+            
             logger.info("Document collection cleared successfully")
         except Exception as e:
             logger.error(f"Error clearing collection: {e}")

@@ -1,5 +1,5 @@
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime
 from ..models import DocumentChunk
 
@@ -47,23 +47,23 @@ class VectorStoreService:
             logger.error(f"Failed to initialize ChromaDB: {e}")
             raise
     
-    async def batch_insert_chunks(self, chunks: List[DocumentChunk], embeddings: List[List[float]]):
-        """Batch insert chunks efficiently"""
+    async def batch_insert_chunks(
+        self,
+        chunks: List[DocumentChunk],
+        embeddings: List[List[float]],
+        document_category: Optional[str] = None,
+    ):
+        """Batch insert chunks efficiently. Optionally set document_category on each chunk for filtering."""
         if not chunks or not embeddings:
             return
         
         try:
-            # Initialize client if needed
             self._initialize_client()
-            
-            # Prepare batch data
             ids = []
             documents = []
             metadatas = []
-            
             for chunk, embedding in zip(chunks, embeddings):
                 chunk_id = f"{chunk.file_path}_chunk_{chunk.chunk_id}"
-                
                 metadata = {
                     "file_path": chunk.file_path,
                     "file_type": chunk.file_path.split('.')[-1].lower(),
@@ -72,41 +72,42 @@ class VectorStoreService:
                     "start_pos": chunk.start_pos,
                     "end_pos": chunk.end_pos,
                     "processed_at": datetime.now().isoformat(),
-                    "text_length": len(chunk.text)
+                    "text_length": len(chunk.text),
                 }
-                
+                if document_category is not None:
+                    metadata["document_category"] = document_category
                 ids.append(chunk_id)
                 documents.append(chunk.text)
                 metadatas.append(metadata)
-            
-            # Batch upsert
             self.collection.upsert(
                 ids=ids,
                 embeddings=embeddings,
                 documents=documents,
-                metadatas=metadatas
+                metadatas=metadatas,
             )
-            
             logger.info(f"Successfully inserted {len(chunks)} chunks")
-            
         except Exception as e:
             logger.error(f"Error batch inserting chunks: {e}")
             raise
     
-    async def search_similar(self, query_embedding: List[float], max_results: int = 5):
-        """Search for similar documents"""
+    async def search_similar(
+        self,
+        query_embedding: List[float],
+        max_results: int = 5,
+        where: Optional[Dict[str, Any]] = None,
+    ):
+        """Search for similar documents. Optional where filters by metadata (e.g. document_category)."""
         try:
-            # Initialize client if needed
             self._initialize_client()
-            
-            results = self.collection.query(
+            kwargs = dict(
                 query_embeddings=[query_embedding],
                 n_results=max_results,
-                include=['documents', 'metadatas', 'distances']
+                include=["documents", "metadatas", "distances"],
             )
-            
+            if where:
+                kwargs["where"] = where
+            results = self.collection.query(**kwargs)
             return results
-            
         except Exception as e:
             logger.error(f"Error searching vector store: {e}")
             raise

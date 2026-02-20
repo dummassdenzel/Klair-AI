@@ -26,13 +26,16 @@ async def test_1_llm_simple_generation():
             ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
+            groq_api_key=getattr(settings, "GROQ_API_KEY", ""),
+            groq_model=getattr(settings, "GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
             provider=settings.LLM_PROVIDER
         )
-        
         print(f"✓ LLM Service created")
         print(f"  Provider: {llm.provider}")
         print(f"  Gemini Model: {llm.gemini_model}")
         print(f"  Gemini API Key: {'SET' if llm.gemini_api_key else 'NOT SET'}")
+        print(f"  Groq Model: {getattr(llm, 'groq_model', 'N/A')}")
+        print(f"  Groq API Key: {'SET' if getattr(llm, 'groq_api_key', '') else 'NOT SET'}")
         
         # Test simple prompt
         simple_prompt = "Say only the word 'HELLO' and nothing else."
@@ -68,9 +71,10 @@ async def test_2_file_selection_prompt():
             ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
+            groq_api_key=getattr(settings, "GROQ_API_KEY", ""),
+            groq_model=getattr(settings, "GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
             provider=settings.LLM_PROVIDER
         )
-        
         # Mock file list
         file_list = """1. REQUEST LETTER.docx (type: docx)
 2. PES005.pdf (type: pdf)
@@ -153,9 +157,10 @@ async def test_3_full_orchestrator_selection():
             ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
+            groq_api_key=getattr(settings, "GROQ_API_KEY", ""),
+            groq_model=getattr(settings, "GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
             llm_provider=settings.LLM_PROVIDER
         )
-        
         print(f"✓ Orchestrator created")
 
         # Check if files are indexed (trie has entries; stats from DB)
@@ -209,9 +214,10 @@ async def test_4_negation_query():
             ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
+            groq_api_key=getattr(settings, "GROQ_API_KEY", ""),
+            groq_model=getattr(settings, "GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
             provider=settings.LLM_PROVIDER
         )
-        
         # Mock file list with clear receipts and non-receipts
         file_list = """1. REQUEST LETTER.docx (type: docx)
 2. PES005 delivery receipt.pdf (type: pdf)
@@ -342,9 +348,10 @@ async def test_6_query_classification():
             ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
+            groq_api_key=getattr(settings, "GROQ_API_KEY", ""),
+            groq_model=getattr(settings, "GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
             llm_provider=settings.LLM_PROVIDER
         )
-        
         test_queries = [
             ("hello!", "greeting"),
             ("hi there", "greeting"),
@@ -360,11 +367,14 @@ async def test_6_query_classification():
         
         results = []
         for query, expected_type in test_queries:
-            classification = await orchestrator._classify_query(query)
-            correct = classification == expected_type
+            route_result = await orchestrator.router.resolve(query)
+            classification = route_result.query_type
+            correct = classification == expected_type or (
+                expected_type == "document" and classification in ("document_search", "document_listing")
+            )
             status = "✅" if correct else "❌"
             results.append(correct)
-            
+
             print(f"{status} '{query}' → {classification} (expected: {expected_type})")
         
         accuracy = sum(results) / len(results) * 100

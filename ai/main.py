@@ -150,6 +150,8 @@ async def prewarm_services():
             ollama_model=config.ollama_model,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
+            groq_api_key=settings.GROQ_API_KEY,
+            groq_model=settings.GROQ_MODEL,
             llm_provider=settings.LLM_PROVIDER
         )
         
@@ -320,6 +322,8 @@ async def set_directory(request: Request):
             ollama_model=config.ollama_model,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
+            groq_api_key=settings.GROQ_API_KEY,
+            groq_model=settings.GROQ_MODEL,
             llm_provider=settings.LLM_PROVIDER
         )
 
@@ -664,6 +668,8 @@ async def get_status(request: Request):
             provider = (settings.LLM_PROVIDER or "ollama").lower()
             if provider == "gemini":
                 model_name = settings.GEMINI_MODEL or "gemini-2.5-pro"
+            elif provider == "groq":
+                model_name = settings.GROQ_MODEL or "meta-llama/llama-4-scout-17b-16e-instruct"
             else:
                 model_name = getattr(config, "ollama_model", "tinyllama")
             status_info["llm"] = {

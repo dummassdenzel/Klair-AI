@@ -3,8 +3,29 @@ Configuration for query processing and retrieval parameters.
 Externalizes all magic numbers and retrieval settings.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Dict
+
+
+def is_aggregation_query(question: str) -> bool:
+    """
+    Heuristic: user is asking for all of a type (total over X, list all X, what are our X).
+    For these we need high recall, not just top-k relevance. Domain-agnostic.
+    """
+    if not question or not question.strip():
+        return False
+    q = question.strip().lower()
+    # "total value of (all) X", "total of all X", "sum of (all) X"
+    if re.search(r"total\s+(value\s+)?of\s+(all\s+)?", q) or re.search(r"sum\s+of\s+(all\s+)?", q):
+        return True
+    # "list all X"
+    if re.search(r"list\s+all\s+", q):
+        return True
+    # "what are our X?", "which X do we have?" — generic: "our" + something (receipts, permits, invoices, documents, etc.)
+    if re.search(r"what\s+are\s+our\s+\w+", q) or re.search(r"which\s+(are\s+)?(our\s+)?\w+", q):
+        return True
+    return False
 
 
 @dataclass
@@ -26,6 +47,12 @@ class RetrievalConfig:
     comprehensive_rerank_top_k: int = 20   # Rerank fewer for speed (was 30); still good recall
     comprehensive_final_top_k: int = 20
     
+    # Aggregation-style ("all X", "total value of X") — higher recall so we don't miss documents
+    aggregation_top_k: int = 100
+    aggregation_rerank_top_k: int = 60
+    aggregation_final_top_k: int = 50
+    aggregation_max_sources: int = 50
+    
     # Specific file queries
     specific_top_k: int = 30
     specific_rerank_top_k: int = 20
@@ -43,13 +70,18 @@ class RetrievalConfig:
     max_sources_general: int = 25   # e.g. "list all delivery notes" — allow more so response can include all relevant files
     max_sources_specific: int = 20  # when user selected specific file(s)
     
-    def get_retrieval_params(self, query_type: str, is_listing: bool = False) -> Dict[str, int]:
+    # Per-document cap (chars) when building RAG context so we fit more docs and avoid dropping from tail
+    rag_max_per_doc_chars: int = 0  # 0 = no cap for normal queries
+    aggregation_max_per_doc_chars: int = 2000  # cap per doc for aggregation so more docs fit in context
+    
+    def get_retrieval_params(self, query_type: str, is_listing: bool = False, is_aggregation: bool = False) -> Dict[str, int]:
         """
         Get retrieval parameters based on query type.
         
         Args:
             query_type: 'greeting', 'general', 'document_listing', or 'document_search'
             is_listing: Whether this is a document listing query
+            is_aggregation: Whether user asked for "all X" / "total value of X" (high recall)
             
         Returns:
             Dict with top_k, rerank_top_k, final_top_k
@@ -68,21 +100,35 @@ class RetrievalConfig:
                 'final_top_k': self.listing_final_top_k
             }
         
+        if is_aggregation:
+            return {
+                'top_k': self.aggregation_top_k,
+                'rerank_top_k': self.aggregation_rerank_top_k,
+                'final_top_k': self.aggregation_final_top_k
+            }
+        
         # For document_search, we'll use comprehensive params for enumeration-like queries
-        # This is determined by prompt analysis, not pattern matching
         return {
             'top_k': self.comprehensive_top_k,
             'rerank_top_k': self.comprehensive_rerank_top_k,
             'final_top_k': self.comprehensive_final_top_k
         }
     
-    def get_source_limit(self, query_type: str, has_selected_files: bool) -> int:
+    def get_source_limit(self, query_type: str, has_selected_files: bool, is_aggregation: bool = False) -> int:
         """Get maximum number of sources to return"""
         if query_type == 'document_listing':
             return 1000  # No practical limit for listing
+        if is_aggregation:
+            return self.aggregation_max_sources
         if has_selected_files:
             return self.max_sources_specific
         return self.max_sources_general
+    
+    def get_rag_max_per_doc_chars(self, is_aggregation: bool = False) -> int:
+        """Max chars per document when building RAG context (0 = no cap). Fits more docs, avoids tail truncation."""
+        if is_aggregation and self.aggregation_max_per_doc_chars > 0:
+            return self.aggregation_max_per_doc_chars
+        return self.rag_max_per_doc_chars
 
 
 # Default configuration instance

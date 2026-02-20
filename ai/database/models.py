@@ -40,6 +40,7 @@ class IndexedDocument(Base):
     file_size = Column(BigInteger)
     last_modified = Column(DateTime, index=True)
     content_preview = Column(Text)  # First 500 chars for preview
+    document_category = Column(String, nullable=True, index=True)  # Semantic type: invoice, permit, receipt, report, etc.
     chunks_count = Column(Integer, default=0)
     processing_status = Column(String, default="indexed", index=True)  # indexed, error, processing
     indexed_at = Column(DateTime, default=datetime.utcnow, index=True)

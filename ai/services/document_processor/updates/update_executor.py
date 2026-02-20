@@ -11,7 +11,7 @@ Executes document updates with:
 
 import logging
 import asyncio
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Callable, Awaitable
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -62,19 +62,12 @@ class UpdateExecutor:
         database_service: DatabaseService,
         chunk_differ: ChunkDiffer,
         file_validator: Optional[FileValidator] = None,
+        document_classifier: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
     ):
         """
         Initialize UpdateExecutor
-        
-        Args:
-            vector_store: Vector store service
-            bm25_service: BM25 keyword search service
-            text_extractor: Text extraction service
-            chunker: Document chunking service
-            embedding_service: Embedding generation service
-            database_service: Database service
-            chunk_differ: Chunk differ for incremental updates
-            file_validator: Optional shared FileValidator (uses default if not provided)
+
+        document_classifier: Optional async (content_preview, file_path) -> document_category for indexing.
         """
         self.vector_store = vector_store
         self.bm25_service = bm25_service
@@ -84,6 +77,7 @@ class UpdateExecutor:
         self.database_service = database_service
         self.chunk_differ = chunk_differ
         self._file_validator = file_validator if file_validator is not None else FileValidator()
+        self.document_classifier = document_classifier
 
         logger.info("UpdateExecutor initialized")
 
@@ -270,12 +264,13 @@ class UpdateExecutor:
                 await self.database_service.store_document_metadata(
                     file_path=checkpoint.file_path,
                     file_hash=checkpoint.old_metadata['file_hash'],
-                    file_type="",  # Not stored in checkpoint, will be updated on next successful update
+                    file_type="",
                     file_size=checkpoint.old_metadata['file_size'],
-                    last_modified=datetime.utcnow(),  # Approximate
+                    last_modified=datetime.utcnow(),
                     content_preview=checkpoint.old_metadata.get('content_preview', ''),
                     chunks_count=checkpoint.old_metadata.get('chunks_count', 0),
-                    processing_status=checkpoint.old_metadata.get('processing_status', 'indexed')
+                    processing_status=checkpoint.old_metadata.get('processing_status', 'indexed'),
+                    document_category=checkpoint.old_metadata.get('document_category'),
                 )
             
             logger.info(f"Rollback completed for {checkpoint.file_path}")
@@ -306,13 +301,18 @@ class UpdateExecutor:
         
         # Create chunks
         chunks = self.chunker.create_chunks(text, task.file_path)
-        
+        content_preview = text[:500]
+        document_category = None
+        if self.document_classifier:
+            try:
+                document_category = await self.document_classifier(content_preview, task.file_path)
+            except Exception as e:
+                logger.warning(f"Document classification failed for {task.file_path}: {e}")
+
         # Generate embeddings
         embeddings = self.embedding_service.encode_texts([chunk.text for chunk in chunks])
-        
-        # Insert chunks
-        await self.vector_store.batch_insert_chunks(chunks, embeddings)
-        
+        await self.vector_store.batch_insert_chunks(chunks, embeddings, document_category=document_category)
+
         # Update BM25
         bm25_documents = [
             {
@@ -326,8 +326,7 @@ class UpdateExecutor:
             for chunk in chunks
         ]
         self.bm25_service.add_documents(bm25_documents)
-        
-        # Update database (use shared FileValidator)
+
         file_metadata, file_hash = self._get_file_metadata_and_hash(task.file_path)
         await self.database_service.store_document_metadata(
             file_path=task.file_path,
@@ -335,9 +334,10 @@ class UpdateExecutor:
             file_type=file_metadata["file_type"],
             file_size=file_metadata["size_bytes"],
             last_modified=file_metadata["modified_at"],
-            content_preview=text[:500],
+            content_preview=content_preview,
             chunks_count=len(chunks),
-            processing_status="indexed"
+            processing_status="indexed",
+            document_category=document_category,
         )
         
         logger.info(f"Full re-index completed: {len(chunks)} chunks")
@@ -399,28 +399,28 @@ class UpdateExecutor:
         for added_chunk in diff_result.added_chunks:
             all_chunks_to_add.append(added_chunk)
         
-        # Generate embeddings for all chunks
+        content_preview = all_chunks_to_add[0].text[:500] if all_chunks_to_add else ""
+        document_category = None
+        if self.document_classifier and content_preview:
+            try:
+                document_category = await self.document_classifier(content_preview, task.file_path)
+            except Exception as e:
+                logger.warning(f"Document classification failed for {task.file_path}: {e}")
+
         embeddings = self.embedding_service.encode_texts([chunk.text for chunk in all_chunks_to_add])
-        
-        # Insert all chunks
-        await self.vector_store.batch_insert_chunks(all_chunks_to_add, embeddings)
+        await self.vector_store.batch_insert_chunks(all_chunks_to_add, embeddings, document_category=document_category)
         chunks_updated = len(all_chunks_to_add)
-        
-        # Update BM25
+
         bm25_documents = [
             {
                 'id': f"{chunk.file_path}:{chunk.chunk_id}",
                 'text': chunk.text,
-                'metadata': {
-                    'file_path': chunk.file_path,
-                    'chunk_id': chunk.chunk_id
-                }
+                'metadata': {'file_path': chunk.file_path, 'chunk_id': chunk.chunk_id}
             }
             for chunk in all_chunks_to_add
         ]
         self.bm25_service.add_documents(bm25_documents)
-        
-        # Update database (use shared FileValidator)
+
         file_metadata, file_hash = self._get_file_metadata_and_hash(task.file_path)
         await self.database_service.store_document_metadata(
             file_path=task.file_path,
@@ -428,11 +428,11 @@ class UpdateExecutor:
             file_type=file_metadata["file_type"],
             file_size=file_metadata["size_bytes"],
             last_modified=file_metadata["modified_at"],
-            content_preview=all_chunks_to_add[0].text[:500] if all_chunks_to_add else "",
+            content_preview=content_preview,
             chunks_count=len(all_chunks_to_add),
-            processing_status="indexed"
+            processing_status="indexed",
+            document_category=document_category,
         )
-        
         logger.info(f"Chunk update completed: {chunks_updated} chunks")
         return chunks_updated
     

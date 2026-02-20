@@ -69,7 +69,8 @@ class DatabaseService:
         last_modified: datetime,
         content_preview: str = "",
         chunks_count: int = 0,
-        processing_status: str = "indexed"
+        processing_status: str = "indexed",
+        document_category: Optional[str] = None,
     ) -> IndexedDocument:
         """Store or update document metadata"""
         async with AsyncSessionLocal() as session:
@@ -77,18 +78,21 @@ class DatabaseService:
                 stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
                 result = await session.execute(stmt)
                 existing_doc = result.scalar_one_or_none()
+                values = dict(
+                    file_hash=file_hash,
+                    file_size=file_size,
+                    last_modified=last_modified,
+                    content_preview=content_preview,
+                    chunks_count=chunks_count,
+                    last_processed=datetime.utcnow(),
+                    processing_status=processing_status,
+                )
+                if document_category is not None:
+                    values["document_category"] = document_category
                 if existing_doc:
                     stmt = update(IndexedDocument).where(
                         IndexedDocument.file_path == file_path
-                    ).values(
-                        file_hash=file_hash,
-                        file_size=file_size,
-                        last_modified=last_modified,
-                        content_preview=content_preview,
-                        chunks_count=chunks_count,
-                        last_processed=datetime.utcnow(),
-                        processing_status=processing_status
-                    )
+                    ).values(**values)
                     await session.execute(stmt)
                     await session.commit()
                     await session.refresh(existing_doc)
@@ -101,7 +105,8 @@ class DatabaseService:
                     last_modified=last_modified,
                     content_preview=content_preview,
                     chunks_count=chunks_count,
-                    processing_status=processing_status
+                    processing_status=processing_status,
+                    document_category=document_category,
                 )
                 session.add(doc)
                 await session.commit()
@@ -373,7 +378,29 @@ class DatabaseService:
             ).order_by(desc(IndexedDocument.indexed_at))
             result = await session.execute(stmt)
             return result.scalars().all()
-    
+
+    async def get_file_paths_by_category(self, categories: List[str]) -> List[str]:
+        """Get file paths for documents whose document_category is in the given list."""
+        if not categories:
+            return []
+        async with AsyncSessionLocal() as session:
+            stmt = select(IndexedDocument.file_path).where(
+                IndexedDocument.document_category.in_(categories),
+                IndexedDocument.processing_status.in_(["indexed", "metadata_only"]),
+            )
+            result = await session.execute(stmt)
+            return [row[0] for row in result.fetchall()]
+
+    async def get_distinct_document_categories(self) -> List[str]:
+        """Get distinct non-null document_category values (for query-time category mapping)."""
+        async with AsyncSessionLocal() as session:
+            stmt = select(IndexedDocument.document_category).where(
+                IndexedDocument.document_category.isnot(None),
+                IndexedDocument.document_category != "",
+            ).distinct()
+            result = await session.execute(stmt)
+            return [row[0] for row in result.fetchall() if row[0]]
+
     async def get_recent_documents(self, days: int = 7) -> List[IndexedDocument]:
         """Get documents indexed in the last N days"""
         async with AsyncSessionLocal() as session:
