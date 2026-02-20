@@ -2,16 +2,18 @@
 Database service layer for document processor integration
 """
 
+import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func, and_, or_, desc
 from sqlalchemy.sql.expression import literal
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
-import uuid
 
 from .models import ChatSession, ChatMessage, IndexedDocument, DocumentChatUsage
 from .database import AsyncSessionLocal
 from utils import utc_isoformat
+
+logger = logging.getLogger(__name__)
 
 class DatabaseService:
     """Service for database operations"""
@@ -379,28 +381,6 @@ class DatabaseService:
             result = await session.execute(stmt)
             return result.scalars().all()
 
-    async def get_file_paths_by_category(self, categories: List[str]) -> List[str]:
-        """Get file paths for documents whose document_category is in the given list."""
-        if not categories:
-            return []
-        async with AsyncSessionLocal() as session:
-            stmt = select(IndexedDocument.file_path).where(
-                IndexedDocument.document_category.in_(categories),
-                IndexedDocument.processing_status.in_(["indexed", "metadata_only"]),
-            )
-            result = await session.execute(stmt)
-            return [row[0] for row in result.fetchall()]
-
-    async def get_distinct_document_categories(self) -> List[str]:
-        """Get distinct non-null document_category values (for query-time category mapping)."""
-        async with AsyncSessionLocal() as session:
-            stmt = select(IndexedDocument.document_category).where(
-                IndexedDocument.document_category.isnot(None),
-                IndexedDocument.document_category != "",
-            ).distinct()
-            result = await session.execute(stmt)
-            return [row[0] for row in result.fetchall() if row[0]]
-
     async def get_recent_documents(self, days: int = 7) -> List[IndexedDocument]:
         """Get documents indexed in the last N days"""
         async with AsyncSessionLocal() as session:
@@ -481,7 +461,6 @@ class DatabaseService:
                 select(
                     IndexedDocument.processing_status,
                     func.count(IndexedDocument.id),
-                    func.avg(func.extract('epoch', IndexedDocument.last_processed - IndexedDocument.indexed_at))
                 ).group_by(IndexedDocument.processing_status)
             )
             size_stats = await session.execute(
@@ -489,7 +468,7 @@ class DatabaseService:
                     func.avg(IndexedDocument.file_size),
                     func.min(IndexedDocument.file_size),
                     func.max(IndexedDocument.file_size),
-                    func.sum(IndexedDocument.file_size)
+                    func.sum(IndexedDocument.file_size),
                 )
             )
             chunk_stats = await session.execute(
@@ -497,32 +476,34 @@ class DatabaseService:
                     func.avg(IndexedDocument.chunks_count),
                     func.min(IndexedDocument.chunks_count),
                     func.max(IndexedDocument.chunks_count),
-                    func.sum(IndexedDocument.chunks_count)
+                    func.sum(IndexedDocument.chunks_count),
                 )
             )
             size_row = size_stats.first()
             chunk_row = chunk_stats.first()
+
+            def _safe(row, idx, as_float=False):
+                if not row or idx >= len(row) or row[idx] is None:
+                    return 0.0 if as_float else 0
+                return float(row[idx]) if as_float else row[idx]
+
             return {
                 "processing_stats": [
-                    {
-                        "status": stat[0],
-                        "count": stat[1],
-                        "avg_processing_time_seconds": float(stat[2]) if stat[2] else 0
-                    }
+                    {"status": stat[0], "count": stat[1]}
                     for stat in processing_stats.all()
                 ],
                 "file_size_stats": {
-                    "average_bytes": float(size_row[0]) if size_row and size_row[0] is not None else 0,
-                    "min_bytes": size_row[1] if size_row and len(size_row) > 1 and size_row[1] is not None else 0,
-                    "max_bytes": size_row[2] if size_row and len(size_row) > 2 and size_row[2] is not None else 0,
-                    "total_bytes": size_row[3] if size_row and len(size_row) > 3 and size_row[3] is not None else 0
+                    "average_bytes": _safe(size_row, 0, as_float=True),
+                    "min_bytes": _safe(size_row, 1),
+                    "max_bytes": _safe(size_row, 2),
+                    "total_bytes": _safe(size_row, 3),
                 },
                 "chunk_stats": {
-                    "average_chunks": float(chunk_row[0]) if chunk_row and chunk_row[0] is not None else 0,
-                    "min_chunks": chunk_row[1] if chunk_row and len(chunk_row) > 1 and chunk_row[1] is not None else 0,
-                    "max_chunks": chunk_row[2] if chunk_row and len(chunk_row) > 2 and chunk_row[2] is not None else 0,
-                    "total_chunks": chunk_row[3] if chunk_row and len(chunk_row) > 3 and chunk_row[3] is not None else 0
-                }
+                    "average_chunks": _safe(chunk_row, 0, as_float=True),
+                    "min_chunks": _safe(chunk_row, 1),
+                    "max_chunks": _safe(chunk_row, 2),
+                    "total_chunks": _safe(chunk_row, 3),
+                },
             }
     
     async def get_chat_analytics(self, days: int = 30) -> Dict[str, Any]:
@@ -584,5 +565,5 @@ class DatabaseService:
                 result = await session.execute(stmt)
                 return result.scalar_one_or_none()
         except Exception as e:
-            print(f"Error getting chat session {session_id}: {e}")
+            logger.error(f"Error getting chat session {session_id}: {e}")
             return None

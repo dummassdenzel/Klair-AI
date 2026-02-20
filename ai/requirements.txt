@@ -5,8 +5,7 @@ starlette==0.47.2
 
 # Database
 alembic==1.16.4
-asyncpg==0.30.0
-psycopg2-binary==2.9.10
+aiosqlite>=0.20.0
 sqlalchemy==2.0.43
 
 # ChromaDB and embeddings
@@ -50,8 +49,6 @@ numpy==2.3.2
 torch==2.8.0
 transformers==4.55.2
 
-# Rate limiting
-slowapi==0.1.9
 
 # Testing
 pytest==9.0.2

@@ -29,8 +29,9 @@ env/
 __pycache__/
 *.pyc
 
-# Generated database
+# Generated databases
 chroma_db/
+*.db
 
 # Environment variables (important for security)
 *.env

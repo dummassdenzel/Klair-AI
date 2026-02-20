@@ -365,69 +365,29 @@ class LLMService:
             logger.error(f"Error generating simple LLM response: {e}")
             return "I couldn't generate a response due to an error."
 
-    async def classify_document_type(self, content_preview: str, filename: str) -> str:
-        """
-        Classify the primary document type (domain-agnostic). Returns a short label
-        (e.g. invoice, permit, receipt, report, form) for indexing and filtering.
-        """
-        if not content_preview or not content_preview.strip():
-            return "unknown"
-        preview = (content_preview[:800] + "...") if len(content_preview) > 800 else content_preview
-        prompt = f"""Based only on the document content below, what is the primary type of this document?
-Reply with a single short phrase (1-4 words), for example: invoice, permit, receipt, report, form, certificate, contract, letter, declaration, list, spreadsheet.
-Do not explain. Only output the type.
-
-Filename: {filename}
-
-Content preview:
-{preview}
-
-Type:"""
-        try:
-            out = await self.generate_simple(prompt, prompt_type=PROMPT_TYPE_CLASSIFICATION, max_completion_tokens=32)
-            label = (out or "unknown").strip().lower()
-            if len(label) > 80:
-                label = label[:80]
-            return label or "unknown"
-        except Exception as e:
-            logger.warning(f"Document classification failed: {e}")
-            return "unknown"
-
     def _build_prompt(self, query: str, context: str, conversation_history: list = None) -> str:
-        """Build the prompt for the LLM with conversation history"""
+        """Build the prompt for the LLM with conversation history."""
         conversation_history = conversation_history or []
-        
-        # Build conversation context if history exists
+
         conversation_context = ""
         if conversation_history:
             conversation_context = "\n\nPrevious conversation:\n"
             for msg in conversation_history:
                 role = "User" if msg["role"] == "user" else "Assistant"
                 conversation_context += f"{role}: {msg['content']}\n"
-            conversation_context += "\n"
-        
-        return f"""You are a helpful AI assistant that answers questions based on the provided document context.
 
-Each document is labeled with its filename in the format [Document: filename.ext].
+        return f"""Answer the question using ONLY the document context below. Cite sources as [Document: filename].
 {conversation_context}
-Context information:
+Context:
 {context}
 
 Question: {query}
 
-Instructions:
-- Answer based on the DOCUMENT CONTENT, not just filenames
-- Read the actual text in each document to understand what it contains
-- **COMPREHENSIVE EXTRACTION**: If the question asks for a list, be thorough and include ALL items mentioned across ALL provided document chunks
-- **COMBINE INFORMATION**: If information appears in multiple chunks of the same document, combine it into a complete answer
-- **SCOPE BY DOCUMENT TYPE**: When the user asks for a specific document type (e.g. "our invoices", "our permits", "our reports"), include ONLY documents whose PRIMARY purpose is that type. Exclude documents that are a different type but merely mention or reference that type. Decide from the document's main heading, title, or structure—not from a single phrase.
-- **LIST ALL WHEN ASKED**: When the user asks for a list of a document type (e.g. "what are our delivery receipts?", "list our permits"), you MUST list every matching document from the context. The context has already been filtered to that type—so list each [Document: filename] provided; do not summarize or omit any. If there are 20 documents in the context, your answer must include all 20.
-- **TOTALS AND SUMS**: When the user asks for a total or sum over a document type: (1) include only documents that are actually of that type (primary purpose), (2) list each document once with its value, (3) use one currency for the total and state any conversion assumption, (4) do not double-count or include non-matching documents.
-- Include the [Document: filename] label when referencing documents in your answer
-- Use previous conversation context to understand follow-up questions (e.g., "that file" refers to previously mentioned documents)
-- If the information is not in the context, say "I don't have information about that in the current documents"
-- Be thorough - check all provided documents carefully
-- Use specific details and quotes from the content when relevant
+Rules:
+- Combine information from multiple chunks of the same document into one answer
+- When asked for a list, include every matching item from the context
+- If the context doesn't contain the answer, say so
+- Use specific details and quotes when relevant
 
 Answer:"""
     

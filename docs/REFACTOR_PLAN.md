@@ -47,12 +47,15 @@ Steps:
 | **What changes** | Delete `tenant_registry.py`. Simplify every endpoint that currently calls `Depends(require_tenant_context)`. |
 
 Steps:
-- [ ] Create a simple `AppState` dataclass holding `doc_processor`, `file_monitor`, `current_directory`
-- [ ] Store it on `app.state` directly (no registry, no LRU, no headers)
-- [ ] Update all endpoints to read from `app.state` instead of tenant context
-- [ ] Remove `X-Tenant-ID` header logic from frontend API client
-- [ ] Delete `tenant_registry.py`
-- [ ] Remove `get_tenant_persist_dir` — use a single `chroma_db/` directory
+- [x] Create a simple `AppState` dataclass holding `doc_processor`, `file_monitor`, `current_directory`
+- [x] Store it on `app.state` directly (no registry, no LRU, no headers)
+- [x] Update all endpoints to read from `app.state` instead of tenant context
+- [x] Remove `X-Tenant-ID` header logic from frontend API client (confirmed: none existed)
+- [x] Delete `tenant_registry.py`
+- [x] Remove `get_tenant_persist_dir` — use a single `chroma_db/` directory
+- [x] Update `query_cache.py` to remove tenant_id from cache key
+- [x] Delete `tests/test_tenant_registry.py`
+- [x] Update `tests/test_query_cache.py` for new signature
 
 ### 1.3 Remove Rate Limiting
 
@@ -62,9 +65,9 @@ Steps:
 | **Solution** | Delete all `slowapi` references. |
 
 Steps:
-- [ ] Remove `slowapi` imports, middleware, exception handler from `main.py`
-- [ ] Remove `@limiter.limit(...)` decorators from all endpoints
-- [ ] Remove `slowapi` from `requirements.txt`
+- [x] Remove `slowapi` imports, middleware, exception handler from `main.py`
+- [x] Remove `@limiter.limit(...)` decorators from all endpoints (5 total)
+- [x] Remove `slowapi` from `requirements.txt`
 
 ### 1.4 Use Tauri Native Dialog Instead of tkinter
 
@@ -74,10 +77,11 @@ Steps:
 | **Solution** | Use `@tauri-apps/plugin-dialog` on the frontend. Send the selected path to `/api/set-directory`. |
 
 Steps:
-- [ ] Install `@tauri-apps/plugin-dialog` in the Tauri frontend
-- [ ] Add directory picker call in the frontend (e.g., `DirectorySelectionModal.svelte`)
-- [ ] Remove the `/api/select-directory` endpoint entirely from `main.py`
-- [ ] Remove `tkinter` usage from the backend
+- [x] Install `@tauri-apps/plugin-dialog` in the Tauri frontend (JS + Rust + capabilities)
+- [x] Rewrite `DirectorySelectionModal.svelte` to use Tauri native dialog (`open()`)
+- [x] Remove `selectDirectory()` from `services.ts`
+- [x] Remove the `/api/select-directory` endpoint entirely from `main.py`
+- [x] Remove `tkinter` usage and unused `BASE_SUPPORTED_EXTENSIONS` import from backend
 
 ---
 
@@ -98,14 +102,15 @@ saving 2–3 calls per user message adds up to thousands of saved calls per day 
 | **Token savings** | ~300 tokens per query × every query = massive. |
 
 Steps:
-- [ ] Rewrite `QueryClassifier.classify()` as a pure heuristic function (no LLM)
-- [ ] Keep the fast-path greeting detection, expand it
-- [ ] Add keyword patterns for `general` ("what can you do", "how does this work")
-- [ ] Add keyword patterns for `document_listing` ("list all", "show files", "what documents")
-- [ ] Default everything else to `document_search`
-- [ ] Remove `generate_simple` call from the classifier
-- [ ] Remove classification cache (no longer needed if classification is instant)
-- [ ] Delete the LLM-based classification prompt entirely
+- [x] Rewrite `QueryClassifier.classify()` as a pure heuristic function (no LLM)
+- [x] Keep the fast-path greeting detection, expand it (multi-word greetings, "hey there", etc.)
+- [x] Add regex patterns for `general` ("what can you do", "how does this work", "help", etc.)
+- [x] Add regex patterns for `document_listing` with `$`-anchored boundaries to avoid matching filtered subsets
+- [x] Default everything else to `document_search`
+- [x] Remove `generate_simple` call from the classifier
+- [x] Remove classification cache (no longer needed — classification is instant)
+- [x] Delete the LLM-based classification prompt entirely
+- [x] Verified 22/22 test cases pass (greetings, general, listing, search, edge cases)
 
 ### 2.2 Remove LLM Document Type Classification During Indexing
 
@@ -116,11 +121,15 @@ Steps:
 | **Token savings** | ~200 tokens per file × number of files in directory. |
 
 Steps:
-- [ ] Remove `classify_document_type()` call from `add_document()` in orchestrator
-- [ ] Remove `document_category` from the indexing pipeline (keep the DB column for future use)
-- [ ] Remove `_get_requested_categories_for_query()` LLM call from query pipeline
-- [ ] Remove `document_category_filter` logic from `_retrieve_chunks()` (simplify retrieval)
-- [ ] Keep the `document_category` DB column — can be populated later by cheaper means
+- [x] Remove `classify_document_type()` call from `add_document()` in orchestrator
+- [x] Remove `document_category` from the indexing pipeline (keep the DB column for future use)
+- [x] Remove `_get_requested_categories_for_query()` LLM call from query pipeline
+- [x] Remove `document_category_filter` logic from `_retrieve_chunks()` (simplify retrieval)
+- [x] Delete `classify_document_type()` from `llm_service.py`
+- [x] Remove `document_classifier` from `UpdateExecutor` (constructor + all usage)
+- [x] Remove `document_category` param from `vector_store.batch_insert_chunks()`
+- [x] Delete `get_file_paths_by_category()` and `get_distinct_document_categories()` from DB service
+- [x] Keep the `document_category` DB column — can be populated later by cheaper means
 
 ### 2.3 Remove Pre-Warming LLM Call
 
@@ -130,10 +139,11 @@ Steps:
 | **Solution** | Keep embedding model warm-up only (load the model into memory). Remove the LLM call. |
 
 Steps:
-- [ ] Remove the LLM `generate_response` call from `prewarm_services()`
-- [ ] Remove the temporary `DocumentProcessorOrchestrator` creation
-- [ ] Keep only the embedding model load (or move it to first-use lazy initialization)
-- [ ] Simplify `prewarm_services()` to ~10 lines or remove entirely
+- [x] Remove the LLM `generate_response` call from `prewarm_services()`
+- [x] Remove the temporary `DocumentProcessorOrchestrator` creation
+- [x] Keep only the embedding model load (direct `EmbeddingService` instantiation)
+- [x] Simplified `prewarm_services()` from ~40 lines to 6 lines
+- [x] Removed unused `prewarming_complete` global flag
 
 ### 2.4 Optimize the RAG Prompt
 
@@ -143,9 +153,9 @@ Steps:
 | **Solution** | Trim to essentials. The model already knows how to answer questions from context. |
 
 Steps:
-- [ ] Reduce `_build_prompt()` instruction section from ~15 bullet points to ~5
-- [ ] Remove domain-specific instructions (invoices, permits, receipts)
-- [ ] Keep only: answer from context, cite documents, say "I don't know" when appropriate
+- [x] Reduce `_build_prompt()` instruction section from 12 bullet points to 4
+- [x] Remove domain-specific instructions (invoices, permits, receipts, totals/sums, scope by type)
+- [x] Keep only: answer from context, cite documents, combine chunks, say "I don't know"
 - [ ] Test quality — a shorter prompt often performs equally or better
 
 ---
@@ -165,11 +175,11 @@ future changes are fast and safe. This phase is about developer velocity.
 | **Solution** | Extract a `_retrieve_and_build_context()` method. Both methods call it, then diverge only at response generation (batch vs stream). |
 
 Steps:
-- [ ] Create `_retrieve_and_build_context(question, conversation_history)` → returns `(context, sources, retrieval_count, rerank_count, query_type)`
-- [ ] Refactor `query()` to call it then `generate_response()`
-- [ ] Refactor `query_stream()` to call it then `generate_response_stream()`
-- [ ] Delete all duplicated retrieval/context code
-- [ ] Expected reduction: ~150 lines
+- [x] Create `_retrieve_and_build_context(question, query_type, query_embedding)` → returns dict with context, sources, retrieval_count, rerank_count (or None)
+- [x] Refactor `query()` to call it then `generate_response()`
+- [x] Refactor `query_stream()` to call it then `generate_response_stream()`
+- [x] Delete all duplicated retrieval/context code
+- [x] Reduction: **112 lines** (1374 → 1262)
 
 ### 3.2 Split main.py into FastAPI Routers
 
@@ -189,12 +199,12 @@ ai/
 ```
 
 Steps:
-- [ ] Create `ai/routers/` directory
-- [ ] Move chat endpoints to `routers/chat.py`
-- [ ] Move document endpoints to `routers/documents.py`
-- [ ] Move system/status endpoints to `routers/system.py`
-- [ ] Wire routers into `main.py` with `app.include_router()`
-- [ ] `main.py` should be under 80 lines when done
+- [x] Create `ai/routers/` directory and `ai/dependencies.py` (shared singletons)
+- [x] Move chat + session endpoints to `routers/chat.py` (302 lines)
+- [x] Move document/directory/pptx/update endpoints to `routers/documents.py` (470 lines)
+- [x] Move status/config/metrics/analytics endpoints to `routers/system.py` (211 lines)
+- [x] Wire routers into `main.py` with `app.include_router()`
+- [x] `main.py` reduced from **1381 → 93 lines**
 
 ### 3.3 Deduplicate document-chat linking logic
 

@@ -11,7 +11,7 @@ Executes document updates with:
 
 import logging
 import asyncio
-from typing import Dict, Optional, List, Tuple, Callable, Awaitable
+from typing import Dict, Optional, List, Tuple
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -62,13 +62,8 @@ class UpdateExecutor:
         database_service: DatabaseService,
         chunk_differ: ChunkDiffer,
         file_validator: Optional[FileValidator] = None,
-        document_classifier: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
     ):
-        """
-        Initialize UpdateExecutor
-
-        document_classifier: Optional async (content_preview, file_path) -> document_category for indexing.
-        """
+        """Initialize UpdateExecutor."""
         self.vector_store = vector_store
         self.bm25_service = bm25_service
         self.text_extractor = text_extractor
@@ -77,7 +72,6 @@ class UpdateExecutor:
         self.database_service = database_service
         self.chunk_differ = chunk_differ
         self._file_validator = file_validator if file_validator is not None else FileValidator()
-        self.document_classifier = document_classifier
 
         logger.info("UpdateExecutor initialized")
 
@@ -270,7 +264,6 @@ class UpdateExecutor:
                     content_preview=checkpoint.old_metadata.get('content_preview', ''),
                     chunks_count=checkpoint.old_metadata.get('chunks_count', 0),
                     processing_status=checkpoint.old_metadata.get('processing_status', 'indexed'),
-                    document_category=checkpoint.old_metadata.get('document_category'),
                 )
             
             logger.info(f"Rollback completed for {checkpoint.file_path}")
@@ -302,16 +295,9 @@ class UpdateExecutor:
         # Create chunks
         chunks = self.chunker.create_chunks(text, task.file_path)
         content_preview = text[:500]
-        document_category = None
-        if self.document_classifier:
-            try:
-                document_category = await self.document_classifier(content_preview, task.file_path)
-            except Exception as e:
-                logger.warning(f"Document classification failed for {task.file_path}: {e}")
 
-        # Generate embeddings
         embeddings = self.embedding_service.encode_texts([chunk.text for chunk in chunks])
-        await self.vector_store.batch_insert_chunks(chunks, embeddings, document_category=document_category)
+        await self.vector_store.batch_insert_chunks(chunks, embeddings)
 
         # Update BM25
         bm25_documents = [
@@ -337,7 +323,6 @@ class UpdateExecutor:
             content_preview=content_preview,
             chunks_count=len(chunks),
             processing_status="indexed",
-            document_category=document_category,
         )
         
         logger.info(f"Full re-index completed: {len(chunks)} chunks")
@@ -399,16 +384,8 @@ class UpdateExecutor:
         for added_chunk in diff_result.added_chunks:
             all_chunks_to_add.append(added_chunk)
         
-        content_preview = all_chunks_to_add[0].text[:500] if all_chunks_to_add else ""
-        document_category = None
-        if self.document_classifier and content_preview:
-            try:
-                document_category = await self.document_classifier(content_preview, task.file_path)
-            except Exception as e:
-                logger.warning(f"Document classification failed for {task.file_path}: {e}")
-
         embeddings = self.embedding_service.encode_texts([chunk.text for chunk in all_chunks_to_add])
-        await self.vector_store.batch_insert_chunks(all_chunks_to_add, embeddings, document_category=document_category)
+        await self.vector_store.batch_insert_chunks(all_chunks_to_add, embeddings)
         chunks_updated = len(all_chunks_to_add)
 
         bm25_documents = [
@@ -431,7 +408,6 @@ class UpdateExecutor:
             content_preview=content_preview,
             chunks_count=len(all_chunks_to_add),
             processing_status="indexed",
-            document_category=document_category,
         )
         logger.info(f"Chunk update completed: {chunks_updated} chunks")
         return chunks_updated

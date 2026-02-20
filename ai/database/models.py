@@ -1,5 +1,5 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, ForeignKey, BigInteger, Float
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy import Column, Integer, String, DateTime, Text, JSON, ForeignKey, Float
+from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
 
@@ -37,7 +37,7 @@ class IndexedDocument(Base):
     file_path = Column(String, unique=True, nullable=False, index=True)
     file_hash = Column(String, nullable=False)
     file_type = Column(String, nullable=False, index=True)
-    file_size = Column(BigInteger)
+    file_size = Column(Integer)
     last_modified = Column(DateTime, index=True)
     content_preview = Column(Text)  # First 500 chars for preview
     document_category = Column(String, nullable=True, index=True)  # Semantic type: invoice, permit, receipt, report, etc.

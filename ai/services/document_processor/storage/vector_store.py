@@ -51,9 +51,8 @@ class VectorStoreService:
         self,
         chunks: List[DocumentChunk],
         embeddings: List[List[float]],
-        document_category: Optional[str] = None,
     ):
-        """Batch insert chunks efficiently. Optionally set document_category on each chunk for filtering."""
+        """Batch insert chunks into the vector store."""
         if not chunks or not embeddings:
             return
         
@@ -74,8 +73,6 @@ class VectorStoreService:
                     "processed_at": datetime.now().isoformat(),
                     "text_length": len(chunk.text),
                 }
-                if document_category is not None:
-                    metadata["document_category"] = document_category
                 ids.append(chunk_id)
                 documents.append(chunk.text)
                 metadatas.append(metadata)
@@ -96,7 +93,7 @@ class VectorStoreService:
         max_results: int = 5,
         where: Optional[Dict[str, Any]] = None,
     ):
-        """Search for similar documents. Optional where filters by metadata (e.g. document_category)."""
+        """Search for similar documents. Optional where filters by metadata."""
         try:
             self._initialize_client()
             kwargs = dict(

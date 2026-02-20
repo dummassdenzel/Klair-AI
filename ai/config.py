@@ -6,8 +6,8 @@ from typing import List
 load_dotenv()
 
 class Settings:
-    # Database settings
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/ai_assistant")
+    # Database settings (SQLite by default — zero setup for desktop use)
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./klair.db")
     
     # Document processor settings (from your new config)
     CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR") or os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
