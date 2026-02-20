@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func, and_, or_, desc
 from sqlalchemy.sql.expression import literal
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .models import ChatSession, ChatMessage, IndexedDocument, DocumentChatUsage
 from .database import AsyncSessionLocal
@@ -86,7 +86,7 @@ class DatabaseService:
                     last_modified=last_modified,
                     content_preview=content_preview,
                     chunks_count=chunks_count,
-                    last_processed=datetime.utcnow(),
+                    last_processed=datetime.now(timezone.utc),
                     processing_status=processing_status,
                 )
                 if document_category is not None:
@@ -147,7 +147,7 @@ class DatabaseService:
                 stmt = (
                     update(IndexedDocument)
                     .where(IndexedDocument.file_path.in_(file_paths))
-                    .values(processing_status="indexed", last_processed=datetime.utcnow())
+                    .values(processing_status="indexed", last_processed=datetime.now(timezone.utc))
                 )
                 result = await session.execute(stmt)
                 await session.commit()
@@ -179,7 +179,7 @@ class DatabaseService:
                 existing_usage = result.scalar_one_or_none()
                 if existing_usage:
                     existing_usage.usage_count += 1
-                    existing_usage.last_used = datetime.utcnow()
+                    existing_usage.last_used = datetime.now(timezone.utc)
                     await session.commit()
                     await session.refresh(existing_usage)
                     return existing_usage
@@ -195,6 +195,35 @@ class DatabaseService:
                 await session.rollback()
                 raise
     
+    async def link_sources_to_chat(self, sources: List[Dict], session_id: int) -> None:
+        """Link a list of RAG source dicts to a chat session, creating fallback document records if needed."""
+        import asyncio
+
+        async def _link_one(src: dict) -> None:
+            file_path = src.get("file_path")
+            if not file_path:
+                return
+            try:
+                existing = await self.get_document_by_path(file_path)
+                if existing:
+                    await self.link_document_to_chat(document_id=existing.id, chat_session_id=session_id)
+                else:
+                    doc = await self.store_document_metadata(
+                        file_path=file_path,
+                        file_hash="",
+                        file_type=src.get("file_type", "unknown"),
+                        file_size=0,
+                        last_modified=datetime.now(timezone.utc),
+                        content_preview=(src.get("content_snippet") or "")[:500],
+                        chunks_count=src.get("chunks_found", 0),
+                    )
+                    await self.link_document_to_chat(document_id=doc.id, chat_session_id=session_id)
+            except Exception as e:
+                logger.error(f"Error linking document {file_path} to chat session {session_id}: {e}")
+
+        if sources:
+            await asyncio.gather(*[_link_one(s) for s in sources], return_exceptions=True)
+
     async def get_chat_history(self, session_id: int) -> List[ChatMessage]:
         """Get chat history for a session"""
         async with AsyncSessionLocal() as session:
@@ -237,7 +266,6 @@ class DatabaseService:
             result = await session.execute(stmt)
             return [row[0] for row in result.all()]
 
-    # NEW: Chat Session Management Methods
     
     async def get_chat_sessions_by_directory(self, directory_path: str) -> List[Dict[str, Any]]:
         """Get all chat sessions for a specific directory (with path normalization)"""
@@ -292,7 +320,7 @@ class DatabaseService:
             try:
                 stmt = update(ChatSession).where(
                     ChatSession.id == session_id
-                ).values(title=new_title, updated_at=datetime.utcnow())
+                ).values(title=new_title, updated_at=datetime.now(timezone.utc))
                 result = await session.execute(stmt)
                 await session.commit()
                 return result.rowcount > 0
@@ -300,7 +328,7 @@ class DatabaseService:
                 await session.rollback()
                 raise
     
-    # NEW: Document Search & Filtering Methods
+    # Document Search & Filtering
     
     async def search_documents(
         self,
@@ -384,14 +412,14 @@ class DatabaseService:
     async def get_recent_documents(self, days: int = 7) -> List[IndexedDocument]:
         """Get documents indexed in the last N days"""
         async with AsyncSessionLocal() as session:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
             stmt = select(IndexedDocument).where(
                 IndexedDocument.indexed_at >= cutoff_date
             ).order_by(desc(IndexedDocument.indexed_at))
             result = await session.execute(stmt)
             return result.scalars().all()
     
-    # NEW: Analytics & Insights Methods
+    # Analytics & Insights
     
     async def get_usage_analytics(self) -> Dict[str, Any]:
         """Get comprehensive usage analytics and insights"""
@@ -422,7 +450,7 @@ class DatabaseService:
                     desc('usage_count')
                 ).limit(10)
             )
-            week_ago = datetime.utcnow() - timedelta(days=7)
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
             recent_sessions = await session.scalar(
                 select(func.count(ChatSession.id)).where(
                     ChatSession.created_at >= week_ago
@@ -509,7 +537,7 @@ class DatabaseService:
     async def get_chat_analytics(self, days: int = 30) -> Dict[str, Any]:
         """Get chat-specific analytics for the last N days"""
         async with AsyncSessionLocal() as session:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
             daily_messages = await session.execute(
                 select(
                     func.date(ChatMessage.timestamp).label('date'),

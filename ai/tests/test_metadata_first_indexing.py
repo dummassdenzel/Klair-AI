@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.document_processor import DocumentProcessorOrchestrator, config
+from services.document_processor import DocumentProcessorOrchestrator
 from config import settings
 from database.database import get_db
 from database.models import IndexedDocument
@@ -45,12 +45,12 @@ async def test_1_metadata_indexing_speed():
         # Initialize orchestrator
         processor = DocumentProcessorOrchestrator(
             persist_dir="./test_metadata_speed_db",
-            embed_model_name=config.embed_model_name,
-            max_file_size_mb=config.max_file_size_mb,
-            chunk_size=config.chunk_size,
-            chunk_overlap=config.chunk_overlap,
-            ollama_base_url=config.ollama_base_url,
-            ollama_model=config.ollama_model,
+            embed_model_name=settings.EMBED_MODEL_NAME,
+            max_file_size_mb=settings.MAX_FILE_SIZE_MB,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+            ollama_base_url=settings.OLLAMA_BASE_URL,
+            ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
             llm_provider=settings.LLM_PROVIDER
@@ -120,12 +120,12 @@ async def test_2_immediate_queryability():
         # Initialize orchestrator
         processor = DocumentProcessorOrchestrator(
             persist_dir="./test_immediate_query_db",
-            embed_model_name=config.embed_model_name,
-            max_file_size_mb=config.max_file_size_mb,
-            chunk_size=config.chunk_size,
-            chunk_overlap=config.chunk_overlap,
-            ollama_base_url=config.ollama_base_url,
-            ollama_model=config.ollama_model,
+            embed_model_name=settings.EMBED_MODEL_NAME,
+            max_file_size_mb=settings.MAX_FILE_SIZE_MB,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+            ollama_base_url=settings.OLLAMA_BASE_URL,
+            ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
             llm_provider=settings.LLM_PROVIDER
@@ -190,12 +190,12 @@ async def test_3_background_content_indexing():
         # Initialize orchestrator
         processor = DocumentProcessorOrchestrator(
             persist_dir="./test_background_db",
-            embed_model_name=config.embed_model_name,
-            max_file_size_mb=config.max_file_size_mb,
-            chunk_size=config.chunk_size,
-            chunk_overlap=config.chunk_overlap,
-            ollama_base_url=config.ollama_base_url,
-            ollama_model=config.ollama_model,
+            embed_model_name=settings.EMBED_MODEL_NAME,
+            max_file_size_mb=settings.MAX_FILE_SIZE_MB,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+            ollama_base_url=settings.OLLAMA_BASE_URL,
+            ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
             llm_provider=settings.LLM_PROVIDER
@@ -289,12 +289,12 @@ async def test_4_status_transitions():
         # Initialize orchestrator
         processor = DocumentProcessorOrchestrator(
             persist_dir="./test_status_db",
-            embed_model_name=config.embed_model_name,
-            max_file_size_mb=config.max_file_size_mb,
-            chunk_size=config.chunk_size,
-            chunk_overlap=config.chunk_overlap,
-            ollama_base_url=config.ollama_base_url,
-            ollama_model=config.ollama_model,
+            embed_model_name=settings.EMBED_MODEL_NAME,
+            max_file_size_mb=settings.MAX_FILE_SIZE_MB,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+            ollama_base_url=settings.OLLAMA_BASE_URL,
+            ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
             llm_provider=settings.LLM_PROVIDER
@@ -376,12 +376,12 @@ async def test_5_incremental_updates():
         # Initialize orchestrator
         processor = DocumentProcessorOrchestrator(
             persist_dir="./test_incremental_db",
-            embed_model_name=config.embed_model_name,
-            max_file_size_mb=config.max_file_size_mb,
-            chunk_size=config.chunk_size,
-            chunk_overlap=config.chunk_overlap,
-            ollama_base_url=config.ollama_base_url,
-            ollama_model=config.ollama_model,
+            embed_model_name=settings.EMBED_MODEL_NAME,
+            max_file_size_mb=settings.MAX_FILE_SIZE_MB,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+            ollama_base_url=settings.OLLAMA_BASE_URL,
+            ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
             llm_provider=settings.LLM_PROVIDER

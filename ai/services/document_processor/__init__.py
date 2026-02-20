@@ -35,7 +35,6 @@ from .updates import (
     UpdateQueue, UpdateTask, UpdateResult, UpdatePriority,
     UpdateExecutor, Checkpoint, UpdateWorker
 )
-from .config import config, DocumentProcessorConfig
 
 __all__ = [
     "DocumentProcessorOrchestrator",
@@ -65,6 +64,4 @@ __all__ = [
     "UpdateExecutor",
     "Checkpoint",
     "UpdateWorker",
-    "config",
-    "DocumentProcessorConfig"
 ]

@@ -15,7 +15,7 @@ import sys
 import os
 import asyncio
 from unittest.mock import Mock, AsyncMock, MagicMock, patch, MagicMock
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -196,7 +196,7 @@ async def test_2_full_reindex_execution():
         mock_validator.extract_file_metadata = Mock(return_value={
             "file_type": "txt",
             "size_bytes": 1024,
-            "modified_at": datetime.utcnow()
+            "modified_at": datetime.now(timezone.utc)
         })
         mock_validator.calculate_file_hash = Mock(return_value="hash123")
         mock_validator_class.return_value = mock_validator
@@ -263,7 +263,7 @@ async def test_3_chunk_update_execution():
         mock_validator.extract_file_metadata = Mock(return_value={
             "file_type": "txt",
             "size_bytes": 1024,
-            "modified_at": datetime.utcnow()
+            "modified_at": datetime.now(timezone.utc)
         })
         mock_validator.calculate_file_hash = Mock(return_value="hash123")
         mock_validator_class.return_value = mock_validator
@@ -479,7 +479,7 @@ async def test_7_smart_hybrid_execution():
         mock_validator.extract_file_metadata = Mock(return_value={
             "file_type": "txt",
             "size_bytes": 1024,
-            "modified_at": datetime.utcnow()
+            "modified_at": datetime.now(timezone.utc)
         })
         mock_validator.calculate_file_hash = Mock(return_value="hash123")
         mock_validator_class.return_value = mock_validator
@@ -546,7 +546,7 @@ async def test_8_chunk_update_fallback():
         mock_validator.extract_file_metadata = Mock(return_value={
             "file_type": "txt",
             "size_bytes": 1024,
-            "modified_at": datetime.utcnow()
+            "modified_at": datetime.now(timezone.utc)
         })
         mock_validator.calculate_file_hash = Mock(return_value="hash123")
         mock_validator_class.return_value = mock_validator

@@ -8,7 +8,7 @@ Supports both JSON (production) and human-readable (development) formats.
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from pathlib import Path
 
@@ -19,7 +19,7 @@ class StructuredFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         """Format log record as JSON"""
         log_data = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -62,7 +62,7 @@ class MetricsLogger:
         self.metrics = {}
     
     def __enter__(self):
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now(timezone.utc)
         self.logger.info(
             f"Starting {self.operation}",
             extra={'extra_fields': {'operation': self.operation, 'action': 'start', **self.context}}
@@ -70,7 +70,7 @@ class MetricsLogger:
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        duration_ms = (datetime.utcnow() - self.start_time).total_seconds() * 1000
+        duration_ms = (datetime.now(timezone.utc) - self.start_time).total_seconds() * 1000
         
         extra_fields = {
             'operation': self.operation,

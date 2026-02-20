@@ -214,9 +214,9 @@ Steps:
 | **Solution** | Move to `DatabaseService.link_sources_to_chat(sources, session_id)`. |
 
 Steps:
-- [ ] Add `link_sources_to_chat()` method to `DatabaseService`
-- [ ] Replace both inline functions with a single call
-- [ ] Delete the duplicated inline functions
+- [x] Add `link_sources_to_chat()` method to `DatabaseService`
+- [x] Replace both inline functions with a single call to `db_service.link_sources_to_chat()`
+- [x] Delete the duplicated inline helper and unused imports
 
 ### 3.4 Unify Configuration
 
@@ -226,18 +226,20 @@ Steps:
 | **Solution** | Single `config.py` with all settings. Other modules import from it. |
 
 Steps:
-- [ ] Move document processor config values into `Settings` class in `config.py`
-- [ ] Move retrieval config values into `Settings` or keep as a sub-config imported from `config.py`
-- [ ] Remove the separate `config` object from `document_processor/__init__.py`
-- [ ] Update all imports
+- [x] Move document processor config values (`BATCH_SIZE`) + `to_dict()` / `update()` into `Settings` in `config.py`
+- [x] `RetrievalConfig` kept in `query_config.py` (hardcoded tuning params, not env vars — stays self-contained)
+- [x] Deleted `services/document_processor/config.py` and removed exports from `__init__.py`
+- [x] Updated all imports across routers, main, orchestrator, and tests (5 files + 1 test file)
 
 ### 3.5 Fix Miscellaneous Code Quality Issues
 
-- [ ] Replace all `datetime.utcnow()` with `datetime.now(datetime.UTC)`
-- [ ] Replace `print()` in `database/service.py` with `logger.error()`
-- [ ] Remove bare `except:` (line 686–687 in orchestrator)
-- [ ] Remove `# NEW:` comments throughout (these are not "new" anymore)
-- [ ] Remove emoji from log messages (use structured logging fields instead)
+- [x] Replace all `datetime.utcnow()` with `datetime.now(timezone.utc)` (35 instances across 11 files)
+- [x] `print()` in `database/service.py` — already fixed in prior phase
+- [x] Remove bare `except:` in orchestrator (changed to `except Exception:`)
+- [x] Remove `# NEW:` comments (5 instances across 3 files)
+- [x] Remove emoji from log messages (9 instances in orchestrator, 3 in retrieval modules)
+- [x] Fixed corrupted docstring in `reranker_service.py` (non-ASCII garbage in parameter name)
+- [x] Updated `utc_isoformat()` to handle both naive and timezone-aware datetimes
 
 ---
 

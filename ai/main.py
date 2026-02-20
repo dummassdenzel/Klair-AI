@@ -5,7 +5,6 @@ from typing import Optional
 import asyncio
 import logging
 
-from services.document_processor import config
 from services.document_processor.extraction import PPTXConverter
 from config import settings
 from database import create_tables
@@ -64,7 +63,7 @@ async def _prewarm_services():
     """Load the embedding model into memory so the first real query is fast."""
     try:
         from services.document_processor.extraction.embedding_service import EmbeddingService
-        svc = EmbeddingService(model_name=config.embed_model_name)
+        svc = EmbeddingService(model_name=settings.EMBED_MODEL_NAME)
         await asyncio.to_thread(svc.encode_texts, ["warm-up"])
         logger.info("Embedding model warmed up")
     except Exception as e:

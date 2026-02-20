@@ -14,7 +14,6 @@ class ChatSession(Base):
     
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
     
-    # NEW: Add cascade for document usage
     document_usage = relationship("DocumentChatUsage", cascade="all, delete-orphan")
 
 class ChatMessage(Base):

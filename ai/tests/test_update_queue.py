@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from services.document_processor import (
     UpdateQueue, UpdateTask, UpdateResult, UpdatePriority, UpdateStrategy
 )
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 async def test_1_enqueue_dequeue():
@@ -99,7 +99,7 @@ async def test_3_priority_calculation():
     await queue.enqueue(
         "active.txt",
         is_in_active_session=True,
-        last_queried=datetime.utcnow()
+        last_queried=datetime.now(timezone.utc)
     )
     task = await queue.get_next(timeout=1.0)
     assert task.priority >= 200, "Active session should boost priority"
@@ -108,7 +108,7 @@ async def test_3_priority_calculation():
     # Test recency (recent file)
     await queue.enqueue(
         "recent.txt",
-        last_queried=datetime.utcnow() - timedelta(minutes=30)  # 30 minutes ago
+        last_queried=datetime.now(timezone.utc) - timedelta(minutes=30)  # 30 minutes ago
     )
     task = await queue.get_next(timeout=1.0)
     recent_priority = task.priority
@@ -117,7 +117,7 @@ async def test_3_priority_calculation():
     # Test old file
     await queue.enqueue(
         "old.txt",
-        last_queried=datetime.utcnow() - timedelta(days=2)  # 2 days ago
+        last_queried=datetime.now(timezone.utc) - timedelta(days=2)  # 2 days ago
     )
     task = await queue.get_next(timeout=1.0)
     old_priority = task.priority
@@ -328,9 +328,9 @@ async def test_9_timeout():
     queue = UpdateQueue()
     
     # Try to get from empty queue with short timeout
-    start = datetime.utcnow()
+    start = datetime.now(timezone.utc)
     task = await queue.get_next(timeout=0.1)
-    elapsed = (datetime.utcnow() - start).total_seconds()
+    elapsed = (datetime.now(timezone.utc) - start).total_seconds()
     
     assert task is None, "Should return None on timeout"
     assert 0.1 <= elapsed < 0.2, "Should timeout after ~0.1 seconds"

@@ -3,10 +3,8 @@
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import asyncio
 import logging
 import json
-from datetime import datetime
 
 from schemas.chat import ChatRequest, ChatResponse
 from query_cache import get_query_cache_key
@@ -46,34 +44,6 @@ async def _build_conversation_history(session_id: int) -> list:
     except Exception as e:
         logger.warning(f"Could not fetch conversation history: {e}")
         return []
-
-
-async def _link_sources_to_session(sources: list, session_id: int) -> None:
-    """Link document sources to a chat session (creates fallback records if needed)."""
-    async def _link_one(src: dict) -> None:
-        file_path = src.get("file_path")
-        if not file_path:
-            return
-        try:
-            existing = await db_service.get_document_by_path(file_path)
-            if existing:
-                await db_service.link_document_to_chat(document_id=existing.id, chat_session_id=session_id)
-            else:
-                doc = await db_service.store_document_metadata(
-                    file_path=file_path,
-                    file_hash="",
-                    file_type=src.get("file_type", "unknown"),
-                    file_size=0,
-                    last_modified=datetime.utcnow(),
-                    content_preview=(src.get("content_snippet") or "")[:500],
-                    chunks_count=src.get("chunks_found", 0),
-                )
-                await db_service.link_document_to_chat(document_id=doc.id, chat_session_id=session_id)
-        except Exception as e:
-            logger.error(f"Error linking document {file_path} to chat: {e}")
-
-    if sources:
-        await asyncio.gather(*[_link_one(s) for s in sources], return_exceptions=True)
 
 
 def _record_metrics(
@@ -135,7 +105,7 @@ async def chat(chat_request: ChatRequest, request: Request, state=Depends(requir
             sources=response.sources,
             response_time=response.response_time,
         )
-        await _link_sources_to_session(response.sources, chat_session.id)
+        await db_service.link_sources_to_chat(response.sources, chat_session.id)
         _record_metrics(
             chat_request.message, response.query_type or "unknown",
             response.response_time, len(response.sources),
@@ -197,7 +167,7 @@ async def chat_stream(chat_request: ChatRequest, request: Request, state=Depends
                     sources=sources,
                     response_time=response_time,
                 )
-                await _link_sources_to_session(sources, chat_session.id)
+                await db_service.link_sources_to_chat(sources, chat_session.id)
                 _record_metrics(
                     chat_request.message, query_type, response_time,
                     len(sources), retrieval_count, rerank_count, chat_session.id,

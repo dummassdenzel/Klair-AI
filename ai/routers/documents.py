@@ -8,14 +8,14 @@ import logging
 import json
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
 from database import AsyncSessionLocal
 from database.models import IndexedDocument
 from dependencies import db_service, require_app_state, validate_file_under_directory
-from services.document_processor import DocumentProcessorOrchestrator, config
+from services.document_processor import DocumentProcessorOrchestrator
 from services.file_monitor import FileMonitorService
 from config import settings
 from utils import utc_isoformat
@@ -58,13 +58,13 @@ async def set_directory(request: Request):
             await old_processor.cancel_background_work()
 
         doc_processor = DocumentProcessorOrchestrator(
-            persist_dir=config.persist_dir,
-            embed_model_name=config.embed_model_name,
-            max_file_size_mb=config.max_file_size_mb,
-            chunk_size=config.chunk_size,
-            chunk_overlap=config.chunk_overlap,
-            ollama_base_url=config.ollama_base_url,
-            ollama_model=config.ollama_model,
+            persist_dir=settings.CHROMA_PERSIST_DIR,
+            embed_model_name=settings.EMBED_MODEL_NAME,
+            max_file_size_mb=settings.MAX_FILE_SIZE_MB,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+            ollama_base_url=settings.OLLAMA_BASE_URL,
+            ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
             gemini_model=settings.GEMINI_MODEL,
             groq_api_key=settings.GROQ_API_KEY,
@@ -455,7 +455,7 @@ async def stream_update_status(state=Depends(require_app_state)):
                     "completed": status["completed"], "failed": status["failed"],
                 }
                 if current != last_status:
-                    yield f"data: {json.dumps({'status': 'success', 'queue': current, 'timestamp': utc_isoformat(datetime.utcnow())})}\n\n"
+                    yield f"data: {json.dumps({'status': 'success', 'queue': current, 'timestamp': utc_isoformat(datetime.now(timezone.utc))})}\n\n"
                     last_status = current
                 await asyncio.sleep(1)
         except asyncio.CancelledError:

@@ -12,7 +12,7 @@ Manages a priority queue for document updates, prioritizing based on:
 import asyncio
 import logging
 from typing import Optional, Dict, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from enum import IntEnum
 
@@ -137,7 +137,7 @@ class UpdateQueue:
             if priority is None:
                 priority = self._calculate_priority(
                     file_path=file_path,
-                    last_queried=last_queried or datetime.utcnow(),
+                    last_queried=last_queried or datetime.now(timezone.utc),
                     is_in_active_session=is_in_active_session,
                     file_size_bytes=file_size_bytes,
                     change_percentage=change_percentage,
@@ -152,7 +152,7 @@ class UpdateQueue:
                 strategy=strategy,
                 change_percentage=change_percentage,
                 file_size_bytes=file_size_bytes,
-                enqueued_at=datetime.utcnow(),
+                enqueued_at=datetime.now(timezone.utc),
                 last_queried=last_queried,
                 is_in_active_session=is_in_active_session,
                 user_requested=user_requested
@@ -204,7 +204,7 @@ class UpdateQueue:
             if file_path in self.active_updates:
                 del self.active_updates[file_path]
             
-            result.completed_at = datetime.utcnow()
+            result.completed_at = datetime.now(timezone.utc)
             
             if result.success:
                 self.completed_updates[file_path] = result
@@ -286,7 +286,7 @@ class UpdateQueue:
         
         # Recency boost (0-400 points)
         # More recent = higher priority
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         hours_since_query = (now - last_queried).total_seconds() / 3600
         
         # Decay: 400 points for < 1 hour, 0 points for > 40 hours

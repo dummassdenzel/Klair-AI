@@ -12,7 +12,7 @@ Executes document updates with:
 import logging
 import asyncio
 from typing import Dict, Optional, List, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 from .update_queue import UpdateTask, UpdateResult
@@ -200,7 +200,7 @@ class UpdateExecutor:
         
         checkpoint = Checkpoint(
             file_path=file_path,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             old_chunks_data=old_chunks_list,
             old_metadata=old_metadata,
             old_bm25_ids=old_bm25_ids
@@ -260,7 +260,7 @@ class UpdateExecutor:
                     file_hash=checkpoint.old_metadata['file_hash'],
                     file_type="",
                     file_size=checkpoint.old_metadata['file_size'],
-                    last_modified=datetime.utcnow(),
+                    last_modified=datetime.now(timezone.utc),
                     content_preview=checkpoint.old_metadata.get('content_preview', ''),
                     chunks_count=checkpoint.old_metadata.get('chunks_count', 0),
                     processing_status=checkpoint.old_metadata.get('processing_status', 'indexed'),

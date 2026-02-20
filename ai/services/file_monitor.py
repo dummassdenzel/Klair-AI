@@ -205,7 +205,7 @@ class FileMonitorService:
                 logger.debug(f"Skipping {event_type} event for {file_path} during initial indexing")
                 return
         
-        # NEW: Check if file is currently being processed by the orchestrator
+        # Skip files currently being processed by the orchestrator
         if hasattr(self.document_processor, 'files_being_processed'):
             if file_path in self.document_processor.files_being_processed:
                 logger.debug(f"File {file_path} is currently being processed, skipping file monitor event.")

@@ -96,7 +96,7 @@ class ReRankingService:
             top_results = scored_indices[:top_k]
             
             logger.debug(
-                f"Re-ranked {len(documents)} documents → top {len(top_results)} "
+                f"Re-ranked {len(documents)} documents -> top {len(top_results)} "
                 f"(scores: {[f'{s:.3f}' for _, s in top_results[:3]]})"
             )
             
@@ -125,7 +125,7 @@ class ReRankingService:
             query: Search query
             documents: List of document texts
             metadata_list: List of metadata dicts (one per document)
-            scores_list爱国主义: List of initial scores (one per document)
+            scores_list: List of initial scores (one per document)
             top_k: Number of top results to return
             
         Returns:
@@ -151,7 +151,7 @@ class ReRankingService:
             reranked_scores.append(min(1.0, blended))
         
         logger.info(
-            f"Re-ranked {len(documents)} → top {len(reranked_documents)} "
+            f"Re-ranked {len(documents)} -> top {len(reranked_documents)} "
             f"(avg rerank score: {sum(s for _, s in reranked_indices_scores) / len(reranked_indices_scores):.3f})"
         )
         

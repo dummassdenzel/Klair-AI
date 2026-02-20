@@ -4,7 +4,6 @@ from fastapi import APIRouter, HTTPException, Request
 import logging
 
 from dependencies import db_service, metrics_service, rag_analytics
-from services.document_processor import config
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -30,7 +29,7 @@ async def get_status(request: Request):
         }
 
         try:
-            info["configuration"] = config.to_dict()
+            info["configuration"] = settings.to_dict()
         except Exception as e:
             logger.warning(f"Could not get configuration: {e}")
             info["configuration"] = {"error": "Configuration not available"}
@@ -43,7 +42,7 @@ async def get_status(request: Request):
             }
             info["llm"] = {
                 "provider": provider,
-                "model": model_map.get(provider, getattr(config, "ollama_model", "tinyllama")),
+                "model": model_map.get(provider, settings.OLLAMA_MODEL),
             }
         except Exception as e:
             logger.warning(f"Could not determine LLM provider/model: {e}")
@@ -70,15 +69,15 @@ async def get_status(request: Request):
 @router.get("/configuration")
 async def get_configuration():
     return {
-        "current_config": config.to_dict(),
+        "current_config": settings.to_dict(),
         "environment_variables": {
-            "CHROMA_PERSIST_DIR": config.persist_dir,
-            "EMBED_MODEL_NAME": config.embed_model_name,
-            "MAX_FILE_SIZE_MB": config.max_file_size_mb,
-            "CHUNK_SIZE": config.chunk_size,
-            "CHUNK_OVERLAP": config.chunk_overlap,
-            "OLLAMA_BASE_URL": config.ollama_base_url,
-            "OLLAMA_MODEL": config.ollama_model,
+            "CHROMA_PERSIST_DIR": settings.CHROMA_PERSIST_DIR,
+            "EMBED_MODEL_NAME": settings.EMBED_MODEL_NAME,
+            "MAX_FILE_SIZE_MB": settings.MAX_FILE_SIZE_MB,
+            "CHUNK_SIZE": settings.CHUNK_SIZE,
+            "CHUNK_OVERLAP": settings.CHUNK_OVERLAP,
+            "OLLAMA_BASE_URL": settings.OLLAMA_BASE_URL,
+            "OLLAMA_MODEL": settings.OLLAMA_MODEL,
         },
     }
 
@@ -86,13 +85,12 @@ async def get_configuration():
 @router.post("/update-configuration")
 async def update_configuration(request: dict):
     try:
-        allowed = {"chunk_size", "chunk_overlap", "max_file_size_mb", "ollama_model", "ollama_base_url"}
-        updates = {k: v for k, v in request.items() if k in allowed}
+        updates = {k: v for k, v in request.items() if k in settings._UPDATABLE}
         if not updates:
             raise HTTPException(status_code=400, detail="No valid configuration updates provided")
-        config.update(**updates)
+        settings.update(**updates)
         logger.info(f"Configuration updated: {updates}")
-        return {"status": "success", "message": "Configuration updated", "updated_values": updates, "current_config": config.to_dict()}
+        return {"status": "success", "message": "Configuration updated", "updated_values": updates, "current_config": settings.to_dict()}
     except HTTPException:
         raise
     except Exception as e:

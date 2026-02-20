@@ -7,7 +7,7 @@ Tracks query performance, retrieval statistics, error rates, and more.
 
 import logging
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from dataclasses import dataclass, asdict
 import json
@@ -76,7 +76,7 @@ class MetricsService:
     ):
         """Record a query metric"""
         metric = QueryMetric(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             query_type=query_type,
             response_time_ms=response_time_ms,
             sources_count=sources_count,
@@ -107,7 +107,7 @@ class MetricsService:
     ):
         """Record a retrieval operation metric"""
         metric = RetrievalMetric(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             semantic_results=semantic_results,
             keyword_results=keyword_results,
             fused_results=fused_results,
@@ -129,7 +129,7 @@ class MetricsService:
         Returns:
             Dictionary with aggregated metrics
         """
-        cutoff_time = datetime.utcnow() - timedelta(minutes=time_window_minutes)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=time_window_minutes)
         
         # Filter recent metrics
         recent_queries = [
@@ -197,7 +197,7 @@ class MetricsService:
     
     def get_retrieval_stats(self, time_window_minutes: int = 60) -> Dict:
         """Get retrieval statistics"""
-        cutoff_time = datetime.utcnow() - timedelta(minutes=time_window_minutes)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=time_window_minutes)
         
         recent_retrievals = [
             m for m in self.retrieval_metrics
@@ -250,7 +250,7 @@ class MetricsService:
         Returns:
             List of {timestamp, value} dictionaries
         """
-        cutoff_time = datetime.utcnow() - timedelta(minutes=time_window_minutes)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=time_window_minutes)
         
         recent_queries = [
             m for m in self.query_metrics

@@ -10,7 +10,7 @@ Provides detailed analytics for RAG system:
 
 import logging
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict, Counter
 import re
 
@@ -37,7 +37,7 @@ class RAGAnalytics:
         Returns:
             Dictionary with query pattern analytics
         """
-        cutoff_time = datetime.utcnow() - timedelta(minutes=time_window_minutes)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=time_window_minutes)
         
         recent_queries = [
             m for m in self.metrics_service.query_metrics
@@ -159,7 +159,7 @@ class RAGAnalytics:
         Returns:
             Dictionary with retrieval effectiveness metrics
         """
-        cutoff_time = datetime.utcnow() - timedelta(minutes=time_window_minutes)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=time_window_minutes)
         
         recent_queries = [
             m for m in self.metrics_service.query_metrics
@@ -207,7 +207,7 @@ class RAGAnalytics:
         Returns:
             Dictionary with performance trend data
         """
-        cutoff_time = datetime.utcnow() - timedelta(minutes=time_window_minutes)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=time_window_minutes)
         bucket_size_minutes = time_window_minutes / buckets
         
         recent_queries = [
@@ -225,7 +225,7 @@ class RAGAnalytics:
         # Group queries into time buckets
         bucket_data = defaultdict(lambda: {"queries": [], "errors": 0})
         for query in recent_queries:
-            minutes_ago = (datetime.utcnow() - query.timestamp).total_seconds() / 60
+            minutes_ago = (datetime.now(timezone.utc) - query.timestamp).total_seconds() / 60
             bucket_index = int(minutes_ago / bucket_size_minutes)
             bucket_data[bucket_index]["queries"].append(query)
             if query.error:
@@ -295,7 +295,7 @@ class RAGAnalytics:
         Returns:
             Dictionary with success analysis
         """
-        cutoff_time = datetime.utcnow() - timedelta(minutes=time_window_minutes)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=time_window_minutes)
         
         recent_queries = [
             m for m in self.metrics_service.query_metrics

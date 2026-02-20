@@ -85,7 +85,7 @@ class HybridSearchService:
         
         logger.debug(
             f"Fused {len(semantic_results)} semantic + {len(keyword_results)} keyword "
-            f"results → {len(fused_results)} unique documents"
+            f"results -> {len(fused_results)} unique documents"
         )
         
         return fused_results

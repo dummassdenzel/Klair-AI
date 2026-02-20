@@ -66,7 +66,7 @@ class FilenameTrie:
         node.file_paths.add(file_path)
         self.file_count += 1
         
-        logger.debug(f"Added to Trie: {filename} → {file_path}")
+        logger.debug(f"Added to Trie: {filename} -> {file_path}")
     
     def remove(self, filename: str, file_path: str) -> None:
         """
@@ -97,7 +97,7 @@ class FilenameTrie:
             if not node.file_paths:
                 node.is_end = False
             
-            logger.debug(f"Removed from Trie: {filename} → {file_path}")
+            logger.debug(f"Removed from Trie: {filename} -> {file_path}")
     
     def search(self, query: str, max_results: Optional[int] = None) -> List[str]:
         """

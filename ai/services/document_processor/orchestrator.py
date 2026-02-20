@@ -4,7 +4,7 @@ import os
 import re
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple, Any, AsyncIterator
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import QueryResult, ProcessingResult, FileMetadata
@@ -221,7 +221,7 @@ class DocumentProcessorOrchestrator:
             indexed_count = sum(1 for d in docs if d.processing_status == "indexed")
             metadata_only_count = sum(1 for d in docs if d.processing_status == "metadata_only")
             logger.info(
-                f"📚 Loaded {len(docs)} documents (trie); cache has {len(self._metadata_cache)} entries "
+                f"Loaded {len(docs)} documents (trie); cache has {len(self._metadata_cache)} entries "
                 f"({indexed_count} indexed, {metadata_only_count} metadata-only)"
             )
         except Exception as e:
@@ -342,11 +342,11 @@ class DocumentProcessorOrchestrator:
                 logger.warning(f"No supported files found in {directory_path}")
                 return
             
-            logger.info(f"✅ Metadata index built: {len(metadata_files)} files in {metadata_elapsed:.2f}s")
-            logger.info(f"📁 Files are now queryable by filename/metadata")
+            logger.info(f"Metadata index built: {len(metadata_files)} files in {metadata_elapsed:.2f}s")
+            logger.info("Files are now queryable by filename/metadata")
             
             # PHASE 2: Background content indexing (non-blocking)
-            logger.info(f"🔄 Starting background content indexing for {len(metadata_files)} files...")
+            logger.info(f"Starting background content indexing for {len(metadata_files)} files...")
             self._shutdown = False
             self._indexing_task = asyncio.create_task(
                 self._index_content_background(metadata_files, directory_path)
@@ -424,8 +424,9 @@ class DocumentProcessorOrchestrator:
         Updates documents from 'metadata_only' to 'indexed' status.
         Exits early if _shutdown is set (e.g. user switched to another directory).
         """
-        logger.info(f"🔄 Background content indexing started for {len(file_paths)} files")
-        batch_size = 10
+        from config import settings
+        logger.info(f"Background content indexing started for {len(file_paths)} files")
+        batch_size = settings.BATCH_SIZE
         processed = 0
         failed = 0
         try:
@@ -443,11 +444,11 @@ class DocumentProcessorOrchestrator:
                     else:
                         processed += 1
                 if (i + batch_size) % 50 == 0 or i + batch_size >= len(file_paths):
-                    logger.info(f"📊 Background indexing progress: {processed + failed}/{len(file_paths)} files "
+                    logger.info(f"Background indexing progress: {processed + failed}/{len(file_paths)} files "
                               f"({processed} indexed, {failed} failed)")
                 if i + batch_size < len(file_paths):
                     await asyncio.sleep(0.1)
-            logger.info(f"✅ Background content indexing complete: {processed} indexed, {failed} failed")
+            logger.info(f"Background content indexing complete: {processed} indexed, {failed} failed")
         except asyncio.CancelledError:
             logger.info("Background content indexing task was cancelled")
             raise
@@ -512,7 +513,7 @@ class DocumentProcessorOrchestrator:
             file_metadata = self.file_validator.extract_file_metadata(file_path)
             file_size_bytes = file_metadata.get("size_bytes", 0)
             
-            last_queried = file_metadata.get("modified_at") or datetime.utcnow()
+            last_queried = file_metadata.get("modified_at") or datetime.now(timezone.utc)
             
             # Check if in active session (simplified - can be enhanced)
             is_in_active_session = False  # TODO: Track active sessions
@@ -665,12 +666,12 @@ class DocumentProcessorOrchestrator:
                     file_hash="",
                     file_type=Path(file_path).suffix.lower(),
                     file_size=0,
-                    last_modified=datetime.utcnow(),
+                    last_modified=datetime.now(timezone.utc),
                     content_preview="",
                     chunks_count=0,
                     processing_status="error"
                 )
-            except:
+            except Exception:
                 pass
             raise
         finally:
@@ -730,7 +731,7 @@ class DocumentProcessorOrchestrator:
                 # Search Trie for the explicit filename
                 matching_files = self.filename_trie.search(explicit_filename.lower())
                 if matching_files:
-                    logger.info(f"✅ Found explicit filename '{explicit_filename}': {len(matching_files)} files")
+                    logger.info(f"Found explicit filename '{explicit_filename}': {len(matching_files)} files")
                     return list(matching_files)
             
             # No explicit filename - let retrieval handle it
@@ -820,7 +821,7 @@ Your response:"""
         keyword_count = len(bm25_results) if bm25_results else 0
         
         logger.info(
-            f"🔍 Hybrid search: {semantic_count} semantic, {len(bm25_hits)} BM25 boosts",
+            f"Hybrid search: {semantic_count} semantic, {len(bm25_hits)} BM25 boosts",
             extra={'extra_fields': {
                 'event_type': 'retrieval',
                 'semantic_results': semantic_count,
@@ -866,7 +867,7 @@ Your response:"""
         # Step 4: Re-ranking (if enabled); run in thread to avoid blocking event loop
         rerank_count = 0
         if rerank_top_k > 0 and len(documents) > final_top_k:
-            logger.info(f"🔄 Re-ranking top {min(rerank_top_k, len(documents))} of {len(documents)} results...")
+            logger.info(f"Re-ranking top {min(rerank_top_k, len(documents))} of {len(documents)} results...")
             
             docs_to_rerank = documents[:min(rerank_top_k, len(documents))]
             metas_to_rerank = metadatas[:min(rerank_top_k, len(metadatas))]
@@ -892,7 +893,7 @@ Your response:"""
             rerank_count = len(docs_to_rerank)
             
             logger.info(
-                f"✅ Re-ranked {len(docs_to_rerank)} → top {len(reranked_docs)} (kept {len(remaining_docs)} lower-ranked)",
+                f"Re-ranked {len(docs_to_rerank)} -> top {len(reranked_docs)} (kept {len(remaining_docs)} lower-ranked)",
                 extra={'extra_fields': {
                     'event_type': 'rerank',
                     'input_count': len(docs_to_rerank),
@@ -1017,7 +1018,7 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
     ) -> Optional[Dict[str, Any]]:
         """
         Shared retrieval + context-building pipeline for document_search queries.
-        Returns dict with context, sources, retrieval_count, rerank_count — or None if no results.
+        Returns dict with context, sources, retrieval_count, rerank_count -- or None if no results.
         """
         explicit_filename = self._find_explicit_filename(question)
         selected_files = await self._select_relevant_files(question)

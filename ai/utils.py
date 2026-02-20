@@ -5,12 +5,11 @@ from typing import Optional
 
 def utc_isoformat(dt: Optional[datetime]) -> Optional[str]:
     """
-    Serialize a datetime to ISO 8601 with a trailing 'Z' when the datetime is
-    naive (UTC). This ensures JavaScript's Date() parses it as UTC so
-    toLocaleTimeString() / toLocaleDateString() display correct local time.
+    Serialize a datetime to ISO 8601 with trailing 'Z'.
+    Handles both naive datetimes (from SQLite) and timezone-aware UTC datetimes.
     """
     if dt is None:
         return None
     if dt.tzinfo is None:
         return dt.isoformat() + "Z"
-    return dt.isoformat()
+    return dt.isoformat().replace("+00:00", "Z")
