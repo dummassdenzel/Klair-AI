@@ -250,20 +250,27 @@ that requires 3GB of Python ML dependencies won't get adopted.
 
 **Estimated effort:** 2–4 days (mostly testing)
 
-### 4.1 Remove Metrics and Analytics Subsystem
+### 4.1 Remove Metrics and Analytics Subsystem ✅
 
 | Item | Detail |
 |------|--------|
 | **Problem** | ~15 API endpoints, 2 frontend pages, 2 backend services (`MetricsService`, `RAGAnalytics`) for developer observability. Zero user value. |
 | **Solution** | Delete all metrics/analytics endpoints, services, and frontend pages. Use standard logging for debugging. |
 
-Files to delete:
-- [ ] `ai/services/metrics_service.py`
-- [ ] `ai/services/rag_analytics.py`
-- [ ] `ai/services/logging_config.py` (simplify to basic logging setup)
-- [ ] `src/routes/metrics/` (entire directory)
-- [ ] `src/routes/analytics/` (entire directory)
-- [ ] All `/api/metrics/*` and `/api/analytics/*` endpoints from `main.py`
+Files deleted / cleaned:
+- [x] `ai/services/metrics_service.py` — deleted (320 lines)
+- [x] `ai/services/rag_analytics.py` — deleted (360 lines)
+- [x] `ai/services/logging_config.py` — simplified to `setup_logging()` + `StructuredFormatter` only (241 -> 65 lines)
+- [x] `ai/routers/system.py` — removed 10 metrics/analytics endpoints (210 -> 97 lines)
+- [x] `ai/routers/chat.py` — removed `_record_metrics()` helper and all call-sites
+- [x] `ai/dependencies.py` — removed `MetricsService` and `RAGAnalytics` singletons
+- [x] `ai/tests/test_structured_logging.py` — deleted (tested removed code)
+- [x] `src/routes/metrics/` — deleted (entire directory)
+- [x] `src/routes/analytics/` — deleted (entire directory)
+- [x] `src/lib/components/Sidebar.svelte` — removed Metrics and Analytics buttons
+- [x] `src/lib/api/services.ts` — removed 11 metrics/analytics API methods
+
+Total reduction: **~1,000 lines** across backend + frontend, **12 API endpoints** removed
 
 ### 4.2 Evaluate Replacing PyTorch with ONNX Runtime
 

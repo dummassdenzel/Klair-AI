@@ -1,18 +1,14 @@
-"""System status, configuration, metrics, and analytics endpoints."""
+"""System status and configuration endpoints."""
 
 from fastapi import APIRouter, HTTPException, Request
 import logging
 
-from dependencies import db_service, metrics_service, rag_analytics
+from dependencies import db_service
 from config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["system"])
 
-
-# ---------------------------------------------------------------------------
-# Status & configuration
-# ---------------------------------------------------------------------------
 
 @router.get("/status")
 async def get_status(request: Request):
@@ -96,114 +92,3 @@ async def update_configuration(request: dict):
     except Exception as e:
         logger.error(f"Configuration update failed: {e}")
         raise HTTPException(status_code=500, detail=f"Configuration update failed: {str(e)}")
-
-
-# ---------------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------------
-
-@router.get("/metrics/summary")
-async def get_metrics_summary(time_window_minutes: int = 60):
-    try:
-        return {"status": "success", "metrics": metrics_service.get_metrics_summary(time_window_minutes=time_window_minutes)}
-    except Exception as e:
-        logger.error(f"Failed to get metrics summary: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get metrics summary: {str(e)}")
-
-
-@router.get("/metrics/retrieval-stats")
-async def get_retrieval_stats(time_window_minutes: int = 60):
-    try:
-        return {"status": "success", "stats": metrics_service.get_retrieval_stats(time_window_minutes=time_window_minutes)}
-    except Exception as e:
-        logger.error(f"Failed to get retrieval stats: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get retrieval stats: {str(e)}")
-
-
-@router.get("/metrics/time-series")
-async def get_time_series(metric_type: str = "response_time", time_window_minutes: int = 60, bucket_minutes: int = 5):
-    try:
-        return {
-            "status": "success", "metric_type": metric_type,
-            "time_series": metrics_service.get_time_series(
-                metric_type=metric_type, time_window_minutes=time_window_minutes, bucket_minutes=bucket_minutes,
-            ),
-        }
-    except Exception as e:
-        logger.error(f"Failed to get time series: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get time series: {str(e)}")
-
-
-@router.get("/metrics/recent-queries")
-async def get_recent_queries(limit: int = 20):
-    try:
-        return {"status": "success", "queries": metrics_service.get_recent_queries(limit=limit)}
-    except Exception as e:
-        logger.error(f"Failed to get recent queries: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get recent queries: {str(e)}")
-
-
-@router.get("/metrics/counters")
-async def get_counters():
-    try:
-        return {"status": "success", "counters": metrics_service.get_counters()}
-    except Exception as e:
-        logger.error(f"Failed to get counters: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get counters: {str(e)}")
-
-
-# ---------------------------------------------------------------------------
-# Analytics
-# ---------------------------------------------------------------------------
-
-@router.get("/analytics/query-patterns")
-async def get_query_patterns(time_window_minutes: int = 60):
-    try:
-        return {"status": "success", "patterns": rag_analytics.get_query_patterns(time_window_minutes=time_window_minutes)}
-    except Exception as e:
-        logger.error(f"Failed to get query patterns: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get query patterns: {str(e)}")
-
-
-@router.get("/analytics/document-usage")
-async def get_document_usage():
-    try:
-        return {"status": "success", "usage": rag_analytics.get_document_usage_stats()}
-    except Exception as e:
-        logger.error(f"Failed to get document usage: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get document usage: {str(e)}")
-
-
-@router.get("/analytics/retrieval-effectiveness")
-async def get_retrieval_effectiveness(time_window_minutes: int = 60):
-    try:
-        return {"status": "success", "effectiveness": rag_analytics.get_retrieval_effectiveness(time_window_minutes=time_window_minutes)}
-    except Exception as e:
-        logger.error(f"Failed to get retrieval effectiveness: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get retrieval effectiveness: {str(e)}")
-
-
-@router.get("/analytics/performance-trends")
-async def get_performance_trends(time_window_minutes: int = 60, buckets: int = 6):
-    try:
-        return {"status": "success", "trends": rag_analytics.get_performance_trends(time_window_minutes=time_window_minutes, buckets=buckets)}
-    except Exception as e:
-        logger.error(f"Failed to get performance trends: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get performance trends: {str(e)}")
-
-
-@router.get("/analytics/query-success")
-async def get_query_success(time_window_minutes: int = 60):
-    try:
-        return {"status": "success", "success": rag_analytics.get_query_success_analysis(time_window_minutes=time_window_minutes)}
-    except Exception as e:
-        logger.error(f"Failed to get query success: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get query success: {str(e)}")
-
-
-@router.get("/analytics/usage")
-async def get_usage_analytics():
-    try:
-        return {"status": "success", "analytics": await db_service.get_usage_analytics()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))

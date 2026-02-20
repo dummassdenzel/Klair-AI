@@ -5,12 +5,8 @@ from pathlib import Path
 from typing import Optional
 
 from database import DatabaseService
-from services.metrics_service import MetricsService
-from services.rag_analytics import RAGAnalytics
 
 db_service = DatabaseService()
-metrics_service = MetricsService(max_history=1000)
-rag_analytics = RAGAnalytics(metrics_service)
 
 
 def require_app_state(request: Request):

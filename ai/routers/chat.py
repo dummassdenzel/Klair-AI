@@ -8,8 +8,7 @@ import json
 
 from schemas.chat import ChatRequest, ChatResponse
 from query_cache import get_query_cache_key
-from dependencies import db_service, metrics_service, require_app_state
-from services.logging_config import log_query_metrics
+from dependencies import db_service, require_app_state
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -44,30 +43,6 @@ async def _build_conversation_history(session_id: int) -> list:
     except Exception as e:
         logger.warning(f"Could not fetch conversation history: {e}")
         return []
-
-
-def _record_metrics(
-    message: str, query_type: str, response_time: float,
-    sources_count: int, retrieval_count: int, rerank_count: int,
-    session_id: int, error: bool = False, error_message: str | None = None,
-):
-    log_query_metrics(
-        logger=logger, query=message, query_type=query_type,
-        response_time=response_time, sources_count=sources_count,
-        retrieval_count=retrieval_count, rerank_count=rerank_count,
-        session_id=session_id,
-    )
-    metrics_service.record_query(
-        query_type=query_type,
-        response_time_ms=response_time * 1000,
-        sources_count=sources_count,
-        retrieval_count=retrieval_count,
-        rerank_count=rerank_count,
-        session_id=session_id,
-        query_preview=message[:100],
-        error=error,
-        error_message=error_message,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -106,20 +81,10 @@ async def chat(chat_request: ChatRequest, request: Request, state=Depends(requir
             response_time=response.response_time,
         )
         await db_service.link_sources_to_chat(response.sources, chat_session.id)
-        _record_metrics(
-            chat_request.message, response.query_type or "unknown",
-            response.response_time, len(response.sources),
-            response.retrieval_count or 0, response.rerank_count or 0,
-            chat_session.id,
-        )
         return ChatResponse(message=response.message, sources=response.sources)
 
     except Exception as e:
         logger.error(f"Query failed: {e}")
-        metrics_service.record_query(
-            query_type="error", response_time_ms=0, sources_count=0,
-            retrieval_count=0, rerank_count=0, error=True, error_message=str(e),
-        )
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 
@@ -168,10 +133,6 @@ async def chat_stream(chat_request: ChatRequest, request: Request, state=Depends
                     response_time=response_time,
                 )
                 await db_service.link_sources_to_chat(sources, chat_session.id)
-                _record_metrics(
-                    chat_request.message, query_type, response_time,
-                    len(sources), retrieval_count, rerank_count, chat_session.id,
-                )
             except Exception as e:
                 logger.error(f"Stream failed: {e}")
                 yield _format_sse("error", {"detail": str(e)})
