@@ -18,7 +18,7 @@
     error as apiError,
     indexingProgress,
   } from '$lib/stores/api';
-  import DirectorySelectionModal from '$lib/components/DirectorySelectionModal.svelte';
+  import DirectorySelection from '$lib/components/DirectorySelection.svelte';
   import DocumentViewer from '$lib/components/DocumentViewer.svelte';
 
   let { children } = $props();
@@ -30,18 +30,15 @@
   let openDropdownId = $state<number | null>(null);
   let isInitializing = $state(true);
   let isSettingDirectory = $state(false);
-  let showDirectoryModal = $state(false);
-  let hasAutoOpenedModal = $state(false);
-  let userCancelledModal = $state(false);
+  /** When true, show directory picker in main area (e.g. after "Change Directory"). */
+  let wantsToChangeFolder = $state(false);
   let selectedDocument = $state<any | null>(null);
 
   // Initialize system status on mount
   onMount(() => {
     (async () => {
       await testConnection();
-      if (!$systemStatus?.directory_set) {
-        showDirectoryModal = true;
-      } else {
+      if ($systemStatus?.directory_set) {
         await loadChatHistory();
         await loadIndexedDocuments();
         // Phase 3: Start SSE stream for update queue status (no polling)
@@ -237,8 +234,7 @@
     try {
       await apiService.setDirectory(directoryPath);
 
-      // Close modal immediately and show "indexing" state (don't show previous directory's list)
-      showDirectoryModal = false;
+      wantsToChangeFolder = false;
       isSettingDirectory = false;
       indexedDocuments = [];
       contentIndexingInProgress.set(true);
@@ -387,27 +383,18 @@
     selectedDocument = null;
   }
 
-  // Listen for directory modal open event from chat page
+  // "Change Directory" from chat page: show directory picker in main area
   onMount(() => {
-    const handleOpenModal = () => {
-      showDirectoryModal = true;
+    const handleRequestChangeFolder = () => {
+      wantsToChangeFolder = true;
     };
-    window.addEventListener('openDirectoryModalFromLayout', handleOpenModal);
+    window.addEventListener('openDirectoryModalFromLayout', handleRequestChangeFolder);
     return () => {
-      window.removeEventListener('openDirectoryModalFromLayout', handleOpenModal);
+      window.removeEventListener('openDirectoryModalFromLayout', handleRequestChangeFolder);
     };
   });
 
-  // Reactive statement for modal auto-open using $effect (runes mode)
-  $effect(() => {
-    if (!isInitializing && !hasAutoOpenedModal && !userCancelledModal && $systemStatus && !$systemStatus.directory_set && !showDirectoryModal) {
-      showDirectoryModal = true;
-      hasAutoOpenedModal = true;
-    }
-    if ($systemStatus?.directory_set) {
-      userCancelledModal = false;
-    }
-  });
+  const showDirectoryPicker = $derived(!$systemStatus?.directory_set || wantsToChangeFolder);
 </script>
 
 <svelte:head>
@@ -432,23 +419,6 @@
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
       </button>
     </div>
-  {/if}
-
-  <!-- Directory Selection Modal -->
-  <DirectorySelectionModal
-    bind:isOpen={showDirectoryModal}
-    isSetting={isSettingDirectory}
-    allowCancel={$systemStatus?.directory_set || false}
-    on:select={handleDirectorySelect}
-    on:cancel={() => {
-      showDirectoryModal = false;
-      userCancelledModal = true;
-    }}
-  />
-
-  <!-- Block main content if no directory is set and modal is not open -->
-  {#if !isInitializing && !$systemStatus?.directory_set && !showDirectoryModal}
-    <div class="fixed inset-0 bg-black bg-opacity-20 z-40"></div>
   {/if}
 
   <div class="flex flex-1 overflow-hidden">
@@ -477,7 +447,16 @@
 
     <!-- Main Content Area -->
     <div class="flex-1 flex flex-col bg-white overflow-y-auto relative">
-      {#if selectedDocument}
+      {#if showDirectoryPicker}
+        <DirectorySelection
+          isSetting={isSettingDirectory}
+          allowCancel={$systemStatus?.directory_set ?? false}
+          on:select={handleDirectorySelect}
+          on:cancel={() => {
+            wantsToChangeFolder = false;
+          }}
+        />
+      {:else if selectedDocument}
         <!-- Document Viewer Overlay -->
         <div class="absolute inset-0 z-50 bg-white flex flex-col">
           <!-- Document Viewer Header -->
@@ -527,7 +506,7 @@
           </div>
         </div>
       {:else}
-{@render children()}
+        {@render children()}
       {/if}
     </div>
   </div>
