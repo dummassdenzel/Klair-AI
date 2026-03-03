@@ -16,6 +16,7 @@
   import MarkdownRenderer from "$lib/components/MarkdownRenderer.svelte";
   import FileTypeIcon from "$lib/components/FileTypeIcon.svelte";
   import { getFileTypeConfig } from "$lib/utils/fileTypes";
+  import { messageToConversationTitle } from "$lib/utils/chatTitle";
 
   let messages: ChatMessage[] = [];
   let expandedSources: Record<number, boolean> = {};
@@ -132,7 +133,7 @@
     if (!session) {
       session = await apiService.createChatSession(
         $systemStatus?.current_directory || "",
-        `Chat about: ${message.substring(0, 50)}...`,
+        messageToConversationTitle(message),
       );
       currentChatSession.set(session);
       await loadChatHistory();
@@ -195,7 +196,7 @@
       }
 
       if (messages.length === 2) {
-        const newTitle = `Chat about: ${message.substring(0, 50)}...`;
+        const newTitle = messageToConversationTitle(message);
         await apiService.updateChatSessionTitle(session.id, newTitle);
         session.title = newTitle;
         currentChatSession.set(session);
@@ -272,7 +273,7 @@
         class="px-6 py-2.5 text-xs bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
         aria-label="Change document directory"
       >
-        Change Directory
+        Change Folder
       </button>
     {/if}
   </div>

@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
 import json
+import re
 
 from schemas.chat import ChatRequest, ChatResponse
 from query_cache import get_query_cache_key
@@ -18,9 +19,24 @@ def _format_sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _message_to_title(message: str, max_length: int = 48) -> str:
+    """Build a short conversation title from the first user message."""
+    if not message or not isinstance(message, str):
+        return "New chat"
+    trimmed = message.strip()
+    if not trimmed:
+        return "New chat"
+    # Split on period or newline only so questions keep "?" and "!"
+    first = re.split(r"[.\n]", trimmed, maxsplit=1)[0].strip()
+    base = first or trimmed
+    if len(base) <= max_length:
+        return base
+    return base[:max_length].rstrip() + "…"
+
+
 async def _get_or_create_session(session_id: int | None, directory: str, message: str):
     """Resolve an existing session or create a new one."""
-    title = f"Chat about: {message[:50]}..."
+    title = _message_to_title(message)
     if session_id:
         try:
             session = await db_service.get_chat_session_by_id(session_id)
