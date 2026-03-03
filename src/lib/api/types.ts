@@ -57,6 +57,11 @@ export interface ChatRequest {
     indexed_at?: string;
   }
 
+  /** Tree node for IDE-style document list: folder (with children) or file (with document). */
+  export type DocumentTreeNode =
+    | { type: 'folder'; name: string; pathKey: string; children: DocumentTreeNode[] }
+    | { type: 'file'; name: string; document: IndexedDocument };
+
   export interface SearchResult {
     status: string;
     documents: {

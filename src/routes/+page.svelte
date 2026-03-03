@@ -14,6 +14,8 @@
   } from "$lib/stores/api";
   import type { ChatMessage } from "$lib/api/types";
   import MarkdownRenderer from "$lib/components/MarkdownRenderer.svelte";
+  import FileTypeIcon from "$lib/components/FileTypeIcon.svelte";
+  import { getFileTypeConfig } from "$lib/utils/fileTypes";
 
   let messages: ChatMessage[] = [];
   let expandedSources: Record<number, boolean> = {};
@@ -444,14 +446,11 @@
                           class="flex items-start gap-3 p-3 bg-white rounded-lg border border-gray-100"
                         >
                           <div
-                            class="w-8 h-8 bg-[#443C68]/10 rounded-lg flex items-center justify-center flex-shrink-0"
+                            class="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0"
                           >
-                            <span
-                              class="text-xs font-bold text-[#443C68] uppercase"
-                            >
-                              {source.file_type || "DOC"}
-              </span>
-            </div>
+                            <FileTypeIcon fileType={source.file_type} class="w-4 h-4 flex-shrink-0" />
+                            <span class="sr-only">{getFileTypeConfig(source.file_type).label}</span>
+                          </div>
                           <div class="flex-1 min-w-0">
                             <div
                               class="text-sm font-medium text-[#37352F] truncate mb-1"
@@ -479,8 +478,9 @@
                           class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white rounded-full border border-gray-200 text-[0.625rem] hover:border-[#443C68] transition-colors cursor-default"
                           title="{source.file_path?.split('\\').pop()} - {(source.relevance_score * 100).toFixed(1)}% relevance"
                         >
-                          <span class="font-bold text-[#443C68] uppercase">
-                            {source.file_type || "DOC"}
+                          <FileTypeIcon fileType={source.file_type} class="w-3.5 h-3.5 flex-shrink-0" />
+                          <span class="font-bold {getFileTypeConfig(source.file_type).color} uppercase">
+                            {getFileTypeConfig(source.file_type).label}
                           </span>
                           <span class="text-[#37352F] font-medium truncate max-w-[200px]">
                             {source.file_path?.split("\\").pop() || "Unknown"}

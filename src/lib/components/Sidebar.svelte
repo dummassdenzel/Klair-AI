@@ -3,11 +3,14 @@
   import { onMount, onDestroy } from 'svelte';
   import type { ChatSession, IndexedDocument } from '$lib/api/types';
   import { updateQueueStatus } from '$lib/stores/api';
+  import DocumentTreeNav from '$lib/components/DocumentTreeNav.svelte';
+  import type { DocumentTreeNode } from '$lib/api/types';
 
   let {
     currentRoute = '/',
     chatHistory = [],
     indexedDocuments = [],
+    workspaceRoot = '',
     currentChatSession = null,
     isLoadingDocuments = false,
     isIndexingInProgress = false,
@@ -25,6 +28,7 @@
     currentRoute?: string;
     chatHistory?: ChatSession[];
     indexedDocuments?: IndexedDocument[];
+    workspaceRoot?: string;
     currentChatSession?: ChatSession | null;
     isLoadingDocuments?: boolean;
     isIndexingInProgress?: boolean;
@@ -107,6 +111,82 @@
 
     return filtered;
   });
+
+  /** Build a folder hierarchy from flat document list. Paths are normalized and optionally made relative to workspaceRoot. */
+  function buildDocumentTree(docs: IndexedDocument[], root: string): DocumentTreeNode[] {
+    const rootNorm = root ? root.replace(/\\/g, '/').replace(/\/+$/, '') + '/' : '';
+    const tree = new Map<string, { name: string; pathKey: string; children: DocumentTreeNode[] }>();
+
+    function ensureFolder(segments: string[]): { name: string; pathKey: string; children: DocumentTreeNode[] } {
+      if (segments.length === 0) {
+        const pathKey = '';
+        if (!tree.has(pathKey)) {
+          tree.set(pathKey, { name: '', pathKey, children: [] });
+        }
+        return tree.get(pathKey)!;
+      }
+      const pathKey = segments.join('/');
+      if (tree.has(pathKey)) return tree.get(pathKey)!;
+      const name = segments[segments.length - 1];
+      const parent = ensureFolder(segments.slice(0, -1));
+      const node = { name, pathKey, children: [] as DocumentTreeNode[] };
+      parent.children.push({ type: 'folder', name: node.name, pathKey: node.pathKey, children: node.children });
+      tree.set(pathKey, node);
+      return node;
+    }
+
+    for (const doc of docs) {
+      const full = (doc.file_path || '').replace(/\\/g, '/');
+      const relative = rootNorm && full.startsWith(rootNorm) ? full.slice(rootNorm.length) : full;
+      const segments = relative.split('/').filter(Boolean);
+      if (segments.length === 0) continue;
+      const fileName = segments.pop()!;
+      const folder = ensureFolder(segments);
+      folder.children.push({ type: 'file', name: fileName, document: doc });
+    }
+
+    function sortNodes(nodes: DocumentTreeNode[]): void {
+      nodes.sort((a, b) => {
+        const aIsFolder = a.type === 'folder';
+        const bIsFolder = b.type === 'folder';
+        if (aIsFolder !== bIsFolder) return aIsFolder ? -1 : 1;
+        const nameA = (a.type === 'folder' ? a.name : a.name).toLowerCase();
+        const nameB = (b.type === 'folder' ? b.name : b.name).toLowerCase();
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      });
+      for (const n of nodes) {
+        if (n.type === 'folder') sortNodes(n.children);
+      }
+    }
+
+    const rootNode = tree.get('');
+    const rootChildren = rootNode ? rootNode.children : [];
+    sortNodes(rootChildren);
+    return rootChildren;
+  }
+
+  let documentTreeRoots = $derived(buildDocumentTree(filteredAndSortedDocuments, workspaceRoot));
+  let expandedPathKeys = $state<Set<string>>(new Set());
+
+  // Default-expand root-level folders once when tree has data
+  $effect(() => {
+    const roots = documentTreeRoots;
+    if (roots.length === 0 || expandedPathKeys.size > 0) return;
+    const next = new Set<string>();
+    for (const node of roots) {
+      if (node.type === 'folder') next.add(node.pathKey);
+    }
+    expandedPathKeys = next;
+  });
+
+  function toggleFolder(pathKey: string) {
+    expandedPathKeys = new Set(expandedPathKeys);
+    if (expandedPathKeys.has(pathKey)) {
+      expandedPathKeys.delete(pathKey);
+    } else {
+      expandedPathKeys.add(pathKey);
+    }
+  }
 
   // Close dropdown when clicking outside
   function handleClickOutside(event: MouseEvent) {
@@ -610,45 +690,13 @@
             No documents match your filters
           </div>
         {:else}
-          <div class="space-y-2">
-            {#each filteredAndSortedDocuments as doc}
-              <button
-                onclick={() => onDocumentClick(doc)}
-                class="w-full text-left bg-white p-3 rounded-lg border border-gray-200 hover:border-[#443C68] transition-colors cursor-pointer"
-              >
-                <div class="flex items-start gap-3">
-                  <div class="flex-shrink-0">
-                    {#if doc.file_type === 'pdf'}
-                      <svg class="w-5 h-5 text-red-500" fill="currentColor" viewBox="0 0 20 20">
-                        <path d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z"></path>
-                      </svg>
-                    {:else if doc.file_type === 'docx'}
-                      <svg class="w-5 h-5 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
-                        <path d="M9 2a2 2 0 00-2 2v8a2 2 0 002 2h6a2 2 0 002-2V6.414A2 2 0 0016.414 5L14 2.586A2 2 0 0012.586 2H9z"></path>
-                      </svg>
-                    {:else}
-                      <svg class="w-5 h-5 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
-                        <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"></path>
-                      </svg>
-                    {/if}
-                  </div>
-                  <div class="flex-1 min-w-0">
-                    <div class="text-sm font-medium text-[#37352F] truncate" title={doc.file_path}>
-                      {doc.file_path?.split('\\').pop() || doc.file_path?.split('/').pop() || 'Unknown'}
-                    </div>
-                    <div class="flex items-center gap-2 mt-1 text-xs text-gray-500">
-                      <span class="uppercase">{doc.file_type}</span>
-                      <span>•</span>
-                      <span>{doc.chunks_count || 0} chunks</span>
-                      {#if doc.file_size}
-                        <span>•</span>
-                        <span>{(doc.file_size / 1024).toFixed(1)} KB</span>
-                      {/if}
-                    </div>
-                  </div>
-                </div>
-              </button>
-            {/each}
+          <div class="py-2">
+            <DocumentTreeNav
+              nodes={documentTreeRoots}
+              expandedPathKeys={expandedPathKeys}
+              onToggleFolder={toggleFolder}
+              onDocumentClick={onDocumentClick}
+            />
           </div>
           {/if}
         </div>

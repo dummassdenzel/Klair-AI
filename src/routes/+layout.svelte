@@ -20,6 +20,8 @@
   } from '$lib/stores/api';
   import DirectorySelection from '$lib/components/DirectorySelection.svelte';
   import DocumentViewer from '$lib/components/DocumentViewer.svelte';
+  import FileTypeIcon from '$lib/components/FileTypeIcon.svelte';
+  import { getFileTypeConfig } from '$lib/utils/fileTypes';
 
   let { children } = $props();
 
@@ -426,6 +428,7 @@
       currentRoute={$page.url.pathname}
       chatHistory={$chatHistory}
       indexedDocuments={indexedDocuments}
+      workspaceRoot={$systemStatus?.current_directory ?? ''}
       currentChatSession={$currentChatSession}
       isLoadingDocuments={isLoadingDocuments}
       isIndexingInProgress={isIndexingInProgress}
@@ -463,26 +466,14 @@
           <div class="flex-shrink-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
             <div class="flex items-center gap-3">
               <div class="flex-shrink-0">
-                {#if selectedDocument.file_type === 'pdf'}
-                  <svg class="w-6 h-6 text-red-500" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z"></path>
-                  </svg>
-                {:else if selectedDocument.file_type === 'docx'}
-                  <svg class="w-6 h-6 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M9 2a2 2 0 00-2 2v8a2 2 0 002 2h6a2 2 0 002-2V6.414A2 2 0 0016.414 5L14 2.586A2 2 0 0012.586 2H9z"></path>
-                  </svg>
-                {:else}
-                  <svg class="w-6 h-6 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
-                    <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"></path>
-                  </svg>
-                {/if}
+                <FileTypeIcon fileType={selectedDocument.file_type} class="w-6 h-6 flex-shrink-0" />
               </div>
               <div>
                 <h2 class="text-lg font-semibold text-[#37352F] truncate max-w-2xl">
                   {selectedDocument.file_path?.split('\\').pop() || selectedDocument.file_path?.split('/').pop() || 'Unknown'}
                 </h2>
                 <div class="text-xs text-gray-500 mt-1">
-                  <span class="uppercase">{selectedDocument.file_type}</span>
+                  <span>{getFileTypeConfig(selectedDocument.file_type).label}</span>
                   {#if selectedDocument.file_size}
                     <span> • {(selectedDocument.file_size / 1024).toFixed(1)} KB</span>
                   {/if}

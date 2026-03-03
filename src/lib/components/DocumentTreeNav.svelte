@@ -1,0 +1,83 @@
+<script lang="ts">
+  import type { IndexedDocument, DocumentTreeNode } from '$lib/api/types';
+  import DocumentTreeNav from '$lib/components/DocumentTreeNav.svelte';
+  import FileTypeIcon from '$lib/components/FileTypeIcon.svelte';
+
+  let {
+    nodes = [],
+    expandedPathKeys = new Set<string>(),
+    onToggleFolder = () => {},
+    onDocumentClick = () => {},
+    depth = 0
+  } = $props<{
+    nodes: DocumentTreeNode[];
+    expandedPathKeys: Set<string>;
+    onToggleFolder?: (pathKey: string) => void;
+    onDocumentClick?: (doc: IndexedDocument) => void;
+    depth?: number;
+  }>();
+
+  const paddingLeft = 12;
+  const indent = depth * paddingLeft;
+</script>
+
+<ul class="list-none pl-0" style="padding-left: {indent}px;">
+  {#each nodes as node (node.type === 'folder' ? node.pathKey : `file-${node.document.id}`)}
+    {#if node.type === 'folder'}
+      <li class="select-none">
+        <button
+          type="button"
+          onclick={() => onToggleFolder(node.pathKey)}
+          class="w-full text-left flex items-center gap-1 py-1.5 pr-2 rounded-md hover:bg-gray-200/80 text-gray-700 text-sm group"
+          style="padding-left: {depth > 0 ? 0 : 4}px;"
+        >
+          <span
+            class="flex-shrink-0 w-4 h-4 flex items-center justify-center transition-transform {expandedPathKeys.has(node.pathKey) ? 'rotate-90' : ''}"
+            aria-hidden="true"
+          >
+            <svg class="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+            </svg>
+          </span>
+          <svg
+            class="w-4 h-4 text-amber-500 flex-shrink-0"
+            fill="currentColor"
+            viewBox="0 0 20 20"
+            aria-hidden="true"
+          >
+            <path
+              d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"
+            />
+          </svg>
+          <span class="truncate font-medium">{node.name}</span>
+        </button>
+        {#if expandedPathKeys.has(node.pathKey)}
+          <div class="border-l border-gray-200 ml-2 mt-0.5" style="margin-left: {paddingLeft / 2 + 2}px;">
+            <DocumentTreeNav
+              nodes={node.children}
+              expandedPathKeys={expandedPathKeys}
+              onToggleFolder={onToggleFolder}
+              onDocumentClick={onDocumentClick}
+              depth={depth + 1}
+            />
+          </div>
+        {/if}
+      </li>
+    {:else}
+      <li>
+        <button
+          type="button"
+          onclick={() => onDocumentClick(node.document)}
+          class="w-full text-left flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-gray-200/80 transition-colors cursor-pointer text-sm group"
+          title={node.document.file_path}
+        >
+          <FileTypeIcon fileType={node.document.file_type} />
+          <span class="truncate text-[#37352F]">{node.name}</span>
+          {#if node.document.chunks_count != null}
+            <span class="flex-shrink-0 text-xs text-gray-400 ml-auto">{node.document.chunks_count}</span>
+          {/if}
+        </button>
+      </li>
+    {/if}
+  {/each}
+</ul>
