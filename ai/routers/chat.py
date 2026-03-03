@@ -31,14 +31,29 @@ async def _get_or_create_session(session_id: int | None, directory: str, message
     return await db_service.create_chat_session(directory_path=directory, title=title)
 
 
-async def _build_conversation_history(session_id: int) -> list:
+async def _build_conversation_history(session_id: int, doc_processor) -> list:
     try:
         previous = await db_service.get_chat_history(session_id)
-        recent = previous[-3:] if len(previous) > 3 else previous
-        history = []
-        for msg in recent:
-            history.append({"role": "user", "content": msg.user_message})
-            history.append({"role": "assistant", "content": msg.ai_response})
+        # Build ordered list of user/assistant pairs for the entire conversation
+        pairs = [
+            {"user": msg.user_message, "assistant": msg.ai_response}
+            for msg in previous
+        ]
+
+        # Prefer orchestrator's summarization-aware history builder when available
+        if hasattr(doc_processor, "build_conversation_history"):
+            return await doc_processor.build_conversation_history(pairs)
+
+        # Fallback: keep last 3 exchanges (previous behavior)
+        recent = pairs[-3:] if len(pairs) > 3 else pairs
+        history: list = []
+        for pair in recent:
+            user_msg = (pair.get("user") or "").strip()
+            ai_msg = (pair.get("assistant") or "").strip()
+            if user_msg:
+                history.append({"role": "user", "content": user_msg})
+            if ai_msg:
+                history.append({"role": "assistant", "content": ai_msg})
         return history
     except Exception as e:
         logger.warning(f"Could not fetch conversation history: {e}")
@@ -65,7 +80,7 @@ async def chat(chat_request: ChatRequest, request: Request, state=Depends(requir
                 logger.info(f"Query cache hit for session {chat_session.id}")
                 return ChatResponse(message=cached["message"], sources=cached["sources"])
 
-        conversation_history = await _build_conversation_history(chat_session.id)
+        conversation_history = await _build_conversation_history(chat_session.id, state.doc_processor)
         response = await state.doc_processor.query(
             chat_request.message, conversation_history=conversation_history
         )
@@ -95,7 +110,7 @@ async def chat_stream(chat_request: ChatRequest, request: Request, state=Depends
         chat_session = await _get_or_create_session(
             chat_request.session_id, state.current_directory, chat_request.message
         )
-        conversation_history = await _build_conversation_history(chat_session.id)
+        conversation_history = await _build_conversation_history(chat_session.id, state.doc_processor)
 
         async def event_generator():
             sources = []

@@ -329,14 +329,14 @@ actually differentiate a document workspace.
 | **Problem** | All files are chunked as flat text. Code files lose structural context (functions split mid-body, imports separated from usage). |
 | **Solution** | Detect file type and use language-aware chunking for code files (by function/class boundaries). Use tree-sitter or simple AST parsing. |
 
-### 5.2 Smarter Context Selection
+### 5.2 Smarter Context Selection ✅
 
 | Item | Detail |
 |------|--------|
 | **Problem** | RAG retrieves chunks by similarity, losing document structure. When a user asks about a specific file, you should read the whole file, not scattered chunks. |
 | **Solution** | For single-file queries, read the full file content (up to a limit). Reserve chunk-based retrieval for cross-file queries. |
 
-### 5.3 Conversation Memory Improvements
+### 5.3 Conversation Memory Improvements ✅
 
 | Item | Detail |
 |------|--------|

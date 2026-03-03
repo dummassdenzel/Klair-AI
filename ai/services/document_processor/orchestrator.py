@@ -1010,6 +1010,93 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
                 rerank_count=0
             )
     
+    async def build_conversation_history(
+        self,
+        message_pairs: List[Dict[str, str]],
+    ) -> List[Dict[str, str]]:
+        """
+        Build LLM-ready conversation history with lightweight summarization.
+        
+        - If the conversation is short, include all turns.
+        - If it's longer, summarize older turns into a compact system message
+          and keep the most recent exchanges verbatim.
+        """
+        if not message_pairs:
+            return []
+
+        # How many recent user/assistant pairs to keep verbatim
+        max_recent_pairs = 6  # 12 messages (user+assistant)
+
+        # Short conversations: just return all turns
+        if len(message_pairs) <= max_recent_pairs:
+            history: List[Dict[str, str]] = []
+            for pair in message_pairs:
+                user_msg = (pair.get("user") or "").strip()
+                ai_msg = (pair.get("assistant") or "").strip()
+                if user_msg:
+                    history.append({"role": "user", "content": user_msg})
+                if ai_msg:
+                    history.append({"role": "assistant", "content": ai_msg})
+            return history
+
+        # Longer conversations: summarize older part, keep last N pairs verbatim
+        older_pairs = message_pairs[:-max_recent_pairs]
+        recent_pairs = message_pairs[-max_recent_pairs:]
+
+        summary_text = ""
+        try:
+            # Build a plain-text transcript of older turns
+            lines: List[str] = []
+            for pair in older_pairs:
+                user_msg = (pair.get("user") or "").strip()
+                ai_msg = (pair.get("assistant") or "").strip()
+                if user_msg:
+                    lines.append(f"User: {user_msg}")
+                if ai_msg:
+                    lines.append(f"Assistant: {ai_msg}")
+            transcript = "\n".join(lines)
+
+            # Limit input size for the summarization call
+            max_input_chars = 4000
+            if len(transcript) > max_input_chars:
+                # Keep the most recent portion of older history
+                transcript = transcript[-max_input_chars:]
+
+            prompt = (
+                "Summarize the following conversation between a user and an AI assistant.\n"
+                "Focus on key facts about the user's documents, goals, constraints, and decisions.\n"
+                "Write 3–6 short bullet points.\n\n"
+                f"Conversation:\n{transcript}"
+            )
+            summary = await self.llm_service.generate_simple(
+                prompt,
+                prompt_type="short_direct",
+                max_completion_tokens=256,
+            )
+            summary_text = (summary or "").strip()
+        except Exception as e:
+            logger.warning(f"Conversation summarization failed, falling back to recent turns only: {e}")
+            summary_text = ""
+
+        history: List[Dict[str, str]] = []
+        if summary_text:
+            history.append(
+                {
+                    "role": "system",
+                    "content": "Summary of earlier conversation:\n" + summary_text,
+                }
+            )
+
+        for pair in recent_pairs:
+            user_msg = (pair.get("user") or "").strip()
+            ai_msg = (pair.get("assistant") or "").strip()
+            if user_msg:
+                history.append({"role": "user", "content": user_msg})
+            if ai_msg:
+                history.append({"role": "assistant", "content": ai_msg})
+
+        return history
+    
     async def _retrieve_and_build_context(
         self,
         question: str,
