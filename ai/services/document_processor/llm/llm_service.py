@@ -373,8 +373,16 @@ class LLMService:
         if conversation_history:
             conversation_context = "\n\nPrevious conversation:\n"
             for msg in conversation_history:
-                role = "User" if msg["role"] == "user" else "Assistant"
-                conversation_context += f"{role}: {msg['content']}\n"
+                role = msg.get("role", "user")
+                content = (msg.get("content") or "").strip()
+                if not content:
+                    continue
+                if role == "system":
+                    conversation_context += f"[Summary of earlier conversation]\n{content}\n\n"
+                elif role == "user":
+                    conversation_context += f"User: {content}\n"
+                else:
+                    conversation_context += f"Assistant: {content}\n"
 
         return f"""Answer the question using ONLY the document context below. Cite sources as [Document: filename].
 {conversation_context}
