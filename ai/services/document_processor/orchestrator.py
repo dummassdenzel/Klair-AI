@@ -1063,33 +1063,125 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
                 "metadata": metadata,
             })
 
+        # ------------------------------------------------------------------
+        # Smarter context selection: detect single-file intent and, when
+        # appropriate, build a richer context focused on that file.
+        # ------------------------------------------------------------------
+        single_file_mode = False
+        primary_file_path: Optional[str] = None
+
+        if file_chunks:
+            # Count chunks per file from retrieval results
+            per_file_counts = {fp: len(chunks) for fp, chunks in file_chunks.items()}
+            total_chunks = sum(per_file_counts.values())
+            primary_file_path, primary_count = max(per_file_counts.items(), key=lambda kv: kv[1])
+
+            if len(per_file_counts) == 1:
+                # Only one file in play – clear single-file intent
+                single_file_mode = True
+            else:
+                dominant_ratio = primary_count / max(1, total_chunks)
+                # If user mentioned a filename explicitly, be more willing to
+                # treat it as single-file even if a few other chunks appear.
+                if explicit_filename and not is_aggregation and dominant_ratio >= 0.6:
+                    single_file_mode = True
+                # Otherwise require a stronger dominance signal.
+                elif not is_aggregation and dominant_ratio >= 0.8 and primary_count >= 3:
+                    single_file_mode = True
+
         sources: List[Dict] = []
         context_parts: List[str] = []
-        files_to_process = file_chunks.items()
-        if selected_files:
-            files_to_process = [(fp, ch) for fp, ch in file_chunks.items() if any(sf in fp for sf in selected_files)]
 
-        max_per_doc = self.retrieval_config.get_rag_max_per_doc_chars(is_aggregation)
-        for fp, chunks in files_to_process:
-            chunks.sort(key=lambda x: x["chunk_id"])
-            filename = Path(fp).name
-            file_text = "\n".join(c["text"] for c in chunks)
-            if max_per_doc > 0 and len(file_text) > max_per_doc:
-                file_text = file_text[:max_per_doc].rstrip() + "\n[...]"
-            context_parts.append(f"[Document: {filename}]\n{file_text}")
-            avg_score = sum(c["score"] for c in chunks) / len(chunks)
-            snippet = file_text[:300] + "..." if len(file_text) > 300 else file_text
-            sources.append({
-                "file_path": fp,
-                "relevance_score": round(min(1.0, avg_score * 50), 3),
-                "content_snippet": snippet,
-                "chunks_found": len(chunks),
-                "file_type": chunks[0]["metadata"].get("file_type", "unknown"),
-            })
+        # Single-file path: try to load all chunks for the primary file from the
+        # vector store so the model sees a coherent view of that document.
+        if single_file_mode and primary_file_path:
+            try:
+                all_chunks_data = self.vector_store.get_document_chunks(primary_file_path)
+            except Exception as e:
+                logger.warning(f"Could not load full chunks for {primary_file_path}: {e}")
+                all_chunks_data = None
 
-        sources.sort(key=lambda x: x["relevance_score"], reverse=True)
-        source_limit = self.retrieval_config.get_source_limit(query_type, explicit_filename is not None, is_aggregation)
-        sources = sources[:source_limit]
+            full_text = ""
+            full_chunk_count = 0
+            if all_chunks_data and all_chunks_data.get("documents"):
+                docs_list = all_chunks_data.get("documents") or []
+                metas_list = all_chunks_data.get("metadatas") or [{} for _ in docs_list]
+                pairs = list(zip(docs_list, metas_list))
+                pairs.sort(key=lambda p: p[1].get("chunk_id", 0))
+                full_text = "\n".join(doc for doc, _ in pairs)
+                full_chunk_count = len(pairs)
+            else:
+                # Fallback: use only retrieved chunks for that file
+                chunks = file_chunks.get(primary_file_path, [])
+                chunks.sort(key=lambda x: x["chunk_id"])
+                full_text = "\n".join(c["text"] for c in chunks)
+                full_chunk_count = len(chunks)
+
+            max_per_doc = self.retrieval_config.get_rag_max_per_doc_chars(is_aggregation)
+            if max_per_doc > 0 and len(full_text) > max_per_doc:
+                full_text_display = full_text[:max_per_doc].rstrip() + "\n[...]"
+            else:
+                full_text_display = full_text
+
+            filename = Path(primary_file_path).name
+            context_parts.append(f"[Document: {filename}]\n{full_text_display}")
+
+            primary_chunks = file_chunks.get(primary_file_path, [])
+            if primary_chunks:
+                avg_score = sum(c["score"] for c in primary_chunks) / len(primary_chunks)
+                sample_meta = primary_chunks[0]["metadata"]
+                snippet_source = full_text if full_text else "\n".join(c["text"] for c in primary_chunks)
+                snippet = snippet_source[:300] + "..." if len(snippet_source) > 300 else snippet_source
+                sources.append({
+                    "file_path": primary_file_path,
+                    "relevance_score": round(min(1.0, avg_score * 50), 3),
+                    "content_snippet": snippet,
+                    "chunks_found": full_chunk_count or len(primary_chunks),
+                    "file_type": sample_meta.get("file_type", "unknown"),
+                })
+            else:
+                # Extremely defensive: should not happen if we had retrieval results
+                snippet = full_text[:300] + "..." if len(full_text) > 300 else full_text
+                sources.append({
+                    "file_path": primary_file_path,
+                    "relevance_score": 1.0,
+                    "content_snippet": snippet,
+                    "chunks_found": full_chunk_count,
+                    "file_type": "unknown",
+                })
+        else:
+            # Multi-file path: keep existing behavior (group by file, cap per doc).
+            files_to_process = file_chunks.items()
+            if selected_files:
+                files_to_process = [
+                    (fp, ch)
+                    for fp, ch in file_chunks.items()
+                    if any(sf in fp for sf in selected_files)
+                ]
+
+            max_per_doc = self.retrieval_config.get_rag_max_per_doc_chars(is_aggregation)
+            for fp, chunks in files_to_process:
+                chunks.sort(key=lambda x: x["chunk_id"])
+                filename = Path(fp).name
+                file_text = "\n".join(c["text"] for c in chunks)
+                if max_per_doc > 0 and len(file_text) > max_per_doc:
+                    file_text = file_text[:max_per_doc].rstrip() + "\n[...]"
+                context_parts.append(f"[Document: {filename}]\n{file_text}")
+                avg_score = sum(c["score"] for c in chunks) / len(chunks)
+                snippet = file_text[:300] + "..." if len(file_text) > 300 else file_text
+                sources.append({
+                    "file_path": fp,
+                    "relevance_score": round(min(1.0, avg_score * 50), 3),
+                    "content_snippet": snippet,
+                    "chunks_found": len(chunks),
+                    "file_type": chunks[0]["metadata"].get("file_type", "unknown"),
+                })
+
+            sources.sort(key=lambda x: x["relevance_score"], reverse=True)
+            source_limit = self.retrieval_config.get_source_limit(
+                query_type, explicit_filename is not None, is_aggregation
+            )
+            sources = sources[:source_limit]
 
         return {
             "context": "\n\n---\n\n".join(context_parts),
