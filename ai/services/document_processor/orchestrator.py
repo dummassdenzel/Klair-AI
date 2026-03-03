@@ -696,21 +696,33 @@ class DocumentProcessorOrchestrator:
     
     def _find_explicit_filename(self, question: str) -> Optional[str]:
         """
-        Simple filename detection: only for explicit filename mentions.
-        
-        Returns:
-            Filename if explicitly mentioned (quoted or obvious pattern), None otherwise
+        Detect explicit document identifiers so we can resolve to a single file.
+        Handles: quoted names, full filenames with extension, and stems like BIP-12046.
         """
-        # Check for quoted filenames
+        # Quoted filenames
         quoted = re.findall(r'"([^"]+)"', question)
         if quoted:
             return quoted[0]
         
-        # Check for obvious filename patterns (e.g., "sales_report.pdf", "TCO005")
-        filename_pattern = re.search(r'\b([A-Z][A-Z0-9_-]+\.(pdf|docx|txt|xlsx|pptx)|[A-Z][A-Z0-9]{2,})\b', question)
-        if filename_pattern:
-            return filename_pattern.group(1)
+        # Full filename with extension (e.g. BIP-12046.pdf, report.docx)
+        with_ext = re.search(
+            r'\b([A-Za-z][A-Za-z0-9_.-]+\.(pdf|docx|txt|xlsx|xls|pptx))\b',
+            question,
+            re.IGNORECASE,
+        )
+        if with_ext:
+            return with_ext.group(1)
         
+        # Stem-only identifier (e.g. BIP-12046, TCO005) so "explain BIP-12046" resolves to BIP-12046.pdf.
+        # Require digit/hyphen/underscore to avoid matching normal words like "explain" or "document".
+        stem = re.search(
+            r'\b([A-Za-z][A-Za-z0-9_-]{2,})\b',
+            question,
+        )
+        if stem:
+            token = stem.group(1)
+            if any(c in token for c in "0123456789-_"):
+                return token
         return None
     
     async def _select_relevant_files(self, question: str) -> Optional[List[str]]:
