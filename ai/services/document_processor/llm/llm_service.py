@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, AsyncIterator
+from typing import Any, Dict, List, Optional, Tuple, AsyncIterator
 from config import settings
 import asyncio
 import json
@@ -47,6 +47,10 @@ class LLMService:
     def get_max_listing_context_chars(self) -> int:
         """Max chars for document listing context so all files fit in one prompt. Used by orchestrator."""
         return self._adapter.get_max_listing_context_chars()
+
+    def supports_tool_calling(self) -> bool:
+        """True if this provider supports native tool/function calling (e.g. Groq). Enables single-loop agent flow."""
+        return self._adapter.supports_tool_calling()
 
     def _initialize_client(self):
         """Initialize client for the selected provider (lazy)."""
@@ -262,6 +266,83 @@ class LLMService:
                         continue
         except Exception as e:
             logger.error(f"Error in LLM stream: {e}")
+            yield "I couldn't generate a response due to an error."
+
+    async def chat_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        max_tokens: int = 4096,
+    ) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
+        """
+        Phase B.3 – Single-loop tool calling. Send messages + tools; return (content, tool_calls).
+        Only supported when provider is Groq. Returns (content, None) or (None, tool_calls) or (content, []).
+        tool_calls format: [{"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}, ...].
+        """
+        if not self.supports_tool_calling():
+            logger.warning("chat_with_tools called but provider does not support tool calling")
+            return None, None
+        try:
+            self._initialize_client()
+            completion = await self._groq.chat.completions.create(
+                messages=messages,
+                model=self.groq_model,
+                tools=tools,
+                tool_choice="auto",
+                temperature=0.1,
+                max_completion_tokens=max_tokens,
+                stream=False,
+            )
+            msg = completion.choices[0].message if completion.choices else None
+            if not msg:
+                return "I couldn't generate a response.", None
+            content = (getattr(msg, "content", None) or "").strip() or None
+            raw_tool_calls = getattr(msg, "tool_calls", None) or []
+            tool_calls = []
+            for tc in raw_tool_calls:
+                if not getattr(tc, "id", None) or not getattr(tc, "function", None):
+                    continue
+                fn = tc.function
+                tool_calls.append({
+                    "id": tc.id,
+                    "type": getattr(tc, "type", "function"),
+                    "function": {
+                        "name": getattr(fn, "name", ""),
+                        "arguments": getattr(fn, "arguments", "") or "{}",
+                    },
+                })
+            return content, tool_calls if tool_calls else None
+        except Exception as e:
+            logger.error(f"chat_with_tools failed: {e}")
+            return "I couldn't generate a response due to an error.", None
+
+    async def chat_messages_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        max_tokens: int = 4096,
+    ) -> AsyncIterator[str]:
+        """
+        Phase B.3 – Stream the final answer from a conversation (e.g. after tool results).
+        Takes a list of messages (no tools). Only supported for Groq.
+        """
+        if not self.supports_tool_calling():
+            logger.warning("chat_messages_stream called but provider does not support it")
+            return
+        try:
+            self._initialize_client()
+            stream = await self._groq.chat.completions.create(
+                messages=messages,
+                model=self.groq_model,
+                temperature=0.1,
+                max_completion_tokens=max_tokens,
+                stream=True,
+            )
+            async for chunk in stream:
+                delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+                if delta:
+                    yield delta
+        except Exception as e:
+            logger.error(f"chat_messages_stream failed: {e}")
             yield "I couldn't generate a response due to an error."
 
     async def generate_simple(

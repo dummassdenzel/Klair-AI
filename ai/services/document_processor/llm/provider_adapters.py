@@ -42,6 +42,10 @@ class LLMProviderAdapter(ABC):
         """Max completion tokens for this prompt type. Types: classification, short_direct, document_listing, rag."""
         pass
 
+    def supports_tool_calling(self) -> bool:
+        """True if this provider supports native tool/function calling (e.g. Groq). Enables single-loop agent flow."""
+        return False
+
     def truncate_context(self, context: str) -> str:
         """Truncate RAG context to provider limit. Default: by document boundary."""
         max_chars = self.get_max_context_chars()
@@ -93,6 +97,9 @@ class GroqAdapter(LLMProviderAdapter):
         if prompt_type in (PROMPT_TYPE_CLASSIFICATION, PROMPT_TYPE_SHORT_DIRECT):
             return 200
         return 8192  # rag
+
+    def supports_tool_calling(self) -> bool:
+        return True
 
 
 class OllamaAdapter(LLMProviderAdapter):

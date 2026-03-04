@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -26,6 +27,18 @@ from .updates.chunk_differ import ChunkDiffer
 from .updates.update_strategy import UpdateStrategySelector
 from .query_config import RetrievalConfig, default_retrieval_config, is_aggregation_query
 from .corpus_summary import summarize_corpus
+from .tools.contract import (
+    ListDocumentsResult,
+    SearchDocumentsResult,
+    SummarizeCorpusResult,
+    TOOL_LIST_DOCUMENTS,
+    TOOL_SEARCH_DOCUMENTS,
+    TOOL_SEARCH_SPECIFIC_DOCUMENT,
+    TOOL_SUMMARIZE_CORPUS,
+    get_openai_format_tools,
+    validate_tool_call,
+    validate_tool_calls,
+)
 from database import DatabaseService
 from ..routing import Router, QueryClassifier, Route
 
@@ -34,6 +47,10 @@ logger = logging.getLogger(__name__)
 
 # Default max size for metadata cache (prevents unbounded memory with 1000+ files)
 DEFAULT_METADATA_CACHE_MAX_SIZE = 2000
+
+# Phase B.3 – Agent loop guards
+MAX_TOOL_CALLS_PER_QUERY = 4
+TOOL_EXECUTION_TIMEOUT_SECONDS = 10
 
 
 class MetadataCache:
@@ -932,6 +949,19 @@ Your response:"""
                 logger.info(f"Filtered to {len(documents)} chunks from explicit filename '{explicit_filename}'")
         
         return (documents, metadatas, scores, retrieval_count, rerank_count)
+
+    async def _get_all_indexed_docs(self) -> List[Any]:
+        """Return all indexed documents (indexed or metadata_only) for the current DB. Used by listing and tools."""
+        from database.database import AsyncSessionLocal
+        from database.models import IndexedDocument
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db_session:
+            stmt = select(IndexedDocument).where(
+                IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
+            )
+            result = await db_session.execute(stmt)
+            return list(result.scalars().all())
     
     async def _get_document_listing(self, question: str = "") -> QueryResult:
         """
@@ -939,17 +969,7 @@ Your response:"""
         Used for document_listing queries. Pass user question so the response can be tailored.
         """
         try:
-            from database.database import AsyncSessionLocal
-            from database.models import IndexedDocument
-            from sqlalchemy import select
-            
-            async with AsyncSessionLocal() as db_session:
-                stmt = select(IndexedDocument).where(
-                    IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
-                )
-                result = await db_session.execute(stmt)
-                all_docs = result.scalars().all()
-            
+            all_docs = await self._get_all_indexed_docs()
             if not all_docs:
                 return QueryResult(
                     message="No documents are currently indexed.",
@@ -1028,7 +1048,427 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
                 retrieval_count=0,
                 rerank_count=0
             )
-    
+
+    # -------------------------------------------------------------------------
+    # Phase B.2 – Tool layer (stable contract for planner / tool-calling)
+    # -------------------------------------------------------------------------
+
+    async def run_tool_list_documents(self) -> ListDocumentsResult:
+        """Tool: list_documents. Returns all indexed documents with metadata."""
+        all_docs = await self._get_all_indexed_docs()
+        documents: List[Dict[str, Any]] = []
+        for doc in all_docs:
+            filename = Path(doc.file_path).name
+            preview = (doc.content_preview or "")[:300]
+            if len((doc.content_preview or "")) > 300:
+                preview += "..."
+            documents.append({
+                "file_path": doc.file_path,
+                "file_type": doc.file_type,
+                "filename": filename,
+                "chunks_count": getattr(doc, "chunks_count", 0) or 0,
+                "content_preview": preview,
+                "processing_status": getattr(doc, "processing_status", "indexed"),
+            })
+        return {"documents": documents, "count": len(documents)}
+
+    async def run_tool_search_documents(self, query: str) -> Optional[SearchDocumentsResult]:
+        """Tool: search_documents. Hybrid retrieval + rerank; returns context and sources."""
+        if not query or not str(query).strip():
+            return None
+        embedding = self.embedding_service.encode_single_text(query)
+        rag = await self._retrieve_and_build_context(
+            question=query,
+            query_type="document_search",
+            query_embedding=embedding,
+        )
+        if rag is None:
+            return None
+        chunks = [s.strip() for s in rag["context"].split("\n\n---\n\n") if s.strip()]
+        return {
+            "context": rag["context"],
+            "chunks": chunks,
+            "sources": rag["sources"],
+            "retrieval_count": rag["retrieval_count"],
+            "rerank_count": rag["rerank_count"],
+        }
+
+    async def run_tool_search_specific_document(self, document_name: str) -> Optional[SearchDocumentsResult]:
+        """Tool: search_specific_document. Restricts retrieval to the named document (FilenameTrie)."""
+        if not document_name or not str(document_name).strip():
+            return None
+        # Use override so retrieval is restricted to this document only
+        query = document_name.strip()
+        embedding = self.embedding_service.encode_single_text(query)
+        rag = await self._retrieve_and_build_context(
+            question=query,
+            query_type="document_search",
+            query_embedding=embedding,
+            explicit_filename_override=query,
+        )
+        if rag is None:
+            return None
+        chunks = [s.strip() for s in rag["context"].split("\n\n---\n\n") if s.strip()]
+        return {
+            "context": rag["context"],
+            "chunks": chunks,
+            "sources": rag["sources"],
+            "retrieval_count": rag["retrieval_count"],
+            "rerank_count": rag["rerank_count"],
+        }
+
+    async def run_tool_summarize_corpus(self) -> SummarizeCorpusResult:
+        """Tool: summarize_corpus. Returns folder summary and metadata (Phase A)."""
+        all_docs = await self._get_all_indexed_docs()
+        from .corpus_summary import corpus_metadata_from_documents
+
+        metadata = corpus_metadata_from_documents(all_docs)
+        summary = summarize_corpus(all_docs)
+        date_range_str = ""
+        if metadata.get("date_range") and len(metadata["date_range"]) == 2:
+            low, high = metadata["date_range"]
+            if hasattr(low, "strftime") and hasattr(high, "strftime"):
+                try:
+                    date_range_str = f"{low.strftime('%b %Y')} – {high.strftime('%b %Y')}"
+                except (TypeError, ValueError):
+                    pass
+        return {
+            "summary": summary,
+            "document_count": metadata.get("document_count", 0),
+            "file_type_counts": metadata.get("file_type_counts") or {},
+            "date_range": date_range_str,
+        }
+
+    async def run_tool(
+        self,
+        tool: str,
+        *,
+        query: Optional[str] = None,
+        name: Optional[str] = None,
+        document_name: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Single entry point for tool execution. Validates the tool call, then
+        dispatches to the appropriate run_tool_* method. Returns the tool result
+        dict or None if invalid or execution failed.
+        For search_specific_document use document_name= (or name= for backward compat).
+        """
+        doc_name = document_name or name
+        ok, err = validate_tool_call(tool, query=query, name=doc_name, document_name=doc_name)
+        if not ok:
+            logger.warning("Tool validation failed: %s", err)
+            return None
+        try:
+            if tool == TOOL_LIST_DOCUMENTS:
+                return await self.run_tool_list_documents()
+            if tool == TOOL_SEARCH_DOCUMENTS:
+                return await self.run_tool_search_documents(query or "")
+            if tool == TOOL_SEARCH_SPECIFIC_DOCUMENT:
+                return await self.run_tool_search_specific_document(doc_name or "")
+            if tool == TOOL_SUMMARIZE_CORPUS:
+                return await self.run_tool_summarize_corpus()
+        except Exception as e:
+            logger.error("Tool execution failed for %s: %s", tool, e)
+            return None
+        return None
+
+    async def run_tools(
+        self,
+        tool_calls: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute multiple tool calls (e.g. planner returns list_documents + summarize_corpus).
+        Validates all calls first; runs each in order and appends results. Invalid calls are skipped
+        and do not appear in the result list (so result length may be less than len(tool_calls)).
+        """
+        ok, errors = validate_tool_calls(tool_calls)
+        if not ok:
+            for e in errors:
+                logger.warning("Tool call validation: %s", e)
+        results: List[Dict[str, Any]] = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            tool = call.get("tool")
+            if not tool:
+                continue
+            result = await self.run_tool(
+                tool,
+                query=call.get("query"),
+                name=call.get("name"),
+                document_name=call.get("document_name"),
+            )
+            if result is not None:
+                results.append({"tool": tool, "result": result})
+        return results
+
+    # -------------------------------------------------------------------------
+    # Phase B.3 – Single-loop tool calling (agent path when provider supports it)
+    # -------------------------------------------------------------------------
+
+    AGENT_SYSTEM_MESSAGE = (
+        "You are a helpful document assistant. The user has selected a folder; you have access to tools "
+        "to list documents, search across them, search within a specific document, or get a folder summary. "
+        "Use the tools when the user asks about files, document content, or the folder. "
+        "For greetings or small talk (e.g. 'what's up?', 'hello'), respond directly without calling tools. "
+        "When the user asks what files exist or for an overview, use list_documents and/or summarize_corpus; "
+        "do not use search_documents for that. When the user asks about a specific file by name, use "
+        "search_specific_document with that name. After receiving tool results, answer concisely and cite "
+        "sources as [Document: filename] when you use document content."
+    )
+
+    def _build_agent_messages(
+        self,
+        question: str,
+        conversation_history: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Build messages for the agent: system + history + user (rewritten question)."""
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": self.AGENT_SYSTEM_MESSAGE},
+        ]
+        for h in conversation_history or []:
+            role = h.get("role", "user")
+            content = h.get("content") or ""
+            if not content and "content" in h:
+                continue
+            messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": question})
+        return messages
+
+    @staticmethod
+    def _tool_error_payload(message: str, retryable: bool = False) -> Dict[str, Any]:
+        """Structured tool failure payload so the model can reason about failures."""
+        return {"tool_error": True, "message": message, "retryable": retryable}
+
+    def _parse_groq_tool_calls(
+        self,
+        raw_tool_calls: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Convert Groq/OpenAI tool_calls to our run_tools format: [{tool, query?, document_name?}]."""
+        out: List[Dict[str, Any]] = []
+        for tc in raw_tool_calls or []:
+            fn = tc.get("function") or {}
+            name = fn.get("name") or ""
+            if name not in (TOOL_LIST_DOCUMENTS, TOOL_SEARCH_DOCUMENTS, TOOL_SEARCH_SPECIFIC_DOCUMENT, TOOL_SUMMARIZE_CORPUS):
+                continue
+            args_str = fn.get("arguments") or "{}"
+            try:
+                args = json.loads(args_str) if isinstance(args_str, str) else (args_str or {})
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug("Tool arguments parse failed for %s: %s", name, e)
+                args = {}
+            call: Dict[str, Any] = {"tool": name}
+            if name == TOOL_SEARCH_DOCUMENTS:
+                call["query"] = args.get("query") or ""
+            if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
+                call["document_name"] = args.get("document_name") or args.get("name") or ""
+            # Log tool decision for debugging
+            if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
+                logger.info("Agent tool decision: %s(%s)", name, call.get("document_name", ""))
+            elif name == TOOL_SEARCH_DOCUMENTS:
+                logger.info("Agent tool decision: %s(%s)", name, (call.get("query", "") or "")[:80])
+            else:
+                logger.info("Agent tool decision: %s", name)
+            out.append(call)
+        return out
+
+    def _collect_sources_from_tool_results(
+        self,
+        tool_results: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Extract source entries from search tool results for QueryResult.sources."""
+        sources: List[Dict[str, Any]] = []
+        for tr in tool_results or []:
+            result = tr.get("result") or {}
+            if "sources" in result:
+                sources.extend(result["sources"])
+        return sources
+
+    async def _query_via_tool_loop(
+        self,
+        question: str,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> QueryResult:
+        """
+        Phase B.3 – Single-loop agent: LLM with tools, run tools if requested, then final answer.
+        Used when the provider (e.g. Groq) supports native tool calling.
+        """
+        start_time = asyncio.get_event_loop().time()
+        from config import settings
+        max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
+        messages = self._build_agent_messages(question, conversation_history or [])
+        tools = get_openai_format_tools()
+
+        content, raw_tool_calls = await self.llm_service.chat_with_tools(messages, tools, max_tokens=max_tokens)
+
+        if raw_tool_calls and len(raw_tool_calls) > MAX_TOOL_CALLS_PER_QUERY:
+            raw_tool_calls = raw_tool_calls[:MAX_TOOL_CALLS_PER_QUERY]
+            logger.warning("Agent returned more than %s tool calls; capping at %s", MAX_TOOL_CALLS_PER_QUERY, MAX_TOOL_CALLS_PER_QUERY)
+
+        # No tool calls: the first response is the final answer
+        if not raw_tool_calls:
+            response_time = round(asyncio.get_event_loop().time() - start_time, 3)
+            return QueryResult(
+                message=content or "I couldn't generate a response.",
+                sources=[],
+                response_time=response_time,
+                query_type="agent",
+                retrieval_count=0,
+                rerank_count=0,
+            )
+
+        # Parse and run tools
+        our_calls = self._parse_groq_tool_calls(raw_tool_calls)
+        if not our_calls:
+            response_time = round(asyncio.get_event_loop().time() - start_time, 3)
+            return QueryResult(
+                message=content or "I couldn't process the tool request.",
+                sources=[],
+                response_time=response_time,
+                query_type="agent",
+                retrieval_count=0,
+                rerank_count=0,
+            )
+
+        # One result per tool call (same order as raw_tool_calls), with timeout
+        results_by_index: List[Dict[str, Any]] = []
+        for call in our_calls:
+            try:
+                r = await asyncio.wait_for(
+                    self.run_tool(
+                        call["tool"],
+                        query=call.get("query"),
+                        document_name=call.get("document_name"),
+                    ),
+                    timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
+                )
+                results_by_index.append(r if r is not None else self._tool_error_payload("Tool execution failed", retryable=False))
+            except asyncio.TimeoutError:
+                logger.warning("Tool %s timed out after %s s", call.get("tool"), TOOL_EXECUTION_TIMEOUT_SECONDS)
+                results_by_index.append(self._tool_error_payload("Tool execution timed out", retryable=True))
+            except Exception as e:
+                logger.warning("Tool %s failed: %s", call.get("tool"), e)
+                results_by_index.append(self._tool_error_payload(str(e), retryable=False))
+        sources = self._collect_sources_from_tool_results(
+            [{"tool": our_calls[i].get("tool"), "result": results_by_index[i]} for i in range(len(our_calls))]
+        )
+
+        # Build assistant message with tool_calls (Groq format) and tool result messages
+        assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content or ""}
+        assistant_msg["tool_calls"] = raw_tool_calls
+        messages.append(assistant_msg)
+        for i, tc in enumerate(raw_tool_calls):
+            result_payload = results_by_index[i] if i < len(results_by_index) else {}
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id"),
+                "content": json.dumps(result_payload, default=str),
+            })
+
+        # Second LLM call: stream or non-stream for final answer
+        final_parts: List[str] = []
+        async for delta in self.llm_service.chat_messages_stream(messages, max_tokens=max_tokens):
+            final_parts.append(delta)
+        final_message = "".join(final_parts).strip() or "I couldn't generate a response."
+        response_time = round(asyncio.get_event_loop().time() - start_time, 3)
+        return QueryResult(
+            message=final_message,
+            sources=sources,
+            response_time=response_time,
+            query_type="agent",
+            retrieval_count=len(sources),
+            rerank_count=0,
+        )
+
+    async def _query_stream_via_tool_loop(
+        self,
+        question: str,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Phase B.3 – Same as _query_via_tool_loop but streams the final answer.
+        Yields meta (sources), then token deltas, then done.
+        """
+        start_time = asyncio.get_event_loop().time()
+        from config import settings
+        max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
+        messages = self._build_agent_messages(question, conversation_history or [])
+        tools = get_openai_format_tools()
+
+        content, raw_tool_calls = await self.llm_service.chat_with_tools(messages, tools, max_tokens=max_tokens)
+
+        if raw_tool_calls and len(raw_tool_calls) > MAX_TOOL_CALLS_PER_QUERY:
+            raw_tool_calls = raw_tool_calls[:MAX_TOOL_CALLS_PER_QUERY]
+            logger.warning("Agent returned more than %s tool calls; capping at %s", MAX_TOOL_CALLS_PER_QUERY, MAX_TOOL_CALLS_PER_QUERY)
+
+        # No tool calls: yield the content as the answer (one token event)
+        if not raw_tool_calls:
+            response_time = round(asyncio.get_event_loop().time() - start_time, 3)
+            yield ("meta", {"sources": [], "query_type": "agent"})
+            yield ("token", content or "I couldn't generate a response.")
+            yield ("done", {
+                "message": content or "I couldn't generate a response.",
+                "response_time": response_time,
+                "query_type": "agent",
+                "retrieval_count": 0,
+                "rerank_count": 0,
+            })
+            return
+
+        our_calls = self._parse_groq_tool_calls(raw_tool_calls)
+        if not our_calls:
+            response_time = round(asyncio.get_event_loop().time() - start_time, 3)
+            yield ("meta", {"sources": [], "query_type": "agent"})
+            yield ("token", content or "I couldn't process the tool request.")
+            yield ("done", {"message": content or "", "response_time": response_time, "query_type": "agent", "retrieval_count": 0, "rerank_count": 0})
+            return
+
+        results_by_index = []
+        for call in our_calls:
+            try:
+                r = await asyncio.wait_for(
+                    self.run_tool(
+                        call["tool"],
+                        query=call.get("query"),
+                        document_name=call.get("document_name"),
+                    ),
+                    timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
+                )
+                results_by_index.append(r if r is not None else self._tool_error_payload("Tool execution failed", retryable=False))
+            except asyncio.TimeoutError:
+                logger.warning("Tool %s timed out after %s s", call.get("tool"), TOOL_EXECUTION_TIMEOUT_SECONDS)
+                results_by_index.append(self._tool_error_payload("Tool execution timed out", retryable=True))
+            except Exception as e:
+                logger.warning("Tool %s failed: %s", call.get("tool"), e)
+                results_by_index.append(self._tool_error_payload(str(e), retryable=False))
+        sources = self._collect_sources_from_tool_results(
+            [{"tool": our_calls[j].get("tool"), "result": results_by_index[j]} for j in range(len(our_calls))]
+        )
+        yield ("meta", {"sources": sources, "query_type": "agent"})
+
+        assistant_msg = {"role": "assistant", "content": content or "", "tool_calls": raw_tool_calls}
+        messages.append(assistant_msg)
+        for i, tc in enumerate(raw_tool_calls):
+            result_payload = results_by_index[i] if i < len(results_by_index) else {}
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id"),
+                "content": json.dumps(result_payload, default=str),
+            })
+
+        full_parts: List[str] = []
+        async for delta in self.llm_service.chat_messages_stream(messages, max_tokens=max_tokens):
+            full_parts.append(delta)
+            yield ("token", delta)
+        response_time = round(asyncio.get_event_loop().time() - start_time, 3)
+        yield ("done", {
+            "message": "".join(full_parts),
+            "response_time": response_time,
+            "query_type": "agent",
+            "retrieval_count": len(sources),
+            "rerank_count": 0,
+        })
+
     async def build_conversation_history(
         self,
         message_pairs: List[Dict[str, str]],
@@ -1121,12 +1561,15 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
         question: str,
         query_type: str,
         query_embedding: List[float],
+        explicit_filename_override: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Shared retrieval + context-building pipeline for document_search queries.
         Returns dict with context, sources, retrieval_count, rerank_count -- or None if no results.
+        If explicit_filename_override is set (e.g. from search_specific_document tool), use it
+        instead of detecting from the question.
         """
-        explicit_filename = self._find_explicit_filename(question)
+        explicit_filename = explicit_filename_override if explicit_filename_override is not None else self._find_explicit_filename(question)
         selected_files = await self._select_relevant_files(question)
         is_aggregation = is_aggregation_query(question)
         if is_aggregation:
@@ -1297,8 +1740,10 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
         }
 
     async def query(self, question: str, max_results: int = 15, conversation_history: list = None) -> QueryResult:
-        """Query the document index. Routes to greeting/general/listing/search."""
+        """Query the document index. Uses single-loop tool calling when supported (e.g. Groq), else classifier routing."""
         start_time = asyncio.get_event_loop().time()
+        if self.llm_service.supports_tool_calling():
+            return await self._query_via_tool_loop(question, conversation_history or [])
 
         try:
             route_task = asyncio.create_task(self.router.resolve(question, conversation_history))
@@ -1350,8 +1795,12 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
     async def query_stream(
         self, question: str, max_results: int = 15, conversation_history: list = None
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Same pipeline as query() but yields SSE events: meta, token, done, error."""
+        """Same pipeline as query() but yields SSE events: meta, token, done, error. Uses tool loop when supported."""
         start_time = asyncio.get_event_loop().time()
+        if self.llm_service.supports_tool_calling():
+            async for event_type, payload in self._query_stream_via_tool_loop(question, conversation_history or []):
+                yield (event_type, payload)
+            return
         try:
             route_task = asyncio.create_task(self.router.resolve(question, conversation_history))
             embed_task = asyncio.to_thread(self.embedding_service.encode_single_text, question)
