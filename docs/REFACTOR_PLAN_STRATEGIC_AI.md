@@ -166,11 +166,13 @@ We do **not** big-bang replace the router. We evolve in phases so each step is s
 - **Fallback:** If the planner output is invalid or the model requests an inappropriate tool (e.g. search when the user clearly asked "what files do we have?"), fall back to a safe default (e.g. `list_documents` for listing-like intent, or `search_documents(rewritten_user_message)` for search-like intent). Do not blindly execute a mismatched tool.
 - **Prompt constraints:** In the planner (or tool-calling) prompt, state clearly: e.g. "If the user asks what files or documents exist, or for an overview of the folder, use list_documents and/or summarize_corpus; do not use search_documents for that."
 
-**B.6 Migration of existing paths**
+**B.6 Migration of existing paths** ✅
 
 - **Greeting / small talk:** Model requests no tools; responds directly. No regex needed.
 - **"What files do we have?" / "Explain our files":** Model requests `list_documents` and/or `summarize_corpus`; we run them and pass results into the answer.
 - **"What is BIP-12046?":** Model requests `search_specific_document("BIP-12046")` or `search_documents("BIP-12046")`; we run retrieval (with rewritten query if applicable) and pass context to the answer.
+
+**Status:** These paths are now served by the tool loop (Groq) or planner (Ollama/Gemini). The regex classifier is used only as legacy fallback when the planner path raises, and for B.5 safe default. See orchestrator `query()` / `query_stream()` comments.
 
 **B.7 Deprecate classifier for routing**
 

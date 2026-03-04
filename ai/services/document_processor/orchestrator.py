@@ -1584,7 +1584,7 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
 Available tools:
 {tools_text}
 
-Rules: Use list_documents and/or summarize_corpus for "what files", "overview", "explain our files". Use search_specific_document when the user names a file. Use search_documents for factual questions or "related documents". For greetings or small talk output empty tools.
+Rules: If the user asks what files or documents exist, or for an overview of the folder, use list_documents and/or summarize_corpus; do not use search_documents for that. Use search_specific_document when the user names a file. Use search_documents only for factual questions about content or "related documents". For greetings or small talk output empty tools.
 Output format: {{"tools": [{{"tool": "tool_name", "query": "..." or "document_name": "..." as needed}}]}} or {{"tools": []}} for no tools.
 
 {history_snippet}User: {question}
@@ -1628,6 +1628,33 @@ JSON output:"""
                 call["document_name"] = item.get("document_name") or item.get("name") or ""
             out.append(call)
         return out
+
+    async def _get_safe_tool_calls_from_classifier(
+        self,
+        question: str,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        B.5 Safe default: when planner output is invalid or inappropriate, use classifier
+        to choose a safe tool set. Do not blindly execute a mismatched tool.
+        """
+        try:
+            route_result = await self.router.resolve(question, conversation_history or [])
+        except Exception as e:
+            logger.warning("Router failed for safe default: %s; using no tools", e)
+            return []
+        route = route_result.route
+        if route in (Route.GREETING, Route.GENERAL):
+            return []
+        if route == Route.DOCUMENT_LISTING:
+            return [
+                {"tool": TOOL_LIST_DOCUMENTS},
+                {"tool": TOOL_SUMMARIZE_CORPUS},
+            ]
+        if route == Route.DOCUMENT_SEARCH:
+            return [{"tool": TOOL_SEARCH_DOCUMENTS, "query": question}]
+        # Default: search with user question
+        return [{"tool": TOOL_SEARCH_DOCUMENTS, "query": question}]
 
     def _format_tool_results_for_answer(self, tool_results: List[Dict[str, Any]]) -> str:
         """Format tool results as a single context string for the answer LLM (RAG-style prompt)."""
@@ -1678,9 +1705,13 @@ JSON output:"""
             max_completion_tokens=self.PLANNER_MAX_TOKENS,
         )
         tool_calls = self._parse_planner_output(planner_response)
-        if tool_calls is None:
-            # Parse failed: fall back to classifier path (handled by caller)
-            raise ValueError("Planner output invalid; use classifier fallback")
+        # B.5 Schema validation: reject malformed or invalid tool calls; use safe default
+        if tool_calls is None or (tool_calls and not validate_tool_calls(tool_calls)[0]):
+            if tool_calls:
+                logger.warning("Planner output failed validation; using safe default from classifier")
+            else:
+                logger.info("Planner output invalid or empty; using safe default from classifier")
+            tool_calls = await self._get_safe_tool_calls_from_classifier(question, conversation_history or [])
 
         # Run tools (possibly empty)
         if tool_calls:
@@ -1736,8 +1767,12 @@ JSON output:"""
             max_completion_tokens=self.PLANNER_MAX_TOKENS,
         )
         tool_calls = self._parse_planner_output(planner_response)
-        if tool_calls is None:
-            raise ValueError("Planner output invalid; use classifier fallback")
+        if tool_calls is None or (tool_calls and not validate_tool_calls(tool_calls)[0]):
+            if tool_calls:
+                logger.warning("Planner output failed validation; using safe default from classifier")
+            else:
+                logger.info("Planner output invalid or empty; using safe default from classifier")
+            tool_calls = await self._get_safe_tool_calls_from_classifier(question, conversation_history or [])
 
         if tool_calls:
             results_by_index = []
@@ -2052,16 +2087,22 @@ JSON output:"""
         }
 
     async def query(self, question: str, max_results: int = 15, conversation_history: list = None) -> QueryResult:
-        """Query the document index. Tool calling when supported (Groq); else B.4 planner fallback; else classifier."""
+        """
+        Query the document index.
+        Primary path (B.6 migrated): tool-calling (Groq) or planner (Ollama/Gemini) → model chooses tools → answer.
+        Greeting, listing, and search are handled by the model + tools; no regex routing in the main path.
+        """
         start_time = asyncio.get_event_loop().time()
         if self.llm_service.supports_tool_calling():
             return await self._query_via_tool_loop(question, conversation_history or [])
-        # B.4: two-step planner fallback for Ollama/Gemini
+        # B.4/B.5: two-step planner (with safe default from classifier when planner invalid)
         try:
             return await self._query_via_planner_fallback(question, conversation_history or [])
-        except ValueError:
-            pass  # Planner parse failed; fall back to classifier
+        except Exception as e:
+            logger.warning("Planner path failed: %s; falling back to legacy classifier", e)
 
+        # B.6 Legacy fallback: classifier-based routing only when planner path raises.
+        # Primary paths (greeting / listing / search) are migrated to tool/planner flow above.
         try:
             route_task = asyncio.create_task(self.router.resolve(question, conversation_history))
             embed_task = asyncio.to_thread(self.embedding_service.encode_single_text, question)
@@ -2112,19 +2153,23 @@ JSON output:"""
     async def query_stream(
         self, question: str, max_results: int = 15, conversation_history: list = None
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Same pipeline as query() but yields SSE events. Tool loop when supported; else B.4 planner; else classifier."""
+        """
+        Same pipeline as query() but yields SSE events (meta, token, done, error).
+        Primary path: tool loop or planner; legacy classifier only when planner raises.
+        """
         start_time = asyncio.get_event_loop().time()
         if self.llm_service.supports_tool_calling():
             async for event_type, payload in self._query_stream_via_tool_loop(question, conversation_history or []):
                 yield (event_type, payload)
             return
-        # B.4: two-step planner fallback
+        # B.4/B.5: two-step planner (with safe default when planner invalid)
         try:
             async for event_type, payload in self._query_stream_via_planner_fallback(question, conversation_history or []):
                 yield (event_type, payload)
             return
-        except ValueError:
-            pass  # Planner parse failed; fall back to classifier
+        except Exception as e:
+            logger.warning("Planner stream path failed: %s; falling back to legacy classifier", e)
+        # B.6 Legacy fallback: classifier-based routing only when planner path raises.
         try:
             route_task = asyncio.create_task(self.router.resolve(question, conversation_history))
             embed_task = asyncio.to_thread(self.embedding_service.encode_single_text, question)
