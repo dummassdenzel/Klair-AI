@@ -42,7 +42,6 @@ from .tools.contract import (
 )
 from database import DatabaseService
 from ..routing import Router, QueryClassifier, Route
-from ..query_expander import expand_query_for_retrieval
 
 
 logger = logging.getLogger(__name__)
@@ -54,8 +53,6 @@ DEFAULT_METADATA_CACHE_MAX_SIZE = 2000
 MAX_TOOL_CALLS_PER_QUERY = 4
 TOOL_EXECUTION_TIMEOUT_SECONDS = 10
 
-# Query expansion: max variants for multi-query retrieval (improves recall)
-QUERY_EXPANSION_MAX_VARIANTS = 3
 CONTEXT_CHUNK_SEP = "\n\n---\n\n"
 
 
@@ -1080,80 +1077,25 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
             })
         return {"documents": documents, "count": len(documents)}
 
-    @staticmethod
-    def _merge_rag_results(rag_list: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Merge multiple RAG results (from expanded query variants) into one context and source list. Dedupes chunks and sources."""
-        if not rag_list:
-            return None
-        all_parts: List[str] = []
-        all_sources: List[Dict[str, Any]] = []
-        total_retrieval = 0
-        total_rerank = 0
-        for rag in rag_list:
-            if not rag or not rag.get("context"):
-                continue
-            parts = [p.strip() for p in rag["context"].split(CONTEXT_CHUNK_SEP) if p.strip()]
-            all_parts.extend(parts)
-            all_sources.extend(rag.get("sources") or [])
-            total_retrieval += rag.get("retrieval_count", 0)
-            total_rerank += rag.get("rerank_count", 0)
-        # Dedupe chunks by content (use first 400 chars as key to avoid duplicate near-duplicate chunks)
-        seen_chunk: set[str] = set()
-        unique_parts: List[str] = []
-        for p in all_parts:
-            key = p[:400] if len(p) > 400 else p
-            if key not in seen_chunk:
-                seen_chunk.add(key)
-                unique_parts.append(p)
-        # Dedupe sources by file_path (keep first occurrence)
-        seen_path: set[str] = set()
-        unique_sources: List[Dict[str, Any]] = []
-        for s in all_sources:
-            fp = s.get("file_path") or ""
-            if fp and fp not in seen_path:
-                seen_path.add(fp)
-                unique_sources.append(s)
-        context = CONTEXT_CHUNK_SEP.join(unique_parts) if unique_parts else ""
-        return {
-            "context": context,
-            "sources": unique_sources,
-            "retrieval_count": total_retrieval,
-            "rerank_count": total_rerank,
-        }
-
     async def run_tool_search_documents(self, query: str) -> Optional[SearchDocumentsResult]:
-        """Tool: search_documents. Expands query for retrieval, then hybrid retrieval + rerank; returns context and sources."""
+        """Tool: search_documents. Single hybrid retrieval + rerank; returns context and sources. (Phase T.1: LLM query expansion removed.)"""
         if not query or not str(query).strip():
             return None
-        # Query expansion: 1–3 variants for better recall (before retrieval)
-        variants = await expand_query_for_retrieval(
-            query, self.llm_service, max_variants=QUERY_EXPANSION_MAX_VARIANTS
+        embedding = self.embedding_service.encode_single_text(query.strip())
+        rag = await self._retrieve_and_build_context(
+            question=query.strip(),
+            query_type="document_search",
+            query_embedding=embedding,
         )
-        if not variants:
-            variants = [query]
-        # Use lower per-variant retrieval params when multiple variants to avoid explosion (3×60 → 3×30)
-        params_override = self.retrieval_config.get_expanded_search_params() if len(variants) > 1 else None
-        rags: List[Dict[str, Any]] = []
-        for q in variants:
-            embedding = self.embedding_service.encode_single_text(q)
-            rag = await self._retrieve_and_build_context(
-                question=q,
-                query_type="document_search",
-                query_embedding=embedding,
-                retrieval_params_override=params_override,
-            )
-            if rag:
-                rags.append(rag)
-        merged = self._merge_rag_results(rags) if len(rags) > 1 else (rags[0] if rags else None)
-        if merged is None:
+        if rag is None:
             return None
-        chunks = [s.strip() for s in merged["context"].split(CONTEXT_CHUNK_SEP) if s.strip()]
+        chunks = [s.strip() for s in rag["context"].split(CONTEXT_CHUNK_SEP) if s.strip()]
         return {
-            "context": merged["context"],
+            "context": rag["context"],
             "chunks": chunks,
-            "sources": merged["sources"],
-            "retrieval_count": merged["retrieval_count"],
-            "rerank_count": merged["rerank_count"],
+            "sources": rag["sources"],
+            "retrieval_count": rag["retrieval_count"],
+            "rerank_count": rag["rerank_count"],
         }
 
     async def run_tool_search_specific_document(self, document_name: str) -> Optional[SearchDocumentsResult]:

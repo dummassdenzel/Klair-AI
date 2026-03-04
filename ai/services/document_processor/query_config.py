@@ -63,11 +63,6 @@ class RetrievalConfig:
     general_rerank_top_k: int = 15
     general_final_top_k: int = 10
 
-    # Expanded search (multi-variant): lower per-variant to avoid retrieval explosion (3 × 60 → 3 × 30)
-    expanded_search_top_k: int = 30
-    expanded_search_rerank_top_k: int = 10
-    expanded_search_final_top_k: int = 10
-    
     # BM25 boost settings
     bm25_boost: float = 0.1
     
@@ -119,14 +114,6 @@ class RetrievalConfig:
             'final_top_k': self.comprehensive_final_top_k
         }
 
-    def get_expanded_search_params(self) -> Dict[str, int]:
-        """Params for each variant when doing multi-variant query expansion (avoids 3×60 retrieval explosion)."""
-        return {
-            'top_k': self.expanded_search_top_k,
-            'rerank_top_k': self.expanded_search_rerank_top_k,
-            'final_top_k': self.expanded_search_final_top_k
-        }
-    
     def get_source_limit(self, query_type: str, has_selected_files: bool, is_aggregation: bool = False) -> int:
         """Get maximum number of sources to return"""
         if query_type == 'document_listing':

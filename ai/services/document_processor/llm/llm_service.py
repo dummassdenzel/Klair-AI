@@ -313,8 +313,39 @@ class LLMService:
                 })
             return content, tool_calls if tool_calls else None
         except Exception as e:
+            err_str = str(e)
+            # Groq returns 400 tool_use_failed when the model answers without calling a tool
+            # (e.g. "what can you do?"). Retry without tools to get a proper answer.
+            if "400" in err_str and "tool_use_failed" in err_str.lower():
+                logger.info("chat_with_tools got tool_use_failed; retrying without tools")
+                try:
+                    content = await self._chat_messages_no_tools(messages, max_tokens)
+                    return (content or "I couldn't generate a response.", None)
+                except Exception as retry_e:
+                    logger.warning("Fallback chat without tools failed: %s", retry_e)
             logger.error(f"chat_with_tools failed: {e}")
             return "I couldn't generate a response due to an error.", None
+
+    async def _chat_messages_no_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        max_tokens: int = 4096,
+    ) -> Optional[str]:
+        """Groq completion with messages only (no tools). Used when tool call fails with tool_use_failed."""
+        if not self.supports_tool_calling():
+            return None
+        self._initialize_client()
+        completion = await self._groq.chat.completions.create(
+            messages=messages,
+            model=self.groq_model,
+            temperature=0.1,
+            max_completion_tokens=max_tokens,
+            stream=False,
+        )
+        msg = completion.choices[0].message if completion.choices else None
+        if not msg:
+            return None
+        return (getattr(msg, "content", None) or "").strip() or None
 
     async def chat_messages_stream(
         self,

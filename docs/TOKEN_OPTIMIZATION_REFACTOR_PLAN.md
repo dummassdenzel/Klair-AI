@@ -1,5 +1,9 @@
 Token Optimization Refactor Plan
-Phase T.1 — Remove LLM Query Expansion
+
+---
+
+**Phase T.1 — Remove LLM Query Expansion** ✅ (done)
+
 Goal
 
 Eliminate the extra LLM call used for query expansion.
