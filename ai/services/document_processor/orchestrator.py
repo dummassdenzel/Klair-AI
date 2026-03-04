@@ -41,6 +41,7 @@ from .tools.contract import (
 )
 from database import DatabaseService
 from ..routing import Router, QueryClassifier, Route
+from ..query_expander import expand_query_for_retrieval
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,10 @@ DEFAULT_METADATA_CACHE_MAX_SIZE = 2000
 # Phase B.3 – Agent loop guards
 MAX_TOOL_CALLS_PER_QUERY = 4
 TOOL_EXECUTION_TIMEOUT_SECONDS = 10
+
+# Query expansion: max variants for multi-query retrieval (improves recall)
+QUERY_EXPANSION_MAX_VARIANTS = 3
+CONTEXT_CHUNK_SEP = "\n\n---\n\n"
 
 
 class MetadataCache:
@@ -817,12 +822,14 @@ Your response:"""
         explicit_filename: Optional[str] = None,
         query_embedding: Optional[List[float]] = None,
         is_aggregation: bool = False,
+        retrieval_params_override: Optional[Dict[str, int]] = None,
     ) -> tuple:
         """
         Single retrieval pipeline for all document queries.
         Hybrid search: semantic (ChromaDB) + keyword (BM25) with reranking.
+        When retrieval_params_override is set (e.g. multi-variant expanded search), use it instead of config.
         """
-        params = self.retrieval_config.get_retrieval_params(query_type, False, is_aggregation)
+        params = retrieval_params_override or self.retrieval_config.get_retrieval_params(query_type, False, is_aggregation)
         top_k = params['top_k']
         rerank_top_k = params['rerank_top_k']
         final_top_k = params['final_top_k']
@@ -1072,32 +1079,86 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
             })
         return {"documents": documents, "count": len(documents)}
 
+    @staticmethod
+    def _merge_rag_results(rag_list: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Merge multiple RAG results (from expanded query variants) into one context and source list. Dedupes chunks and sources."""
+        if not rag_list:
+            return None
+        all_parts: List[str] = []
+        all_sources: List[Dict[str, Any]] = []
+        total_retrieval = 0
+        total_rerank = 0
+        for rag in rag_list:
+            if not rag or not rag.get("context"):
+                continue
+            parts = [p.strip() for p in rag["context"].split(CONTEXT_CHUNK_SEP) if p.strip()]
+            all_parts.extend(parts)
+            all_sources.extend(rag.get("sources") or [])
+            total_retrieval += rag.get("retrieval_count", 0)
+            total_rerank += rag.get("rerank_count", 0)
+        # Dedupe chunks by content (use first 400 chars as key to avoid duplicate near-duplicate chunks)
+        seen_chunk: set[str] = set()
+        unique_parts: List[str] = []
+        for p in all_parts:
+            key = p[:400] if len(p) > 400 else p
+            if key not in seen_chunk:
+                seen_chunk.add(key)
+                unique_parts.append(p)
+        # Dedupe sources by file_path (keep first occurrence)
+        seen_path: set[str] = set()
+        unique_sources: List[Dict[str, Any]] = []
+        for s in all_sources:
+            fp = s.get("file_path") or ""
+            if fp and fp not in seen_path:
+                seen_path.add(fp)
+                unique_sources.append(s)
+        context = CONTEXT_CHUNK_SEP.join(unique_parts) if unique_parts else ""
+        return {
+            "context": context,
+            "sources": unique_sources,
+            "retrieval_count": total_retrieval,
+            "rerank_count": total_rerank,
+        }
+
     async def run_tool_search_documents(self, query: str) -> Optional[SearchDocumentsResult]:
-        """Tool: search_documents. Hybrid retrieval + rerank; returns context and sources."""
+        """Tool: search_documents. Expands query for retrieval, then hybrid retrieval + rerank; returns context and sources."""
         if not query or not str(query).strip():
             return None
-        embedding = self.embedding_service.encode_single_text(query)
-        rag = await self._retrieve_and_build_context(
-            question=query,
-            query_type="document_search",
-            query_embedding=embedding,
+        # Query expansion: 1–3 variants for better recall (before retrieval)
+        variants = await expand_query_for_retrieval(
+            query, self.llm_service, max_variants=QUERY_EXPANSION_MAX_VARIANTS
         )
-        if rag is None:
+        if not variants:
+            variants = [query]
+        # Use lower per-variant retrieval params when multiple variants to avoid explosion (3×60 → 3×30)
+        params_override = self.retrieval_config.get_expanded_search_params() if len(variants) > 1 else None
+        rags: List[Dict[str, Any]] = []
+        for q in variants:
+            embedding = self.embedding_service.encode_single_text(q)
+            rag = await self._retrieve_and_build_context(
+                question=q,
+                query_type="document_search",
+                query_embedding=embedding,
+                retrieval_params_override=params_override,
+            )
+            if rag:
+                rags.append(rag)
+        merged = self._merge_rag_results(rags) if len(rags) > 1 else (rags[0] if rags else None)
+        if merged is None:
             return None
-        chunks = [s.strip() for s in rag["context"].split("\n\n---\n\n") if s.strip()]
+        chunks = [s.strip() for s in merged["context"].split(CONTEXT_CHUNK_SEP) if s.strip()]
         return {
-            "context": rag["context"],
+            "context": merged["context"],
             "chunks": chunks,
-            "sources": rag["sources"],
-            "retrieval_count": rag["retrieval_count"],
-            "rerank_count": rag["rerank_count"],
+            "sources": merged["sources"],
+            "retrieval_count": merged["retrieval_count"],
+            "rerank_count": merged["rerank_count"],
         }
 
     async def run_tool_search_specific_document(self, document_name: str) -> Optional[SearchDocumentsResult]:
-        """Tool: search_specific_document. Restricts retrieval to the named document (FilenameTrie)."""
+        """Tool: search_specific_document. Restricts retrieval to the named document (FilenameTrie). No query expansion (scope is already narrow)."""
         if not document_name or not str(document_name).strip():
             return None
-        # Use override so retrieval is restricted to this document only
         query = document_name.strip()
         embedding = self.embedding_service.encode_single_text(query)
         rag = await self._retrieve_and_build_context(
@@ -1108,7 +1169,7 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
         )
         if rag is None:
             return None
-        chunks = [s.strip() for s in rag["context"].split("\n\n---\n\n") if s.strip()]
+        chunks = [s.strip() for s in rag["context"].split(CONTEXT_CHUNK_SEP) if s.strip()]
         return {
             "context": rag["context"],
             "chunks": chunks,
@@ -1578,12 +1639,14 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
         query_type: str,
         query_embedding: List[float],
         explicit_filename_override: Optional[str] = None,
+        retrieval_params_override: Optional[Dict[str, int]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Shared retrieval + context-building pipeline for document_search queries.
         Returns dict with context, sources, retrieval_count, rerank_count -- or None if no results.
         If explicit_filename_override is set (e.g. from search_specific_document tool), use it
         instead of detecting from the question.
+        When retrieval_params_override is set (e.g. multi-variant expanded search), use lower per-variant limits.
         """
         explicit_filename = explicit_filename_override if explicit_filename_override is not None else self._find_explicit_filename(question)
         selected_files = await self._select_relevant_files(question)
@@ -1595,6 +1658,7 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
             question, query_type, explicit_filename,
             query_embedding=query_embedding,
             is_aggregation=is_aggregation,
+            retrieval_params_override=retrieval_params_override,
         )
         if not documents:
             return None
