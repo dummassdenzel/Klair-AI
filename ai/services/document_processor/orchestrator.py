@@ -36,6 +36,7 @@ from .tools.contract import (
     TOOL_SEARCH_SPECIFIC_DOCUMENT,
     TOOL_SUMMARIZE_CORPUS,
     get_openai_format_tools,
+    get_tools_for_planner,
     validate_tool_call,
     validate_tool_calls,
 )
@@ -1546,6 +1547,237 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
             "rerank_count": 0,
         })
 
+    # -------------------------------------------------------------------------
+    # Phase B.4 – Two-step planner fallback (when provider has no tool calling)
+    # -------------------------------------------------------------------------
+
+    PLANNER_MAX_TOKENS = 400
+
+    def _build_planner_prompt(self, question: str, conversation_history: List[Dict[str, Any]]) -> str:
+        """Build prompt for planner LLM: output JSON only with tool choice(s)."""
+        tools_desc = []
+        for t in get_tools_for_planner():
+            name = t.get("name", "")
+            desc = t.get("description", "")
+            when = t.get("when_to_use", "")
+            params = t.get("parameters") or {}
+            line = f"- {name}: {desc} {when}".strip()
+            if name == TOOL_SEARCH_DOCUMENTS:
+                line += " Include \"query\" with the search text."
+            if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
+                line += " Include \"document_name\" with the file name or identifier."
+            tools_desc.append(line)
+        tools_text = "\n".join(tools_desc)
+        history_snippet = ""
+        if conversation_history:
+            recent = conversation_history[-4:]  # last 2 exchanges
+            parts = []
+            for h in recent:
+                role = h.get("role", "user")
+                content = (h.get("content") or "")[:200].strip()
+                if content:
+                    parts.append(f"{role}: {content}")
+            if parts:
+                history_snippet = "Recent conversation:\n" + "\n".join(parts) + "\n\n"
+        return f"""You are a planner for a document assistant. Output ONLY valid JSON, no other text.
+
+Available tools:
+{tools_text}
+
+Rules: Use list_documents and/or summarize_corpus for "what files", "overview", "explain our files". Use search_specific_document when the user names a file. Use search_documents for factual questions or "related documents". For greetings or small talk output empty tools.
+Output format: {{"tools": [{{"tool": "tool_name", "query": "..." or "document_name": "..." as needed}}]}} or {{"tools": []}} for no tools.
+
+{history_snippet}User: {question}
+
+JSON output:"""
+
+    def _parse_planner_output(self, response: str) -> Optional[List[Dict[str, Any]]]:
+        """Parse planner LLM response into list of tool calls. Returns None on parse failure, [] for no tools."""
+        if not response or not response.strip():
+            return None
+        text = response.strip()
+        # Try to extract JSON from markdown code block if present
+        if "```" in text:
+            m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
+            if m:
+                text = m.group(1)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning("Planner output not valid JSON: %s", text[:200])
+            return None
+        if not isinstance(data, dict):
+            return None
+        tools = data.get("tools")
+        if tools is None:
+            return None
+        if not isinstance(tools, list):
+            return None
+        # Normalize: each item must be dict with "tool" key; allow empty list
+        out: List[Dict[str, Any]] = []
+        for i, item in enumerate(tools):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("tool")
+            if name not in (TOOL_LIST_DOCUMENTS, TOOL_SEARCH_DOCUMENTS, TOOL_SEARCH_SPECIFIC_DOCUMENT, TOOL_SUMMARIZE_CORPUS):
+                continue
+            call: Dict[str, Any] = {"tool": name}
+            if name == TOOL_SEARCH_DOCUMENTS:
+                call["query"] = item.get("query") or ""
+            if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
+                call["document_name"] = item.get("document_name") or item.get("name") or ""
+            out.append(call)
+        return out
+
+    def _format_tool_results_for_answer(self, tool_results: List[Dict[str, Any]]) -> str:
+        """Format tool results as a single context string for the answer LLM (RAG-style prompt)."""
+        if not tool_results:
+            return "No document tools were used. Answer the user directly based on general knowledge."
+        parts = []
+        for tr in tool_results:
+            tool_name = tr.get("tool", "")
+            result = tr.get("result") or {}
+            if result.get("tool_error"):
+                parts.append(f"[{tool_name}]: Error - {result.get('message', 'unknown')}")
+                continue
+            if tool_name == TOOL_LIST_DOCUMENTS:
+                docs = result.get("documents") or []
+                count = result.get("count", 0)
+                lines = [f"Document list ({count} items):"] + [
+                    f"- {d.get('filename', d.get('file_path', ''))} ({d.get('file_type', '')})"
+                    for d in docs[:50]
+                ]
+                if count > 50:
+                    lines.append(f"... and {count - 50} more.")
+                parts.append("\n".join(lines))
+            elif tool_name == TOOL_SUMMARIZE_CORPUS:
+                parts.append(f"[Folder overview]\n{result.get('summary', '')}")
+            elif tool_name in (TOOL_SEARCH_DOCUMENTS, TOOL_SEARCH_SPECIFIC_DOCUMENT):
+                parts.append(result.get("context", ""))
+            else:
+                parts.append(json.dumps(result, default=str)[:2000])
+        return "\n\n---\n\n".join(parts)
+
+    async def _query_via_planner_fallback(
+        self,
+        question: str,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> QueryResult:
+        """
+        Phase B.4 – Two-step: planner LLM → run tools → answer LLM.
+        Used when the provider does not support native tool calling (e.g. Ollama, Gemini).
+        """
+        start_time = asyncio.get_event_loop().time()
+        from config import settings
+        max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
+        prompt = self._build_planner_prompt(question, conversation_history or [])
+        from .llm.provider_adapters import PROMPT_TYPE_CLASSIFICATION
+        planner_response = await self.llm_service.generate_simple(
+            prompt,
+            prompt_type=PROMPT_TYPE_CLASSIFICATION,
+            max_completion_tokens=self.PLANNER_MAX_TOKENS,
+        )
+        tool_calls = self._parse_planner_output(planner_response)
+        if tool_calls is None:
+            # Parse failed: fall back to classifier path (handled by caller)
+            raise ValueError("Planner output invalid; use classifier fallback")
+
+        # Run tools (possibly empty)
+        if tool_calls:
+            results_by_index = []
+            for call in tool_calls:
+                try:
+                    r = await asyncio.wait_for(
+                        self.run_tool(
+                            call["tool"],
+                            query=call.get("query"),
+                            document_name=call.get("document_name"),
+                        ),
+                        timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
+                    )
+                    results_by_index.append(r if r is not None else self._tool_error_payload("Tool execution failed", retryable=False))
+                except asyncio.TimeoutError:
+                    results_by_index.append(self._tool_error_payload("Tool execution timed out", retryable=True))
+                except Exception as e:
+                    results_by_index.append(self._tool_error_payload(str(e), retryable=False))
+            tool_results = [{"tool": tool_calls[i].get("tool"), "result": results_by_index[i]} for i in range(len(tool_calls))]
+            context = self._format_tool_results_for_answer(tool_results)
+            sources = self._collect_sources_from_tool_results(tool_results)
+        else:
+            context = self._format_tool_results_for_answer([])
+            sources = []
+        response_text = await self.llm_service.generate_response(
+            question, context, conversation_history=conversation_history or []
+        )
+        response_time = round(asyncio.get_event_loop().time() - start_time, 3)
+        return QueryResult(
+            message=response_text,
+            sources=sources,
+            response_time=response_time,
+            query_type="planner",
+            retrieval_count=len(sources),
+            rerank_count=0,
+        )
+
+    async def _query_stream_via_planner_fallback(
+        self,
+        question: str,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """Phase B.4 – Two-step planner fallback, streaming the final answer."""
+        start_time = asyncio.get_event_loop().time()
+        from config import settings
+        max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
+        prompt = self._build_planner_prompt(question, conversation_history or [])
+        from .llm.provider_adapters import PROMPT_TYPE_CLASSIFICATION
+        planner_response = await self.llm_service.generate_simple(
+            prompt,
+            prompt_type=PROMPT_TYPE_CLASSIFICATION,
+            max_completion_tokens=self.PLANNER_MAX_TOKENS,
+        )
+        tool_calls = self._parse_planner_output(planner_response)
+        if tool_calls is None:
+            raise ValueError("Planner output invalid; use classifier fallback")
+
+        if tool_calls:
+            results_by_index = []
+            for call in tool_calls:
+                try:
+                    r = await asyncio.wait_for(
+                        self.run_tool(
+                            call["tool"],
+                            query=call.get("query"),
+                            document_name=call.get("document_name"),
+                        ),
+                        timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
+                    )
+                    results_by_index.append(r if r is not None else self._tool_error_payload("Tool execution failed", retryable=False))
+                except asyncio.TimeoutError:
+                    results_by_index.append(self._tool_error_payload("Tool execution timed out", retryable=True))
+                except Exception as e:
+                    results_by_index.append(self._tool_error_payload(str(e), retryable=False))
+            tool_results = [{"tool": tool_calls[i].get("tool"), "result": results_by_index[i]} for i in range(len(tool_calls))]
+            context = self._format_tool_results_for_answer(tool_results)
+            sources = self._collect_sources_from_tool_results(tool_results)
+        else:
+            context = self._format_tool_results_for_answer([])
+            sources = []
+        yield ("meta", {"sources": sources, "query_type": "planner"})
+        full_parts: List[str] = []
+        async for delta in self.llm_service.generate_response_stream(
+            question, context, conversation_history=conversation_history or []
+        ):
+            full_parts.append(delta)
+            yield ("token", delta)
+        response_time = round(asyncio.get_event_loop().time() - start_time, 3)
+        yield ("done", {
+            "message": "".join(full_parts),
+            "response_time": response_time,
+            "query_type": "planner",
+            "retrieval_count": len(sources),
+            "rerank_count": 0,
+        })
+
     async def build_conversation_history(
         self,
         message_pairs: List[Dict[str, str]],
@@ -1820,10 +2052,15 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
         }
 
     async def query(self, question: str, max_results: int = 15, conversation_history: list = None) -> QueryResult:
-        """Query the document index. Uses single-loop tool calling when supported (e.g. Groq), else classifier routing."""
+        """Query the document index. Tool calling when supported (Groq); else B.4 planner fallback; else classifier."""
         start_time = asyncio.get_event_loop().time()
         if self.llm_service.supports_tool_calling():
             return await self._query_via_tool_loop(question, conversation_history or [])
+        # B.4: two-step planner fallback for Ollama/Gemini
+        try:
+            return await self._query_via_planner_fallback(question, conversation_history or [])
+        except ValueError:
+            pass  # Planner parse failed; fall back to classifier
 
         try:
             route_task = asyncio.create_task(self.router.resolve(question, conversation_history))
@@ -1875,12 +2112,19 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
     async def query_stream(
         self, question: str, max_results: int = 15, conversation_history: list = None
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Same pipeline as query() but yields SSE events: meta, token, done, error. Uses tool loop when supported."""
+        """Same pipeline as query() but yields SSE events. Tool loop when supported; else B.4 planner; else classifier."""
         start_time = asyncio.get_event_loop().time()
         if self.llm_service.supports_tool_calling():
             async for event_type, payload in self._query_stream_via_tool_loop(question, conversation_history or []):
                 yield (event_type, payload)
             return
+        # B.4: two-step planner fallback
+        try:
+            async for event_type, payload in self._query_stream_via_planner_fallback(question, conversation_history or []):
+                yield (event_type, payload)
+            return
+        except ValueError:
+            pass  # Planner parse failed; fall back to classifier
         try:
             route_task = asyncio.create_task(self.router.resolve(question, conversation_history))
             embed_task = asyncio.to_thread(self.embedding_service.encode_single_text, question)
