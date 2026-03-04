@@ -1,6 +1,10 @@
 """
 Query classifier: pure heuristic, zero LLM calls.
 Returns one of: greeting, general, document_listing, document_search.
+
+NOTE (Phase A / Strategic plan): These patterns are INTERIM until the planner+tools
+architecture is in place. Do not expand the regex list as a long-term strategy;
+see docs/REFACTOR_PLAN_STRATEGIC_AI.md.
 """
 
 import logging
@@ -16,6 +20,13 @@ _GREETING_WORDS = frozenset({
     "ok", "okay", "cool", "nice", "great",
     "good morning", "good afternoon", "good evening", "good night",
     "you", "yo", "there", "morning", "afternoon", "evening",
+})
+
+# Casual/small-talk phrases that should get a short friendly response, not RAG
+_CASUAL_PHRASES = frozenset({
+    "whats up", "what's up", "whats new", "what's new",
+    "how are you", "how are ya", "how's it going", "hows it going",
+    "how is it going", "how are things", "whats going on", "what's going on",
 })
 
 _GENERAL_PATTERNS: list[re.Pattern] = [
@@ -53,6 +64,8 @@ def _normalize(text: str) -> str:
 
 
 def _is_greeting(q: str) -> bool:
+    if q in _CASUAL_PHRASES:
+        return True
     tokens = q.split()
     if not tokens or len(tokens) > 4:
         return False

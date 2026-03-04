@@ -9,6 +9,8 @@
 > - A desktop app has one user. Remove anything that exists to serve multiple.
 > - Fewer lines = fewer bugs = faster iteration. Delete aggressively.
 > - Ship the core loop first: select folder → index → chat. Everything else is polish.
+>
+> **Strategic direction (AI assistant):** The heuristic classifier and regex routing in Phase 2 are **interim**. Long-term we move to an **agent-with-tools** design where the LLM decides which tools to use (list_documents, search_documents, summarize_corpus), not regex. See **[REFACTOR_PLAN_STRATEGIC_AI.md](./REFACTOR_PLAN_STRATEGIC_AI.md)** for the phased architecture plan (corpus summary, planner layer, conversational grounding).
 
 ---
 

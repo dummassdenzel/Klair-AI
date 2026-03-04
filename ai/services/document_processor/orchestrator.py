@@ -25,6 +25,7 @@ from .updates.update_worker import UpdateWorker
 from .updates.chunk_differ import ChunkDiffer
 from .updates.update_strategy import UpdateStrategySelector
 from .query_config import RetrievalConfig, default_retrieval_config, is_aggregation_query
+from .corpus_summary import summarize_corpus
 from database import DatabaseService
 from ..routing import Router, QueryClassifier, Route
 
@@ -958,6 +959,9 @@ Your response:"""
                     retrieval_count=0,
                     rerank_count=0
                 )
+
+            # Phase A: corpus summary for "what kind of files" / "explain our files" (future summarize_corpus tool)
+            corpus_summary_text = summarize_corpus(all_docs)
             
             # Build context from all documents. Cap per-doc preview so all files fit under
             # provider limit (from adapter); ensures "list all" shows every file.
@@ -989,7 +993,10 @@ Your response:"""
             
             # Generate response tailored to the user's question (avoids same generic answer for different questions)
             user_question_line = f'The user asked: "{question.strip()}"\n\n' if question and question.strip() else ""
-            response_prompt = f"""You are a document assistant. {user_question_line}Here are all indexed documents:
+            response_prompt = f"""You are a document assistant. {user_question_line}Folder overview:
+{corpus_summary_text}
+
+Documents in this folder:
 
 {context}
 

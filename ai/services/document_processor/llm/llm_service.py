@@ -384,7 +384,7 @@ class LLMService:
                 else:
                     conversation_context += f"Assistant: {content}\n"
 
-        return f"""Answer the question using ONLY the document context below. Cite sources as [Document: filename].
+        return f"""Use the document context below when it is relevant to the user's question. Cite sources as [Document: filename].
 {conversation_context}
 Context:
 {context}
@@ -392,10 +392,11 @@ Context:
 Question: {query}
 
 Rules:
-- Combine information from multiple chunks of the same document into one answer
-- When asked for a list, include every matching item from the context
-- If the context doesn't contain the answer, say so
-- Use specific details and quotes when relevant
+- Use the documents when they help answer the question. If the user asks for an overview or explanation of the documents, summarize what is in the context and what the documents are about.
+- If the question is general conversation (e.g. greetings, "what's up"), respond normally; do not force document citations.
+- Combine information from multiple chunks of the same document into one answer. When asked for a list, include every matching item from the context.
+- Only say "the context doesn't contain the answer" when the user clearly asked a factual question that is not in the context.
+- Use specific details and quotes when relevant.
 
 Answer:"""
     
