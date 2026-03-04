@@ -1213,8 +1213,12 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
         "For greetings or small talk (e.g. 'what's up?', 'hello'), respond directly without calling tools. "
         "When the user asks what files exist or for an overview, use list_documents and/or summarize_corpus; "
         "do not use search_documents for that. When the user asks about a specific file by name, use "
-        "search_specific_document with that name. After receiving tool results, answer concisely and cite "
-        "sources as [Document: filename] when you use document content."
+        "search_specific_document with that name. "
+        "When the user asks for 'related' documents or 'other files related to X', use search_documents with a "
+        "descriptive query (e.g. 'BIP-12046 related documents' or 'documents related to BIP-12046 receipt delivery'), "
+        "not just the document identifier. "
+        "Citation format: when citing list_documents or summarize_corpus results, use [Folder Overview] or [Document List], "
+        "not [Document: list_documents]. When citing search results that mention a specific file, use [Document: filename]."
     )
 
     def _build_agent_messages(
@@ -1239,6 +1243,16 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
     def _tool_error_payload(message: str, retryable: bool = False) -> Dict[str, Any]:
         """Structured tool failure payload so the model can reason about failures."""
         return {"tool_error": True, "message": message, "retryable": retryable}
+
+    @staticmethod
+    def _format_tool_result_content(tool_name: str, result_payload: Dict[str, Any]) -> str:
+        """Format tool result for the LLM; add citation hint for folder-level tools so model uses [Folder Overview] not [Document: list_documents]."""
+        body = json.dumps(result_payload, default=str)
+        if result_payload.get("tool_error"):
+            return body
+        if tool_name in (TOOL_LIST_DOCUMENTS, TOOL_SUMMARIZE_CORPUS):
+            return "Cite this as [Folder Overview] when referring to this information.\n" + body
+        return body
 
     def _parse_groq_tool_calls(
         self,
@@ -1359,10 +1373,11 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
         messages.append(assistant_msg)
         for i, tc in enumerate(raw_tool_calls):
             result_payload = results_by_index[i] if i < len(results_by_index) else {}
+            tool_name = our_calls[i].get("tool", "") if i < len(our_calls) else ""
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id"),
-                "content": json.dumps(result_payload, default=str),
+                "content": self._format_tool_result_content(tool_name, result_payload),
             })
 
         # Second LLM call: stream or non-stream for final answer
@@ -1450,10 +1465,11 @@ Be consistent: one style for "kind/type" (summary), another for "list/show all" 
         messages.append(assistant_msg)
         for i, tc in enumerate(raw_tool_calls):
             result_payload = results_by_index[i] if i < len(results_by_index) else {}
+            tool_name = our_calls[i].get("tool", "") if i < len(our_calls) else ""
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id"),
-                "content": json.dumps(result_payload, default=str),
+                "content": self._format_tool_result_content(tool_name, result_payload),
             })
 
         full_parts: List[str] = []
