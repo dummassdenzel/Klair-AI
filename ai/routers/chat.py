@@ -10,6 +10,7 @@ import re
 from schemas.chat import ChatRequest, ChatResponse
 from query_cache import get_query_cache_key
 from dependencies import db_service, require_app_state
+from services.query_rewriter import rewrite_with_last_document
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -76,6 +77,21 @@ async def _build_conversation_history(session_id: int, doc_processor) -> list:
         return []
 
 
+async def _rewrite_query_for_session(session_id: int, raw_message: str) -> str:
+    """
+    Phase B.1 – Design A rewriting: pre-process the user query before retrieval.
+    Uses the most recent chat message's sources (if any) to resolve pronouns like
+    "that/this document/file" or "it" into the last document's filename.
+    """
+    try:
+        last_msg = await db_service.get_last_chat_message_with_sources(session_id)
+        last_sources = last_msg.sources if last_msg and last_msg.sources else None
+        return rewrite_with_last_document(raw_message, last_sources)
+    except Exception as e:
+        logger.warning(f"Query rewrite skipped due to error: {e}")
+        return raw_message
+
+
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
@@ -88,8 +104,11 @@ async def chat(chat_request: ChatRequest, request: Request, state=Depends(requir
             chat_request.session_id, state.current_directory, chat_request.message
         )
 
+        # Phase B.1: rewrite query using last referenced document (if any)
+        rewritten_message = await _rewrite_query_for_session(chat_session.id, chat_request.message)
+
         cache = getattr(state, "query_cache", None)
-        cache_key = get_query_cache_key(chat_session.id, chat_request.message) if cache else None
+        cache_key = get_query_cache_key(chat_session.id, rewritten_message) if cache else None
         if cache and cache_key:
             cached = cache.get(cache_key)
             if cached is not None:
@@ -98,7 +117,7 @@ async def chat(chat_request: ChatRequest, request: Request, state=Depends(requir
 
         conversation_history = await _build_conversation_history(chat_session.id, state.doc_processor)
         response = await state.doc_processor.query(
-            chat_request.message, conversation_history=conversation_history
+            rewritten_message, conversation_history=conversation_history
         )
 
         if cache and cache_key:
@@ -127,6 +146,7 @@ async def chat_stream(chat_request: ChatRequest, request: Request, state=Depends
             chat_request.session_id, state.current_directory, chat_request.message
         )
         conversation_history = await _build_conversation_history(chat_session.id, state.doc_processor)
+        rewritten_message = await _rewrite_query_for_session(chat_session.id, chat_request.message)
 
         async def event_generator():
             sources = []
@@ -137,7 +157,7 @@ async def chat_stream(chat_request: ChatRequest, request: Request, state=Depends
             rerank_count = 0
             try:
                 async for event_type, payload in state.doc_processor.query_stream(
-                    chat_request.message, conversation_history=conversation_history
+                    rewritten_message, conversation_history=conversation_history
                 ):
                     if event_type == "meta":
                         sources[:] = payload.get("sources", [])

@@ -418,6 +418,21 @@ class DatabaseService:
             ).order_by(desc(IndexedDocument.indexed_at))
             result = await session.execute(stmt)
             return result.scalars().all()
+
+    async def get_last_chat_message_with_sources(self, session_id: int) -> Optional[ChatMessage]:
+        """
+        Get the most recent chat message for a session, including its sources.
+        Used by query rewriting to find the last referenced document.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(ChatMessage)
+                .where(ChatMessage.session_id == session_id)
+                .order_by(desc(ChatMessage.timestamp))
+                .limit(1)
+            )
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
     
     # Analytics & Insights
     
