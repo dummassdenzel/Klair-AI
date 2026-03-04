@@ -50,7 +50,8 @@ latency	higher	lower
 
 This is a major simplification.
 
-Phase T.2 — Reduce Retrieval Context Size
+**Phase T.2 — Reduce Retrieval Context Size** ✅ (done)
+
 Goal
 
 Reduce the number of chunks sent to the LLM.

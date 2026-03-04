@@ -952,7 +952,38 @@ Your response:"""
                 metadatas = filtered_metas
                 scores = filtered_scores
                 logger.info(f"Filtered to {len(documents)} chunks from explicit filename '{explicit_filename}'")
-        
+
+        # Step 6: File-diversity selection (general search only). Cap chunks per file so
+        # multiple documents appear in context; avoid one file dominating when final_top_k is small.
+        if not explicit_filename and len(documents) > final_top_k:
+            max_per_file = getattr(
+                self.retrieval_config, "max_chunks_per_file", 2
+            )
+            if max_per_file > 0:
+                selected_docs = []
+                selected_metas = []
+                selected_scores = []
+                file_counts: Dict[str, int] = {}
+                for doc, meta, score in zip(documents, metadatas, scores):
+                    fp = meta.get("file_path", "")
+                    count = file_counts.get(fp, 0)
+                    if count < max_per_file:
+                        selected_docs.append(doc)
+                        selected_metas.append(meta)
+                        selected_scores.append(score)
+                        file_counts[fp] = count + 1
+                    if len(selected_docs) >= final_top_k:
+                        break
+                documents = selected_docs
+                metadatas = selected_metas
+                scores = selected_scores
+                logger.info(
+                    "File-diversity selection: %s chunks from %s files (max %s per file)",
+                    len(documents),
+                    len(file_counts),
+                    max_per_file,
+                )
+
         return (documents, metadatas, scores, retrieval_count, rerank_count)
 
     async def _get_all_indexed_docs(self) -> List[Any]:

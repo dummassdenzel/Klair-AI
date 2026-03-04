@@ -42,10 +42,10 @@ class RetrievalConfig:
     listing_rerank_top_k: int = 0  # No reranking for listing
     listing_final_top_k: int = 120  # Show all
     
-    # Comprehensive queries (enumeration-like, but using retrieval)
-    comprehensive_top_k: int = 60
-    comprehensive_rerank_top_k: int = 20   # Rerank fewer for speed (was 30); still good recall
-    comprehensive_final_top_k: int = 20
+    # Comprehensive queries (document_search). T.2: reduced for lower context tokens (~10k → ~3k)
+    comprehensive_top_k: int = 40
+    comprehensive_rerank_top_k: int = 12
+    comprehensive_final_top_k: int = 5
     
     # Aggregation-style ("all X", "total value of X") — higher recall so we don't miss documents
     aggregation_top_k: int = 100
@@ -65,7 +65,12 @@ class RetrievalConfig:
 
     # BM25 boost settings
     bm25_boost: float = 0.1
-    
+
+    # File-diversity retrieval: max chunks per file in final selection (general search only).
+    # Prevents one document from dominating when final_top_k is small (e.g. 5).
+    # Specific-document queries (explicit_filename) do not apply this cap.
+    max_chunks_per_file: int = 2
+
     # Source limiting (how many distinct files/sources are passed to the LLM)
     max_sources_general: int = 25   # e.g. "list all delivery notes" — allow more so response can include all relevant files
     max_sources_specific: int = 20  # when user selected specific file(s)
