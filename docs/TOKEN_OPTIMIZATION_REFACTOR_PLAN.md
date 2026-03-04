@@ -82,28 +82,140 @@ Expected token reduction
 Context tokens:
 
 ~10k → ~3k
-Phase T.3 — Add Context Compression
+
+**Phase T.3 — Context Compression (Safe Version)** ✅ (done)
+
 Goal
 
-Extract only the relevant sentences from retrieved chunks before sending them to the answer model.
+Reduce the size of retrieved context before sending it to the answer model by extracting only the relevant portions of each chunk.
 
-This reduces context size dramatically while keeping factual accuracy.
+Unlike summarization, this step performs relevance extraction, not paraphrasing. The original wording from the document must be preserved.
 
-New service
+Benefits:
+
+• Large reduction in context tokens
+• Lower risk of Groq TPM limits
+• Faster responses
+• Often improves answer quality by removing noise
+
+Expected reduction:
+
+~700 token chunk → ~80–150 tokens
+
+Total context example:
+
+Before: 5 chunks ≈ 3000 tokens
+After: 5 compressed chunks ≈ 600 tokens
+New Service
 
 Create:
 
 ai/services/context_compressor.py
-Function
+
+Primary function:
+
 compress_chunks(question: str, chunks: List[str]) -> List[str]
+
+Responsibilities:
+
+Compress each retrieved chunk independently.
+
+Preserve the original wording from the document.
+
+Remove irrelevant sections.
+
+Ensure that compression never removes all useful context.
+
+The function returns a list of compressed chunks aligned with the original chunk order.
+
+Compression Rules
+
+Compression must follow these rules to maintain reliability.
+
+1. Do not summarize
+
+The compressor must extract text, not rewrite it.
+
+Allowed:
+
+Driver: G. Castaneda
+Date: August 8, 2024
+
+Not allowed:
+
+The delivery was made by G. Castaneda on Aug 8.
+2. Preserve identifiers and minimal context
+
+Always keep identifiers such as:
+
+• document titles
+• headings
+• section names
+• filenames
+• labels like "Invoice", "Delivery Information"
+
+Example:
+
+Original chunk:
+
+Bring-in Permit
+
+Delivery Information
+Date: August 8, 2024
+Driver: G. Castaneda
+Helper: L. Diaz
+Plate: AMA2184
+
+Compressed chunk:
+
+Delivery Information
+Date: August 8, 2024
+Driver: G. Castaneda
+3. Never return an empty chunk without fallback
+
+If compression returns nothing or extremely little text, fall back to part of the original chunk.
+
+Example safeguard:
+
+if compressed_length < MIN_CHARS:
+    use original chunk (truncated)
+
+This prevents accidental loss of evidence.
+
+4. Cap maximum compressed size
+
+To guarantee token savings, compressed chunks should be capped.
+
+Example:
+
+MAX_COMPRESSED_CHARS = 400
+5. Only compress when needed
+
+Compression should only run when the total context is large.
+
+Example rule:
+
+if total_context_chars < 2000
+    skip compression
+
+This avoids unnecessary LLM calls.
+
 Prompt
 
-Use a small model (Ollama or cheap Groq model).
+Use a small model (Ollama or inexpensive Groq model).
 
 Example prompt:
 
-Given the user question and the document text,
-extract only the sentences needed to answer the question.
+You are compressing document text for a retrieval system.
+
+Given the question and document text, extract only the parts that are useful for answering the question.
+
+Rules:
+- Keep original wording from the document.
+- Do not summarize or paraphrase.
+- Preserve important identifiers such as headings or document labels.
+- Keep minimal surrounding context if needed for clarity.
+- If nothing in the text is relevant, return an empty string.
 
 Question:
 {question}
@@ -111,33 +223,72 @@ Question:
 Document text:
 {chunk}
 
-Return only the relevant lines.
-If nothing is relevant, return empty.
+Return only the relevant excerpts from the document.
 Integration
 
-Insert compression step in retrieval pipeline.
+Insert the compression step after retrieval and reranking, but before context construction.
 
-Current:
+Current pipeline:
 
 retrieve
 → build_context
+→ answer model
 
-New:
+New pipeline:
 
 retrieve
+→ rerank
+→ file-diversity selection
 → compress_chunks
 → build_context
-Expected results
+→ answer model
+
+Important:
+
+Compression must run after reranking, since rerankers depend on the full chunk text.
+
+When Compression Is Skipped
+
+Compression should not run in the following cases:
+
+• Context already small
+• search_specific_document queries (optional but recommended)
+• Fewer than 2 chunks retrieved
+
+This avoids unnecessary LLM calls.
+
+Expected Results
 
 Example chunk:
 
-700 tokens → 50 tokens
+700 tokens → ~100 tokens
 
-Total context:
+Example RAG context:
 
-3500 tokens → ~500 tokens
+Before: 3000 tokens
+After: 500–700 tokens
 
-Huge token savings.
+Impact:
+
+• Major reduction in TPM usage
+• Lower latency
+• Improved Groq reliability on the free tier
+
+Reliability Safeguards
+
+To ensure compression does not harm answers:
+
+Extraction only (no summarization)
+
+Preserve identifiers and headings
+
+Fallback to original chunk when compression removes too much
+
+Cap compressed chunk size
+
+Skip compression for small contexts
+
+With these safeguards, compression typically improves answer quality because irrelevant text is removed.
 
 Phase T.4 — Limit Conversation History
 Goal

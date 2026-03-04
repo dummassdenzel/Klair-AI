@@ -42,6 +42,7 @@ from .tools.contract import (
 )
 from database import DatabaseService
 from ..routing import Router, QueryClassifier, Route
+from ..context_compressor import compress_chunks
 
 
 logger = logging.getLogger(__name__)
@@ -1920,6 +1921,20 @@ JSON output:"""
             metadatas = prioritized_metas + other_metas
             scores = prioritized_scores + other_scores
             logger.info(f"Prioritized {len(prioritized_docs)} chunks from {len(selected_files)} selected files")
+
+        # T.3 Context compression: extract relevant portions only (skip when small or specific-doc)
+        total_context_chars = sum(len(d) for d in documents)
+        if (
+            not explicit_filename
+            and len(documents) >= 2
+            and total_context_chars >= 2000
+        ):
+            filenames_for_compression = [Path(meta.get("file_path", "")).name for meta in metadatas]
+            compressed = await compress_chunks(
+                question, documents, self.llm_service, filenames=filenames_for_compression
+            )
+            if len(compressed) == len(documents):
+                documents = compressed
 
         file_chunks: Dict[str, list] = {}
         for doc, metadata, score in zip(documents, metadatas, scores):
