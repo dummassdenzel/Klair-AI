@@ -49,6 +49,11 @@ async def get_status(request: Request):
             except Exception as e:
                 logger.warning(f"Could not get index stats: {e}")
                 info["index_stats"] = {"error": "Stats not available"}
+            # Best-effort LLM token usage (mainly for Groq). Useful for monitoring TPM usage.
+            try:
+                info["llm_token_usage"] = proc.get_llm_token_usage()
+            except Exception as e:
+                logger.warning(f"Could not get LLM token usage: {e}")
 
         try:
             info["database_stats"] = await db_service.get_document_stats()

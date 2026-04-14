@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick, afterUpdate } from "svelte";
+  import { onMount, tick } from "svelte";
   import { apiService } from "$lib/api/services";
   import {
     systemStatus,
@@ -7,7 +7,6 @@
     chatHistory,
     isChatLoading,
     apiActions,
-    isIndexingInProgress,
     metadataIndexed,
     contentIndexingInProgress,
     indexingProgress,
@@ -17,46 +16,71 @@
   import FileTypeIcon from "$lib/components/FileTypeIcon.svelte";
   import { getFileTypeConfig } from "$lib/utils/fileTypes";
   import { messageToConversationTitle } from "$lib/utils/chatTitle";
+  import { theme } from "$lib/stores/theme";
+
+  /** Watermark strength: 0 = invisible, 1 = solid. Edit only `light` and `dark` here. */
+  const WATERMARK_OPACITY = { light: 0.12, dark: 0.12 } as const;
+
+  /** Single scroll target: top of latest AI reply (or typing placeholder before first token). */
+  const CHAT_SCROLL_ANCHOR_ID = "chat-scroll-target";
 
   let messages: ChatMessage[] = [];
   let expandedSources: Record<number, boolean> = {};
   let messagesContainer: HTMLDivElement;
   let shouldAutoScroll = true;
-  let previousMessagesLength = 0;
+  /** Coalesce per-token scrolls to one rAF per frame */
+  let streamScrollRaf: number | null = null;
 
-  // Auto-scroll to bottom when new messages arrive
-  function scrollToBottom(smooth: boolean = true) {
-    if (messagesContainer && shouldAutoScroll) {
-      tick().then(() => {
-        if (messagesContainer) {
-          messagesContainer.scrollTo({
-            top: messagesContainer.scrollHeight,
-            behavior: smooth ? 'smooth' : 'auto'
-          });
-        }
-      });
-    }
+  function getScrollTopToAlignElementTop(container: HTMLElement, el: HTMLElement): number {
+    const elRect = el.getBoundingClientRect();
+    const cRect = container.getBoundingClientRect();
+    return container.scrollTop + (elRect.top - cRect.top);
   }
-  
-  // Handle scroll events to determine if we should auto-scroll
+
+  /** Scroll so the anchor’s top edge sits at the top of the messages viewport (with small padding). */
+  function scrollLastAiResponseToTop(smooth: boolean) {
+    if (!messagesContainer || !shouldAutoScroll) return;
+    tick().then(() => {
+      if (!messagesContainer) return;
+      const el = document.getElementById(CHAT_SCROLL_ANCHOR_ID);
+      if (!el) {
+        const { scrollHeight, clientHeight } = messagesContainer;
+        messagesContainer.scrollTo({
+          top: Math.max(0, scrollHeight - clientHeight),
+          behavior: smooth ? "smooth" : "auto",
+        });
+        return;
+      }
+      const pad = 8;
+      const nextTop = Math.max(0, getScrollTopToAlignElementTop(messagesContainer, el) - pad);
+      messagesContainer.scrollTo({
+        top: nextTop,
+        behavior: smooth ? "smooth" : "auto",
+      });
+    });
+  }
+
+  function scheduleScrollDuringStream() {
+    if (!shouldAutoScroll) return;
+    if (streamScrollRaf != null) return;
+    streamScrollRaf = requestAnimationFrame(() => {
+      streamScrollRaf = null;
+      scrollLastAiResponseToTop(false);
+    });
+  }
+
   function handleScroll() {
     if (!messagesContainer) return;
     const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
-    // Check if user is near the bottom (within 50px)
-    const isAtBottom = scrollTop + clientHeight >= scrollHeight - 50;
-    shouldAutoScroll = isAtBottom;
-  }
-  
-  // Auto-scroll when messages change
-  $: if (messages.length !== previousMessagesLength) {
-    previousMessagesLength = messages.length;
-    // Small delay to ensure DOM is updated
-    setTimeout(() => scrollToBottom(true), 100);
-  }
-  
-  // Auto-scroll when loading state changes (AI starts/stops typing)
-  $: if ($isChatLoading !== undefined) {
-    setTimeout(() => scrollToBottom(true), 100);
+    const anchor = document.getElementById(CHAT_SCROLL_ANCHOR_ID);
+    const atBottom = scrollTop + clientHeight >= scrollHeight - 60;
+    if (!anchor) {
+      shouldAutoScroll = atBottom;
+      return;
+    }
+    const goal = Math.max(0, getScrollTopToAlignElementTop(messagesContainer, anchor) - 8);
+    const nearFollow = Math.abs(scrollTop - goal) < 140;
+    shouldAutoScroll = nearFollow || atBottom;
   }
 
   onMount(() => {
@@ -67,33 +91,16 @@
     
     // Listen for session load events from layout
     window.addEventListener('loadSession', handleSessionLoad as EventListener);
-    
-    // Add scroll listener
-    if (messagesContainer) {
-      messagesContainer.addEventListener('scroll', handleScroll);
-    }
-    
-    // Initial scroll to bottom
-    setTimeout(() => scrollToBottom(false), 200);
-    
+
+    setTimeout(() => scrollLastAiResponseToTop(false), 200);
+
     return () => {
       window.removeEventListener('loadSession', handleSessionLoad as EventListener);
-      if (messagesContainer) {
-        messagesContainer.removeEventListener('scroll', handleScroll);
+      if (streamScrollRaf != null) {
+        cancelAnimationFrame(streamScrollRaf);
+        streamScrollRaf = null;
       }
     };
-  });
-  
-  // Also scroll after updates (for when messages are updated in place)
-  afterUpdate(() => {
-    if (shouldAutoScroll && messagesContainer) {
-      // Use requestAnimationFrame for smoother scrolling
-      requestAnimationFrame(() => {
-        if (messagesContainer && shouldAutoScroll) {
-          messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        }
-      });
-    }
   });
 
   function handleSessionLoad(event: CustomEvent) {
@@ -110,8 +117,7 @@
       } else {
         messages = [];
       }
-      // Scroll to bottom when loading a session
-      setTimeout(() => scrollToBottom(false), 200);
+      setTimeout(() => scrollLastAiResponseToTop(false), 200);
     } catch (error) {
       console.error("❌ Failed to load session:", error);
       messages = [];
@@ -151,8 +157,7 @@
     };
 
     messages = [...messages, userMessage];
-    // Scroll to bottom after user message
-    setTimeout(() => scrollToBottom(true), 50);
+    setTimeout(() => scrollLastAiResponseToTop(true), 50);
     apiActions.setChatLoading(true);
 
     try {
@@ -163,7 +168,7 @@
             messages = messages.map((msg) =>
               msg.id === userMessage.id ? { ...msg, sources } : msg,
             );
-            setTimeout(() => scrollToBottom(true), 50);
+            setTimeout(() => scrollLastAiResponseToTop(true), 50);
           },
           onToken(delta) {
             messages = messages.map((msg) =>
@@ -171,7 +176,7 @@
                 ? { ...msg, ai_response: msg.ai_response + delta }
                 : msg,
             );
-            setTimeout(() => scrollToBottom(true), 0);
+            scheduleScrollDuringStream();
           },
           onDone(finalMessage, responseTime) {
             messages = messages.map((msg) =>
@@ -179,7 +184,7 @@
                 ? { ...msg, ai_response: finalMessage, response_time: responseTime }
                 : msg,
             );
-            setTimeout(() => scrollToBottom(true), 100);
+            setTimeout(() => scrollLastAiResponseToTop(true), 80);
           },
           onError(detail) {
             throw new Error(detail || "Stream failed");
@@ -245,51 +250,38 @@
   <svelte:head>
   <title>Klair AI - Chat Interface</title>
   </svelte:head>
-  
-<!-- Top Navigation -->
-<div class="bg-white px-6 py-4 absolute top-3 right-5 z-10">
-  <div class="flex items-center gap-4">
-    <div class="text-xs text-[#37352F] bg-[#F7F7F7] px-4 py-2 rounded-lg flex items-center gap-2">
-      {#if $systemStatus?.directory_set}
-        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-        </svg>  
-        /{$systemStatus.current_directory?.split("\\").pop()}
-      {:else}
-        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-        </svg> 
-        No directory set
-      {/if}
-    </div>
-
-    {#if $systemStatus?.directory_set}
-      <button
-        type="button"
-        onclick={() => {
-          // Dispatch event to layout to open modal
-          window.dispatchEvent(new CustomEvent('openDirectoryModalFromLayout'));
-        }}
-        class="px-6 py-2.5 text-xs bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-        aria-label="Change document directory"
-      >
-        Change Folder
-      </button>
-    {/if}
-  </div>
-</div>
 
 <!-- Main Chat Area -->
-<div class="flex-1 flex flex-col bg-white min-h-0">
+<div class="relative flex-1 flex flex-col bg-white dark:bg-gray-950 min-h-0">
+  <!--
+    Watermark: fixed to viewport so negative offsets don’t grow scroll height (see layout overflow-x-hidden).
+    Scale: compact on mobile → sm/md bridge → lg (desktop hero). Opacity: raise numbers = less transparent / stronger.
+  -->
+  <div
+    class="pointer-events-none fixed z-[1] select-none
+      bottom-[-2.25rem] right-[-2.25rem] w-[min(20rem,88vw)] h-[min(20rem,72vh)]
+      sm:bottom-[-3.5rem] sm:right-[-3.5rem] sm:w-[min(36rem,94vw)] sm:h-[min(36rem,86vh)]
+      md:bottom-[-8rem] md:right-[-6rem] md:w-[min(48rem,98vw)] md:h-[min(48rem,90vh)]
+      lg:bottom-[-18rem] lg:right-[-12rem] lg:w-[min(64rem,100vw)] lg:h-[min(64rem,96vh)]"
+    aria-hidden="true"
+  >
+    <img
+      src="/klair.ai-sm.png"
+      alt=""
+      class="h-full w-full object-contain [object-position:bottom_right]"
+      style="opacity: {$theme === 'dark' ? WATERMARK_OPACITY.dark : WATERMARK_OPACITY.light}"
+    />
+  </div>
+
   {#if $currentChatSession}
     <!-- Session Header -->
-    <div class="bg-white px-8 py-6 flex-shrink-0">
+    <div class="relative z-10 bg-white dark:bg-gray-950 px-8 py-6 flex-shrink-0">
       <div class="flex items-center justify-between">
         <div class="flex-1 min-w-0">
-          <h2 class="text-xl font-semibold text-[#37352F] truncate">
+          <h2 class="text-xl font-semibold text-[#37352F] dark:text-gray-100 truncate">
             {$currentChatSession.title}
           </h2>
-          <div class="text-sm text-gray-500 mt-1">
+          <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">
             Created {new Date(
               $currentChatSession.created_at,
             ).toLocaleDateString()}
@@ -298,9 +290,9 @@
       </div>
     </div>
   {:else}
-    <div class="bg-white px-8 py-6 flex-shrink-0">
-      <h2 class="text-lg font-semibold text-[#37352F]">New Chat</h2>
-      <p class="text-gray-600 text-sm">
+    <div class="relative z-10 bg-white dark:bg-gray-950 px-8 py-6 flex-shrink-0">
+      <h2 class="text-lg font-semibold text-[#37352F] dark:text-gray-100">New Chat</h2>
+      <p class="text-gray-600 dark:text-gray-400 text-sm">
         Start a new conversation about your documents
       </p>
         </div>
@@ -309,23 +301,23 @@
   <!-- Messages Container -->
   <div 
     bind:this={messagesContainer}
-    class="flex-1 overflow-y-auto p-8 space-y-6"
+    class="relative z-10 flex-1 overflow-y-auto p-8 space-y-6"
     onscroll={handleScroll}
   >
     {#if messages.length === 0}
-      <div class="text-center text-gray-500 mt-16">
-        <div class="flex items-center justify-center mx-auto mb-6">
-          <img src="/klair.ai-sm.png" class="w-12 h-12" alt="User avatar" />
-        </div>
-        <h3 class="text-xl font-bold tracking-tight text-[#37352F] mb-3">
+      <div class="text-center text-gray-500 dark:text-gray-400 mt-16">
+        <!-- <div class="flex items-center justify-center mx-auto mb-6">
+          <img src="/klair.ai-sm.png" class="w-20 h-20" alt="User avatar" />
+        </div> -->
+        <h3 class="text-xl font-bold tracking-tight text-[#37352F] dark:text-gray-100 mb-3">
           Welcome to Klair AI!
         </h3>
-        <p class="text-gray-600 text-xs">
+        <p class="text-gray-600 dark:text-gray-400 text-xs">
           Start a conversation by asking questions about your documents.
         </p>
       </div>
     {:else}
-      {#each messages as message}
+      {#each messages as message, i}
         <!-- User Message -->
         {#if message.user_message}
           <div class="flex justify-end">
@@ -346,16 +338,19 @@
                   {message.user_message}
                 </div>
               </div>
-              <div class="text-xs text-gray-400 mt-2 text-right">
+              <div class="text-xs text-gray-400 dark:text-gray-500 mt-2 text-right">
                 {new Date(message.timestamp).toLocaleTimeString()}
               </div>
             </div>
         </div>
       {/if}
   
-        <!-- AI Response -->
-        {#if message.ai_response}
-          <div class="flex justify-start">
+        <!-- AI Response (trim avoids empty bubble vs loading anchor duplicate id) -->
+        {#if String(message.ai_response || "").trim()}
+          <div
+            class="flex justify-start"
+            id={i === messages.length - 1 ? CHAT_SCROLL_ANCHOR_ID : undefined}
+          >
             <div class="max-w-2xl">
               <!-- AI Label -->
               <div class="flex items-center gap-2 mb-2">
@@ -364,10 +359,10 @@
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
                   </svg>
                 </div>
-                <span class="text-xs font-medium text-gray-500">Klair</span>
+                <span class="text-xs font-medium text-gray-500 dark:text-gray-400">Klair</span>
               </div>
               <div
-                class="bg-[#F7F7F7] text-[#37352F] px-6 py-4 rounded-2xl rounded-bl-md shadow-sm"
+                class="bg-[#F7F7F7] dark:bg-gray-900 text-[#37352F] dark:text-gray-100 px-6 py-4 rounded-2xl rounded-bl-md shadow-sm"
               >
                 <MarkdownRenderer content={message.ai_response} className="text-sm leading-relaxed" />
               </div>
@@ -383,7 +378,7 @@
                 {@const displayedSources = isExpanded ? message.sources : message.sources.slice(0, previewLimit)}
                 
                 <div
-                  class="mt-3 p-4 bg-[#443C68]/5 rounded-xl "
+                  class="mt-3 p-4 bg-[#443C68]/5 dark:bg-[#443C68]/10 dark:ring-1 dark:ring-[#443C68]/25 rounded-xl"
                 >
                   <!-- Header - only interactive if there are more than 3 sources -->
                   {#if hasMoreSources}
@@ -392,11 +387,11 @@
                         expandedSources[message.id] = !isExpanded;
                         expandedSources = { ...expandedSources };
                       }}
-                      class="w-full text-sm font-semibold text-[#443C68] mb-3 flex items-center justify-between hover:text-[#3A3457] transition-colors"
+                      class="w-full text-sm font-semibold text-[#443C68] dark:text-[#C9C2EB] mb-3 flex items-center justify-between hover:text-[#3A3457] dark:hover:text-white transition-colors"
                     >
-                      <div class="flex text-xs items-center gap-2">
+                      <div class="flex text-xs items-center gap-2 text-[#443C68] dark:text-[#C9C2EB]">
                         <svg
-                          class="w-4 h-4"
+                          class="w-4 h-4 shrink-0"
                           fill="none"
                           stroke="currentColor"
                           viewBox="0 0 24 24"
@@ -420,9 +415,9 @@
                       </svg>
                     </button>
                   {:else}
-                    <div class="text-sm font-semibold text-[#443C68] mb-3 flex items-center gap-2">
+                    <div class="text-sm font-semibold text-[#443C68] dark:text-[#C9C2EB] mb-3 flex items-center gap-2">
                       <svg
-                        class="w-4 h-4"
+                        class="w-4 h-4 shrink-0"
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
@@ -444,7 +439,7 @@
                     <div class="space-y-3">
                       {#each displayedSources as source}
                         <div
-                          class="flex items-start gap-3 p-3 bg-white rounded-lg border border-gray-100"
+                          class="flex items-start gap-3 p-3 bg-white dark:bg-gray-950 rounded-lg border border-gray-100 dark:border-gray-800"
                         >
                           <div
                             class="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0"
@@ -454,7 +449,7 @@
                           </div>
                           <div class="flex-1 min-w-0">
                             <div
-                              class="text-sm font-medium text-[#37352F] truncate mb-1"
+                              class="text-sm font-medium text-[#37352F] dark:text-gray-100 truncate mb-1"
                             >
                               {source.file_path?.split("\\").pop() ||
                                 "Unknown file"}
@@ -476,17 +471,17 @@
                     <div class="flex flex-wrap gap-2">
                       {#each displayedSources as source}
                         <div
-                          class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white rounded-full border border-gray-200 text-[0.625rem] hover:border-[#443C68] transition-colors cursor-default"
+                          class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-gray-950 rounded-full border border-gray-200 dark:border-gray-700 text-[0.625rem] text-gray-700 dark:text-gray-200 hover:border-[#443C68] dark:hover:border-[#8B7FC4] transition-colors cursor-default"
                           title="{source.file_path?.split('\\').pop()} - {(source.relevance_score * 100).toFixed(1)}% relevance"
                         >
                           <FileTypeIcon fileType={source.file_type} class="w-3.5 h-3.5 flex-shrink-0" />
                           <span class="font-bold {getFileTypeConfig(source.file_type).color} uppercase">
                             {getFileTypeConfig(source.file_type).label}
                           </span>
-                          <span class="text-[#37352F] font-medium truncate max-w-[200px]">
+                          <span class="text-[#37352F] dark:text-gray-200 font-medium truncate max-w-[200px]">
                             {source.file_path?.split("\\").pop() || "Unknown"}
                           </span>
-                          <span class="text-gray-500">
+                          <span class="text-gray-500 dark:text-gray-400 tabular-nums">
                             {(source.relevance_score * 100).toFixed(0)}%
               </span>
             </div>
@@ -499,7 +494,7 @@
                               expandedSources[message.id] = true;
                               expandedSources = { ...expandedSources };
                             }}
-                            class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#443C68] text-white rounded-full border border-[#443C68] text-[0.625rem] hover:bg-[#3A3457] transition-colors font-medium"
+                            class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#443C68] text-white rounded-full border border-[#443C68] dark:border-[#5A4F8A] text-[0.625rem] hover:bg-[#3A3457] dark:hover:bg-[#52477A] transition-colors font-medium"
                           >
                             + {message.sources.length - previewLimit} more
                           </button>
@@ -509,7 +504,7 @@
                   </div>
                 {/if}
                 <div
-                class="flex items-center gap-4 mt-3 text-xs text-gray-500"
+                class="flex items-center gap-4 mt-3 text-xs text-gray-500 dark:text-gray-400"
               >
                 <span
                   >{new Date(message.timestamp).toLocaleTimeString()}</span
@@ -527,9 +522,9 @@
           {/if}
         {/each}
 
-        <!-- Loading indicator for new message -->
-        {#if $isChatLoading}
-          <div class="flex justify-start">
+        <!-- Loading indicator: anchor before first streamed token (avoids duplicate id with AI bubble) -->
+        {#if $isChatLoading && messages.length > 0 && !String(messages[messages.length - 1]?.ai_response || "").trim()}
+          <div class="flex justify-start" id={CHAT_SCROLL_ANCHOR_ID}>
             <div class="max-w-2xl">
               <!-- AI Label -->
               <div class="flex items-center gap-2 mb-2">
@@ -538,10 +533,10 @@
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
                   </svg>
                 </div>
-                <span class="text-xs font-medium text-gray-500">AI Assistant</span>
+                <span class="text-xs font-medium text-gray-500 dark:text-gray-400">AI Assistant</span>
               </div>
               <div
-                class="bg-[#F7F7F7] text-[#37352F] px-6 py-4 rounded-2xl rounded-bl-md shadow-sm"
+                class="bg-[#F7F7F7] dark:bg-gray-900 text-[#37352F] dark:text-gray-100 px-6 py-4 rounded-2xl rounded-bl-md shadow-sm"
               >
                 <div class="flex items-center gap-2">
                   <div
@@ -563,8 +558,8 @@
         {/if}
       </div>
   
-    <!-- Chat Input -->
-    <div class="border-t border-gray-100 bg-white p-8 flex-shrink-0">
+    <!-- Chat Input (transparent shell so bottom-right watermark stays visible behind controls) -->
+    <div class="relative z-10 bg-transparent p-8 flex-shrink-0">
       <div class="max-w-4xl mx-auto">
         {#if !$metadataIndexed}
           <!-- Metadata Indexing Message -->
@@ -614,7 +609,7 @@
               placeholder={!$metadataIndexed ? "Setting up…" : $contentIndexingInProgress ? "Ask about files by name, or wait for content indexing…" : "Ask me anything about your documents…"}
               rows="1"
               disabled={!$metadataIndexed}
-              class="text-sm  w-full h-full px-6 py-4 border border-gray-200 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent text-[#37352F] placeholder-gray-400 disabled:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+              class="text-sm  w-full h-full px-6 py-4 border border-gray-200 dark:border-gray-800 rounded-2xl resize-none focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent text-[#37352F] dark:text-gray-100 bg-white dark:bg-gray-950 placeholder-gray-400 dark:placeholder-gray-500 disabled:bg-gray-100 dark:disabled:bg-gray-900 disabled:cursor-not-allowed disabled:opacity-60"
               style="min-height: 56px; max-height: 120px;"
               onkeydown={(e) => {
                 if (!$metadataIndexed) {
@@ -668,7 +663,7 @@
           </button>
         </div>
   
-        <div class="text-xs text-gray-400 mt-3 text-center">
+        <div class="text-xs text-gray-400 dark:text-gray-500 mt-3 text-center">
           {#if !$metadataIndexed}
             Setting up… Chat will be available shortly
           {:else if $contentIndexingInProgress}

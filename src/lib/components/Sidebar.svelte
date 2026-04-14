@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { onMount, onDestroy } from 'svelte';
   import type { ChatSession, IndexedDocument } from '$lib/api/types';
-  import { updateQueueStatus } from '$lib/stores/api';
+  import { updateQueueStatus, systemStatus } from '$lib/stores/api';
   import DocumentTreeNav from '$lib/components/DocumentTreeNav.svelte';
   import type { DocumentTreeNode } from '$lib/api/types';
 
@@ -63,6 +63,16 @@
     sidebarView = 'documents';
     onDocumentsClick();
   }
+
+  function openDirectoryPicker() {
+    window.dispatchEvent(new CustomEvent('openDirectoryModalFromLayout'));
+  }
+
+  let workspaceFolderName = $derived.by(() => {
+    const path = $systemStatus?.current_directory ?? workspaceRoot;
+    if (!path) return '';
+    return path.split('\\').pop() || path.split('/').pop() || path;
+  });
 
   // Get unique file types for filter
   let fileTypes = $derived(Array.from(new Set(indexedDocuments.map((doc: IndexedDocument) => doc.file_type).filter(Boolean))).sort());
@@ -206,7 +216,7 @@
 
 <!-- Left Sidebar -->
 <div 
-  class="bg-[#F7F7F7] border-r border-gray-100 flex flex-col overflow-hidden overflow-x-hidden flex-shrink-0 transition-all duration-300 {(isSidebarHovered || sidebarView !== 'menu') ? 'w-80' : 'w-20'}"
+  class="bg-[#F7F7F7] dark:bg-gray-900 border-r border-gray-100 dark:border-gray-800 flex flex-col overflow-hidden overflow-x-hidden flex-shrink-0 transition-all duration-300 {(isSidebarHovered || sidebarView !== 'menu') ? 'w-80' : 'w-20'}"
   onmouseenter={() => isSidebarHovered = true}
   onmouseleave={() => {
     // Only collapse if we're in menu view
@@ -220,9 +230,9 @@
   
   <!-- Logo and Title -->
   <div class="flex justify-center items-center gap-3 pt-10 pb-6 px-4">
-    <div class="flex items-center space-x-2 overflow-hidden">
-      <img src="/klair.ai-sm.png" class="w-7 h-7 flex-shrink-0" alt="klair.ai logo" />
-      <span class="font-bold text-xl text-gray-700 whitespace-nowrap transition-opacity duration-300 {(isSidebarHovered || sidebarView !== 'menu') ? 'opacity-100' : 'opacity-0 w-0'}">klair.ai</span>
+    <div class="flex items-center overflow-hidden">
+      <img src="/klair.ai-sm.png" class="w-10 h-10 flex-shrink-0" alt="klair.ai logo" />
+      <span class="font-bold text-xl text-gray-700 dark:text-gray-100 whitespace-nowrap transition-opacity duration-300 {(isSidebarHovered || sidebarView !== 'menu') ? 'opacity-100' : 'opacity-0 w-0'}">klair.ai</span>
     </div>
   </div>
 
@@ -230,6 +240,58 @@
     <!-- Menu View -->
     <div class="flex-1 overflow-y-auto overflow-x-hidden pb-6 transition-all duration-300 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'}">
       <div class="space-y-2">
+        <!-- Workspace folder (moved from chat top-right) -->
+        {#if (isSidebarHovered || sidebarView !== 'menu')}
+          <div class="mb-2">
+            <p class="text-[0.65rem] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide px-0.5">
+              Workspace
+            </p>
+            <div
+              class="mt-2 rounded-xl bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-800 pl-3 pr-1 py-1.5 text-xs text-[#37352F] dark:text-gray-100 flex items-center gap-1 min-w-0 shadow-sm"
+            >
+              <svg class="w-5 h-5 shrink-0 text-[#443C68]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              </svg>
+              <span class="truncate flex-1 min-w-0 py-1" title={$systemStatus?.current_directory ?? workspaceRoot}>
+                {#if $systemStatus?.directory_set}
+                  /{workspaceFolderName}
+                {:else}
+                  No directory set
+                {/if}
+              </span>
+              <button
+                type="button"
+                onclick={openDirectoryPicker}
+                class="shrink-0 p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:text-[#443C68] dark:hover:text-[#C9C2EB] hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                title={$systemStatus?.directory_set ? 'Change folder' : 'Choose folder'}
+                aria-label="Change workspace folder"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+            </div>
+            <div
+              class="my-3 border-t border-gray-200 dark:border-gray-800"
+              aria-hidden="true"
+            ></div>
+          </div>
+        {:else}
+          <div class="mb-2 flex justify-center">
+            <button
+              type="button"
+              onclick={openDirectoryPicker}
+              class="flex h-12 w-12 items-center justify-center rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 text-[#443C68] shadow-sm hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors"
+              title={$systemStatus?.directory_set ? `Workspace: ${workspaceFolderName}` : 'Choose workspace folder'}
+              aria-label="Change workspace folder"
+            >
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              </svg>
+            </button>
+          </div>
+        {/if}
+
         <!-- New Chat Button -->
         <button
           onclick={onNewChat}
@@ -253,7 +315,7 @@
         <!-- Chat Button -->
         <button
           onclick={handleChatClick}
-          class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white rounded-xl hover:bg-gray-50 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
+          class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white dark:bg-gray-950 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-900 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 dark:border-gray-800 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
           title="Chat"
         >
           {#if (isSidebarHovered || sidebarView !== 'menu')}
@@ -261,7 +323,7 @@
               <svg class="w-5 h-5 text-[#443C68] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
               </svg>
-              <span class="font-medium text-[#37352F] whitespace-nowrap">Chat</span>
+              <span class="font-medium text-[#37352F] dark:text-gray-100 whitespace-nowrap">Chat</span>
             </div>
             <svg class="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
@@ -276,7 +338,7 @@
         <!-- Indexed Documents Button -->
         <button
           onclick={handleDocumentsClick}
-          class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white rounded-xl hover:bg-gray-50 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
+          class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white dark:bg-gray-950 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-900 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 dark:border-gray-800 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
           title="Indexed Documents"
         >
           {#if (isSidebarHovered || sidebarView !== 'menu')}
@@ -284,7 +346,7 @@
               <svg class="w-5 h-5 text-[#443C68] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
-              <span class="font-medium text-[#37352F] whitespace-nowrap">Documents</span>
+              <span class="font-medium text-[#37352F] dark:text-gray-100 whitespace-nowrap">Documents</span>
               {#if isIndexingInProgress}
                 <span class="flex items-center gap-1 bg-blue-100 text-blue-600 text-xs px-2 py-0.5 rounded-full flex-shrink-0">
                   <svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -316,29 +378,54 @@
           {/if}
         </button>
 
+        <!-- Settings Button -->
+        <button
+          onclick={() => goto('/settings')}
+          class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white dark:bg-gray-950 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-900 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 dark:border-gray-800 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
+          title="Settings"
+        >
+          {#if (isSidebarHovered || sidebarView !== 'menu')}
+            <div class="flex items-center gap-3">
+              <svg class="w-5 h-5 text-[#443C68] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.4 15a1.7 1.7 0 00.33 1.87l.02.02a2 2 0 01-1.41 3.41h-.02a1.7 1.7 0 00-1.87.33 1.7 1.7 0 00-.5 1.83v.02A2 2 0 0112 24a2 2 0 01-1.9-1.4v-.02a1.7 1.7 0 00-.5-1.83 1.7 1.7 0 00-1.87-.33h-.02A2 2 0 014.3 18.9l.02-.02A1.7 1.7 0 004.65 15a1.7 1.7 0 00-1.83-.5h-.02A2 2 0 010 12a2 2 0 011.4-1.9h.02a1.7 1.7 0 001.83-.5A1.7 1.7 0 004.65 7.73l-.02-.02A2 2 0 014.3 5.1h.02a1.7 1.7 0 001.87-.33 1.7 1.7 0 00.5-1.83v-.02A2 2 0 0112 0a2 2 0 011.9 1.4v.02a1.7 1.7 0 00.5 1.83 1.7 1.7 0 001.87.33h.02A2 2 0 0119.7 5.1l-.02.02a1.7 1.7 0 00-.33 1.87 1.7 1.7 0 00.5 1.83 1.7 1.7 0 001.83.5h.02A2 2 0 0124 12a2 2 0 01-1.4 1.9h-.02a1.7 1.7 0 00-1.83.5z" />
+              </svg>
+              <span class="font-medium text-[#37352F] dark:text-gray-100 whitespace-nowrap">Settings</span>
+            </div>
+            <svg class="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+            </svg>
+          {:else}
+            <svg class="w-5 h-5 text-[#443C68] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.4 15a1.7 1.7 0 00.33 1.87l.02.02a2 2 0 01-1.41 3.41h-.02a1.7 1.7 0 00-1.87.33 1.7 1.7 0 00-.5 1.83v.02A2 2 0 0112 24a2 2 0 01-1.9-1.4v-.02a1.7 1.7 0 00-.5-1.83 1.7 1.7 0 00-1.87-.33h-.02A2 2 0 014.3 18.9l.02-.02A1.7 1.7 0 004.65 15a1.7 1.7 0 00-1.83-.5h-.02A2 2 0 010 12a2 2 0 011.4-1.9h.02a1.7 1.7 0 001.83-.5A1.7 1.7 0 004.65 7.73l-.02-.02A2 2 0 014.3 5.1h.02a1.7 1.7 0 001.87-.33 1.7 1.7 0 00.5-1.83v-.02A2 2 0 0112 0a2 2 0 011.9 1.4v.02a1.7 1.7 0 00.5 1.83 1.7 1.7 0 001.87.33h.02A2 2 0 0119.7 5.1l-.02.02a1.7 1.7 0 00-.33 1.87 1.7 1.7 0 00.5 1.83 1.7 1.7 0 001.83.5h.02A2 2 0 0124 12a2 2 0 01-1.4 1.9h-.02a1.7 1.7 0 00-1.83.5z" />
+            </svg>
+          {/if}
+        </button>
+
       </div>
     </div>
   {:else if sidebarView === 'chat'}
     <!-- Chat History View -->
     <div class="flex-1 flex flex-col overflow-hidden">
       <!-- Back Button and Header -->
-      <div class="px-6 pt-4 pb-2 border-b border-gray-200">
+      <div class="px-6 pt-4 pb-2 border-b border-gray-200 dark:border-gray-800">
         <button
           onclick={() => sidebarView = 'menu'}
-          class="flex items-center gap-2 text-sm text-gray-600 hover:text-[#443C68] transition-colors mb-4"
+          class="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300 hover:text-[#443C68] dark:hover:text-white transition-colors mb-4"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
           </svg>
           Back
         </button>
-        <h3 class="text-sm font-semibold text-[#37352F] uppercase tracking-wide">
+        <h3 class="text-sm font-semibold text-[#37352F] dark:text-gray-100 uppercase tracking-wide">
           Chat History
         </h3>
       </div>
 
       <!-- New Chat Button -->
-      <div class="p-6 border-b border-gray-100">
+      <div class="p-6 border-b border-gray-100 dark:border-gray-800">
         <button
           onclick={onNewChat}
           class="w-full px-6 py-3 bg-[#443C68] text-white rounded-xl hover:bg-[#3A3457] transition-colors flex items-center justify-center gap-3 font-medium"
@@ -365,9 +452,9 @@
         <div class="space-y-3">
       {#each chatHistory as session}
         <div
-          class="group relative w-full p-4 rounded-xl hover:bg-white transition-all duration-200 {currentChatSession?.id ===
+          class="group relative w-full p-4 rounded-xl hover:bg-white dark:hover:bg-gray-950/60 transition-all duration-200 {currentChatSession?.id ===
           session.id
-            ? 'bg-white shadow-sm border border-[#443C68]/20'
+            ? 'bg-white dark:bg-gray-950 shadow-sm border border-[#443C68]/20 dark:border-[#443C68]/40'
             : ''}"
         >
           <button
@@ -377,15 +464,15 @@
             }}
             class="w-full text-left"
           >
-            <div class="text-sm font-medium text-[#37352F] truncate mb-2">
+            <div class="text-sm font-medium text-[#37352F] dark:text-gray-100 truncate mb-2">
               {session.title}
             </div>
             <div
-              class="flex items-center justify-between text-xs text-gray-500"
+              class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
             >
               <span>{new Date(session.created_at).toLocaleDateString()}</span>
               <span
-                class="bg-[#443C68]/10 text-[#443C68] px-2.5 py-1 rounded-full font-medium"
+                class="bg-[#443C68]/10 text-[#443C68] dark:text-[#B9B2E6] px-2.5 py-1 rounded-full font-medium"
               >
                 {session.message_count} message{session.message_count !== 1
                   ? "s"
@@ -399,7 +486,7 @@
             <button
               type="button"
               onclick={(e) => onToggleDropdown(session.id, e)}
-              class="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+              class="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
               aria-label="Session options"
               aria-expanded={openDropdownId === session.id}
             >
@@ -411,9 +498,11 @@
             <!-- Dropdown menu -->
             {#if openDropdownId === session.id}
               <div
-                class="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50"
+                class="absolute right-0 mt-1 w-40 bg-white dark:bg-gray-950 rounded-lg shadow-lg border border-gray-200 dark:border-gray-800 py-1 z-50"
                 role="menu"
                 onclick={(e) => e.stopPropagation()}
+                onkeydown={(e) => e.stopPropagation()}
+                tabindex="0"
               >
                 <button
                   type="button"
@@ -421,7 +510,7 @@
                     e.stopPropagation();
                     onDeleteSession(session.id);
                   }}
-                  class="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors flex items-center gap-2"
+                  class="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors flex items-center gap-2"
                   role="menuitem"
                 >
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -441,10 +530,10 @@
     <!-- Indexed Documents View -->
     <div class="flex-1 flex flex-col overflow-hidden">
       <!-- Back Button and Header -->
-      <div class="px-6 pt-4 pb-2 border-b border-gray-200">
+      <div class="px-6 pt-4 pb-2 border-b border-gray-200 dark:border-gray-800">
         <button
           onclick={() => sidebarView = 'menu'}
-          class="flex items-center gap-2 text-sm text-gray-600 hover:text-[#443C68] transition-colors mb-4"
+          class="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300 hover:text-[#443C68] dark:hover:text-white transition-colors mb-4"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
@@ -452,7 +541,7 @@
           Back
         </button>
         <div class="flex items-center justify-between">
-          <h3 class="text-sm font-semibold text-[#37352F] uppercase tracking-wide">
+          <h3 class="text-sm font-semibold text-[#37352F] dark:text-gray-100 uppercase tracking-wide">
             Indexed Documents
           </h3>
           {#if isIndexingInProgress}
@@ -485,7 +574,7 @@
       <div class="flex-1 flex flex-col overflow-hidden">
         <!-- Search and Filter Controls -->
         {#if indexedDocuments.length > 0}
-          <div class="px-6 pt-4 pb-3 border-b border-gray-200">
+          <div class="px-6 pt-4 pb-3 border-b border-gray-200 dark:border-gray-800">
             <!-- Single line: Search, Filter dropdown, Sort order -->
             <div class="flex items-center gap-2">
               <!-- Search Input -->
@@ -494,7 +583,7 @@
                   type="text"
                   placeholder="Search"
                   bind:value={searchQuery}
-                  class="w-full px-3 py-2 pl-9 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent"
+                  class="w-full px-3 py-2 pl-9 text-sm border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#443C68] focus:border-transparent"
                 />
                 <svg class="absolute left-3 top-2.5 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -509,11 +598,11 @@
                     e.stopPropagation();
                     showFilterDropdown = !showFilterDropdown;
                   }}
-                  class="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center justify-center"
+                  class="px-3 py-2 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors flex items-center justify-center"
                   title="Filter & Sort"
                   aria-label="Filter and sort options"
                 >
-                  <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-gray-600 dark:text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
                   </svg>
                 </button>
@@ -521,12 +610,14 @@
                 <!-- Filter Dropdown Menu -->
                 {#if showFilterDropdown}
                   <div
-                    class="absolute right-0 mt-1 w-56 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50"
+                    class="absolute right-0 mt-1 w-56 bg-white dark:bg-gray-950 rounded-lg shadow-lg border border-gray-200 dark:border-gray-800 py-1 z-50"
                     role="menu"
                     onclick={(e) => e.stopPropagation()}
+                    onkeydown={(e) => e.stopPropagation()}
+                    tabindex="0"
                   >
                     <!-- Filter by Type Section -->
-                    <div class="px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-100">
+                    <div class="px-3 py-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide border-b border-gray-100 dark:border-gray-800">
                       Filter by Type
                     </div>
                     <button
@@ -535,7 +626,7 @@
                         filterType = 'all';
                         showFilterDropdown = false;
                       }}
-                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {filterType === 'all' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors flex items-center justify-between {filterType === 'all' ? 'bg-gray-50 dark:bg-gray-900 text-[#443C68] dark:text-white font-medium' : ''}"
                       role="menuitem"
                     >
                       <span>All Types</span>
@@ -552,7 +643,7 @@
                           filterType = String(type);
                           showFilterDropdown = false;
                         }}
-                        class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {filterType === String(type) ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                        class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors flex items-center justify-between {filterType === String(type) ? 'bg-gray-50 dark:bg-gray-900 text-[#443C68] dark:text-white font-medium' : ''}"
                         role="menuitem"
                       >
                         <span>{String(type).toUpperCase()}</span>
@@ -565,7 +656,7 @@
                     {/each}
 
                     <!-- Sort by Section -->
-                    <div class="px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide border-t border-gray-100 mt-1">
+                    <div class="px-3 py-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide border-t border-gray-100 dark:border-gray-800 mt-1">
                       Sort by
                     </div>
                     <button
@@ -574,7 +665,7 @@
                         sortBy = 'name';
                         showFilterDropdown = false;
                       }}
-                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {sortBy === 'name' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors flex items-center justify-between {sortBy === 'name' ? 'bg-gray-50 dark:bg-gray-900 text-[#443C68] dark:text-white font-medium' : ''}"
                       role="menuitem"
                     >
                       <span>Name</span>
@@ -590,7 +681,7 @@
                         sortBy = 'type';
                         showFilterDropdown = false;
                       }}
-                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {sortBy === 'type' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors flex items-center justify-between {sortBy === 'type' ? 'bg-gray-50 dark:bg-gray-900 text-[#443C68] dark:text-white font-medium' : ''}"
                       role="menuitem"
                     >
                       <span>Type</span>
@@ -606,7 +697,7 @@
                         sortBy = 'size';
                         showFilterDropdown = false;
                       }}
-                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {sortBy === 'size' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors flex items-center justify-between {sortBy === 'size' ? 'bg-gray-50 dark:bg-gray-900 text-[#443C68] dark:text-white font-medium' : ''}"
                       role="menuitem"
                     >
                       <span>Size</span>
@@ -622,7 +713,7 @@
                         sortBy = 'date';
                         showFilterDropdown = false;
                       }}
-                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {sortBy === 'date' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors flex items-center justify-between {sortBy === 'date' ? 'bg-gray-50 dark:bg-gray-900 text-[#443C68] dark:text-white font-medium' : ''}"
                       role="menuitem"
                     >
                       <span>Date</span>
@@ -638,7 +729,7 @@
                         sortBy = 'chunks';
                         showFilterDropdown = false;
                       }}
-                      class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition-colors flex items-center justify-between {sortBy === 'chunks' ? 'bg-gray-50 text-[#443C68] font-medium' : ''}"
+                      class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors flex items-center justify-between {sortBy === 'chunks' ? 'bg-gray-50 dark:bg-gray-900 text-[#443C68] dark:text-white font-medium' : ''}"
                       role="menuitem"
                     >
                       <span>Chunks</span>
@@ -655,15 +746,15 @@
               <!-- Sort Order Toggle -->
               <button
                 onclick={() => sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'}
-                class="px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center justify-center"
+                class="px-3 py-2 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors flex items-center justify-center"
                 title={sortOrder === 'asc' ? 'Ascending' : 'Descending'}
               >
                 {#if sortOrder === 'asc'}
-                  <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-gray-600 dark:text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" />
                   </svg>
                 {:else}
-                  <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-gray-600 dark:text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h13M3 8h9m-9 4h9m5 4v-6m0 0l-4 4m4-4l4 4" />
                   </svg>
                 {/if}

@@ -41,6 +41,9 @@ class LLMService:
         self._groq = None
         self.provider = provider.lower().strip()
         self._adapter: LLMProviderAdapter = adapter or create_adapter_for_provider(self.provider, settings)
+        # Approximate token usage tracking (per process, best-effort; mainly for Groq).
+        # Keys: prompt, completion, total.
+        self._token_usage: Dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
         logger.info(f"LLMService initialized with provider: {self.provider}")
         # Lazy initialization per provider
 
@@ -51,6 +54,36 @@ class LLMService:
     def supports_tool_calling(self) -> bool:
         """True if this provider supports native tool/function calling (e.g. Groq). Enables single-loop agent flow."""
         return self._adapter.supports_tool_calling()
+
+    def _estimate_tokens_from_chars(self, text: str) -> int:
+        """Rough token estimate from character length (4 chars ≈ 1 token for English)."""
+        if not text:
+            return 0
+        return max(1, len(text) // 4)
+
+    def _record_usage(self, prompt_tokens: int, completion_tokens: int, label: str = "") -> None:
+        """Update internal token counters and log usage."""
+        try:
+            p = int(prompt_tokens or 0)
+            c = int(completion_tokens or 0)
+        except Exception:
+            p, c = 0, 0
+        t = p + c
+        self._token_usage["prompt"] += p
+        self._token_usage["completion"] += c
+        self._token_usage["total"] += t
+        logger.info(
+            "LLM token usage%s: prompt=%s, completion=%s, total=%s (cumulative total=%s)",
+            f" ({label})" if label else "",
+            p,
+            c,
+            t,
+            self._token_usage["total"],
+        )
+
+    def get_token_usage(self) -> Dict[str, int]:
+        """Return a snapshot of cumulative token usage for this process."""
+        return dict(self._token_usage)
 
     def _initialize_client(self):
         """Initialize client for the selected provider (lazy)."""
@@ -139,7 +172,26 @@ class LLMService:
                         max_completion_tokens=max_tokens,
                         stream=False,
                     )
+                    # Token usage (when provided by Groq)
+                    usage = getattr(completion, "usage", None)
+                    prompt_t = completion_t = 0
+                    if usage is not None:
+                        # usage may be an object or dict
+                        pt = getattr(usage, "prompt_tokens", None)
+                        ct = getattr(usage, "completion_tokens", None)
+                        if pt is None and isinstance(usage, dict):
+                            pt = usage.get("prompt_tokens")
+                        if ct is None and isinstance(usage, dict):
+                            ct = usage.get("completion_tokens") or usage.get("output_tokens")
+                        prompt_t = pt or 0
+                        completion_t = ct or 0
+                    else:
+                        # Fallback: rough estimate from prompt and response lengths
+                        text_preview = (completion.choices[0].message.content or "") if completion.choices else ""
+                        prompt_t = self._estimate_tokens_from_chars(prompt)
+                        completion_t = self._estimate_tokens_from_chars(text_preview)
                     text = (completion.choices[0].message.content or "").strip()
+                    self._record_usage(prompt_t, completion_t, label="generate_simple_groq")
                     return text or "I couldn't generate a response."
                 except Exception as ge:
                     logger.error(f"Groq generation error: {ge}")
@@ -221,10 +273,16 @@ class LLMService:
                         max_completion_tokens=max_tokens,
                         stream=True,
                     )
+                    # Approximate streaming usage: estimate from prompt and streamed output length.
+                    prompt_tokens_est = self._estimate_tokens_from_chars(prompt)
+                    completion_chars = 0
                     async for chunk in stream:
                         delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
                         if delta:
+                            completion_chars += len(delta)
                             yield delta
+                    completion_tokens_est = self._estimate_tokens_from_chars("x" * completion_chars)
+                    self._record_usage(prompt_tokens_est, completion_tokens_est, label="generate_response_stream_groq")
                 except Exception as ge:
                     logger.error(f"Groq stream error: {ge}")
                     yield "I couldn't generate a response due to an AI provider error."
@@ -293,6 +351,25 @@ class LLMService:
                 max_completion_tokens=max_tokens,
                 stream=False,
             )
+            # Token usage when Groq provides it
+            usage = getattr(completion, "usage", None)
+            prompt_t = completion_t = 0
+            if usage is not None:
+                pt = getattr(usage, "prompt_tokens", None)
+                ct = getattr(usage, "completion_tokens", None)
+                if pt is None and isinstance(usage, dict):
+                    pt = usage.get("prompt_tokens")
+                if ct is None and isinstance(usage, dict):
+                    ct = usage.get("completion_tokens") or usage.get("output_tokens")
+                prompt_t = pt or 0
+                completion_t = ct or 0
+            else:
+                # Rough estimate from all message contents
+                all_text = "".join(str(m.get("content", "")) for m in messages)
+                prompt_t = self._estimate_tokens_from_chars(all_text)
+                # First assistant/tool-call turn is small; completion tokens are minor here
+                completion_t = 0
+            self._record_usage(prompt_t, completion_t, label="chat_with_tools_groq")
             msg = completion.choices[0].message if completion.choices else None
             if not msg:
                 return "I couldn't generate a response.", None
@@ -342,6 +419,23 @@ class LLMService:
             max_completion_tokens=max_tokens,
             stream=False,
         )
+        # Usage for fallback chat
+        usage = getattr(completion, "usage", None)
+        prompt_t = completion_t = 0
+        if usage is not None:
+            pt = getattr(usage, "prompt_tokens", None)
+            ct = getattr(usage, "completion_tokens", None)
+            if pt is None and isinstance(usage, dict):
+                pt = usage.get("prompt_tokens")
+            if ct is None and isinstance(usage, dict):
+                ct = usage.get("completion_tokens") or usage.get("output_tokens")
+            prompt_t = pt or 0
+            completion_t = ct or 0
+        else:
+            all_text = "".join(str(m.get("content", "")) for m in messages)
+            prompt_t = self._estimate_tokens_from_chars(all_text)
+            completion_t = 0
+        self._record_usage(prompt_t, completion_t, label="_chat_messages_no_tools_groq")
         msg = completion.choices[0].message if completion.choices else None
         if not msg:
             return None
@@ -361,6 +455,10 @@ class LLMService:
             return
         try:
             self._initialize_client()
+            # Approximate prompt tokens from all messages (system/user/assistant/tool).
+            all_text = "".join(str(m.get("content", "")) for m in messages)
+            prompt_tokens_est = self._estimate_tokens_from_chars(all_text)
+            completion_chars = 0
             stream = await self._groq.chat.completions.create(
                 messages=messages,
                 model=self.groq_model,
@@ -371,7 +469,10 @@ class LLMService:
             async for chunk in stream:
                 delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
                 if delta:
+                    completion_chars += len(delta)
                     yield delta
+            completion_tokens_est = self._estimate_tokens_from_chars("x" * completion_chars)
+            self._record_usage(prompt_tokens_est, completion_tokens_est, label="chat_messages_stream_groq")
         except Exception as e:
             logger.error(f"chat_messages_stream failed: {e}")
             yield "I couldn't generate a response due to an error."
@@ -446,7 +547,23 @@ class LLMService:
                         max_completion_tokens=out_tokens,
                         stream=False,
                     )
+                    usage = getattr(completion, "usage", None)
+                    prompt_t = completion_t = 0
+                    if usage is not None:
+                        pt = getattr(usage, "prompt_tokens", None)
+                        ct = getattr(usage, "completion_tokens", None)
+                        if pt is None and isinstance(usage, dict):
+                            pt = usage.get("prompt_tokens")
+                        if ct is None and isinstance(usage, dict):
+                            ct = usage.get("completion_tokens") or usage.get("output_tokens")
+                        prompt_t = pt or 0
+                        completion_t = ct or 0
+                    else:
+                        text_preview = (completion.choices[0].message.content or "") if completion.choices else ""
+                        prompt_t = self._estimate_tokens_from_chars(prompt)
+                        completion_t = self._estimate_tokens_from_chars(text_preview)
                     text = (completion.choices[0].message.content or "").strip()
+                    self._record_usage(prompt_t, completion_t, label="generate_simple_groq")
                     return text or "I couldn't generate a response."
                 except Exception as ge:
                     logger.error(f"Groq simple generation error: {ge}")

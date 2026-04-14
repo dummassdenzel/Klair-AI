@@ -6,6 +6,7 @@
   import Sidebar from '$lib/components/Sidebar.svelte';
   import { apiService } from '$lib/api/services';
   import { createApiRequest } from '$lib/utils/api';
+  import { initTheme } from '$lib/stores/theme';
   import {
     systemStatus,
     currentChatSession,
@@ -39,6 +40,7 @@
   // Initialize system status on mount
   onMount(() => {
     (async () => {
+      initTheme();
       await testConnection();
       if ($systemStatus?.directory_set) {
         await loadChatHistory();
@@ -407,15 +409,15 @@
   />
 </svelte:head>
 
-<div class="h-screen bg-white overflow-hidden flex flex-col">
+<div class="h-screen bg-white dark:bg-gray-950 overflow-hidden flex flex-col">
   <!-- Global API error banner (e.g. rate limit, set directory failure) -->
   {#if $apiError}
-    <div class="flex-shrink-0 bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center justify-between gap-3">
-      <p class="text-sm text-amber-800 flex-1 truncate">{$apiError}</p>
+    <div class="flex-shrink-0 bg-amber-50 dark:bg-amber-950/40 border-b border-amber-200 dark:border-amber-900/60 px-4 py-2 flex items-center justify-between gap-3">
+      <p class="text-sm text-amber-800 dark:text-amber-200 flex-1 truncate">{$apiError}</p>
       <button
         type="button"
         onclick={() => apiActions.clearError()}
-        class="flex-shrink-0 text-amber-600 hover:text-amber-800 p-1"
+        class="flex-shrink-0 text-amber-600 hover:text-amber-800 dark:text-amber-200 dark:hover:text-amber-100 p-1"
         aria-label="Dismiss"
       >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -448,8 +450,8 @@
       onDocumentClick={handleDocumentClick}
     />
 
-    <!-- Main Content Area -->
-    <div class="flex-1 flex flex-col bg-white overflow-y-auto relative">
+    <!-- Main Content Area (x-hidden: decorative fixed layers may extend past the edge without a horizontal scrollbar) -->
+    <div class="flex-1 flex flex-col bg-white dark:bg-gray-950 overflow-y-auto overflow-x-hidden relative">
       {#if showDirectoryPicker}
         <DirectorySelection
           isSetting={isSettingDirectory}
@@ -461,18 +463,18 @@
         />
       {:else if selectedDocument}
         <!-- Document Viewer Overlay -->
-        <div class="absolute inset-0 z-50 bg-white flex flex-col">
+        <div class="absolute inset-0 z-50 bg-white dark:bg-gray-950 flex flex-col">
           <!-- Document Viewer Header -->
-          <div class="flex-shrink-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+          <div class="flex-shrink-0 bg-white dark:bg-gray-950 border-b border-gray-200 dark:border-gray-800 px-6 py-4 flex items-center justify-between">
             <div class="flex items-center gap-3">
               <div class="flex-shrink-0">
                 <FileTypeIcon fileType={selectedDocument.file_type} class="w-6 h-6 flex-shrink-0" />
               </div>
               <div>
-                <h2 class="text-lg font-semibold text-[#37352F] truncate max-w-2xl">
+                <h2 class="text-lg font-semibold text-[#37352F] dark:text-gray-100 truncate max-w-2xl">
                   {selectedDocument.file_path?.split('\\').pop() || selectedDocument.file_path?.split('/').pop() || 'Unknown'}
                 </h2>
-                <div class="text-xs text-gray-500 mt-1">
+                <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
                   <span>{getFileTypeConfig(selectedDocument.file_type).label}</span>
                   {#if selectedDocument.file_size}
                     <span> • {(selectedDocument.file_size / 1024).toFixed(1)} KB</span>
@@ -482,7 +484,7 @@
             </div>
             <button
               onclick={handleCloseDocumentViewer}
-              class="flex items-center justify-center w-10 h-10 rounded-lg hover:bg-gray-100 transition-colors text-gray-600 hover:text-[#443C68]"
+              class="flex items-center justify-center w-10 h-10 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 hover:text-[#443C68] dark:hover:text-white"
               aria-label="Close document viewer"
             >
               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

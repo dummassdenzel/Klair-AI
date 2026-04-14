@@ -28,14 +28,14 @@
         <button
           type="button"
           onclick={() => onToggleFolder(node.pathKey)}
-          class="w-full text-left flex items-center gap-1 py-1.5 pr-2 rounded-md hover:bg-gray-200/80 text-gray-700 text-sm group"
+          class="w-full text-left flex items-center gap-1 py-1.5 pr-2 rounded-md hover:bg-gray-200/80 dark:hover:bg-gray-800/80 text-gray-700 dark:text-gray-200 text-sm group"
           style="padding-left: {depth > 0 ? 0 : 4}px;"
         >
           <span
             class="flex-shrink-0 w-4 h-4 flex items-center justify-center transition-transform {expandedPathKeys.has(node.pathKey) ? 'rotate-90' : ''}"
             aria-hidden="true"
           >
-            <svg class="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-3.5 h-3.5 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
             </svg>
           </span>
@@ -52,7 +52,7 @@
           <span class="truncate font-medium">{node.name}</span>
         </button>
         {#if expandedPathKeys.has(node.pathKey)}
-          <div class="border-l border-gray-200 ml-2 mt-0.5" style="margin-left: {paddingLeft / 2 + 2}px;">
+          <div class="border-l border-gray-200 dark:border-gray-800 ml-2 mt-0.5" style="margin-left: {paddingLeft / 2 + 2}px;">
             <DocumentTreeNav
               nodes={node.children}
               expandedPathKeys={expandedPathKeys}
@@ -68,13 +68,13 @@
         <button
           type="button"
           onclick={() => onDocumentClick(node.document)}
-          class="w-full text-left flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-gray-200/80 transition-colors cursor-pointer text-sm group"
+          class="w-full text-left flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-gray-200/80 dark:hover:bg-gray-800/80 transition-colors cursor-pointer text-sm group"
           title={node.document.file_path}
         >
           <FileTypeIcon fileType={node.document.file_type} />
-          <span class="truncate text-[#37352F]">{node.name}</span>
+          <span class="truncate text-[#37352F] dark:text-gray-100">{node.name}</span>
           {#if node.document.chunks_count != null}
-            <span class="flex-shrink-0 text-xs text-gray-400 ml-auto">{node.document.chunks_count}</span>
+            <span class="flex-shrink-0 text-xs text-gray-400 dark:text-gray-500 ml-auto">{node.document.chunks_count}</span>
           {/if}
         </button>
       </li>

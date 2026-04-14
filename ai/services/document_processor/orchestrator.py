@@ -1922,10 +1922,12 @@ JSON output:"""
             scores = prioritized_scores + other_scores
             logger.info(f"Prioritized {len(prioritized_docs)} chunks from {len(selected_files)} selected files")
 
-        # T.3 Context compression: extract relevant portions only (skip when small or specific-doc)
+        # T.3 Context compression: extract relevant portions only. Skip for aggregation (need raw data),
+        # specific-doc, small context, or few chunks.
         total_context_chars = sum(len(d) for d in documents)
         if (
             not explicit_filename
+            and not is_aggregation
             and len(documents) >= 2
             and total_context_chars >= 2000
         ):
@@ -2225,7 +2227,17 @@ JSON output:"""
         except Exception as e:
             logger.error(f"Error getting stats: {e}")
             return {"error": str(e)}
-    
+
+    def get_llm_token_usage(self) -> Dict[str, int]:
+        """
+        Expose cumulative LLM token usage for monitoring.
+        Values are best-effort and primarily populated when using Groq.
+        """
+        try:
+            return self.llm_service.get_token_usage()
+        except Exception:
+            return {"prompt": 0, "completion": 0, "total": 0}
+
     async def cleanup(self):
         """Proper cleanup method"""
         try:
