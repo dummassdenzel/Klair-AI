@@ -16,6 +16,7 @@
   import FileTypeIcon from "$lib/components/FileTypeIcon.svelte";
   import { getFileTypeConfig } from "$lib/utils/fileTypes";
   import { messageToConversationTitle } from "$lib/utils/chatTitle";
+  import { formatCalendarDate } from "$lib/utils/dateFormat";
   import { theme } from "$lib/stores/theme";
 
   /** Watermark strength: 0 = invisible, 1 = solid. Edit only `light` and `dark` here. */
@@ -282,9 +283,7 @@
             {$currentChatSession.title}
           </h2>
           <div class="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            Created {new Date(
-              $currentChatSession.created_at,
-            ).toLocaleDateString()}
+            Created {formatCalendarDate($currentChatSession.created_at)}
           </div>
         </div>
       </div>
@@ -309,7 +308,7 @@
         <!-- <div class="flex items-center justify-center mx-auto mb-6">
           <img src="/klair.ai-sm.png" class="w-20 h-20" alt="User avatar" />
         </div> -->
-        <h3 class="text-xl font-bold tracking-tight text-[#37352F] dark:text-gray-100 mb-3">
+        <h3 class="text-4xl font-bold tracking-tight text-[#37352F] dark:text-gray-100 mb-3">
           Welcome to Klair AI!
         </h3>
         <p class="text-gray-600 dark:text-gray-400 text-xs">

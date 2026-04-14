@@ -2,6 +2,20 @@
 @import "tailwindcss/components";
 @import "tailwindcss/utilities";
 
+/*
+  Whole-app UI font (Tailwind `font-sans`, body, most components).
+
+  To try another font:
+  1. In src/routes/+layout.svelte <svelte:head>, change the Google Fonts `family=` URL
+     (e.g. family=Inter:wght@300;400;500;600;700).
+  2. Set --font-sans below to match the family name from that URL (e.g. 'Inter', …).
+
+  Optional: add `class="font-sans"` on the root layout div if anything doesn’t inherit.
+*/
+:root {
+  --font-sans: "Figtree", ui-sans-serif, system-ui, sans-serif;
+}
+
 /* Material Symbols Outlined – icon font for file types */
 .material-symbols-outlined {
   font-family: 'Material Symbols Outlined';
@@ -23,7 +37,7 @@ html, body {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  font-family: 'Poppins', sans-serif;
+  font-family: var(--font-sans);
 }
 
 #app {

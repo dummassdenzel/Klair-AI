@@ -7,8 +7,9 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Poppins', 'sans-serif'],
-      }
+        // Matches :root --font-sans in app.css — change both when switching fonts
+        sans: ["var(--font-sans)"],
+      },
     }
   },
 

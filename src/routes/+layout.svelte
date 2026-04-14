@@ -403,13 +403,14 @@
 
 <svelte:head>
   <title>Klair AI</title>
+  <!-- UI font: must match --font-sans in app.css (font name + weights you use) -->
   <link
-    href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap"
+    href="https://fonts.googleapis.com/css2?family=Figtree:wght@300;400;500;600;700&display=swap"
     rel="stylesheet"
   />
 </svelte:head>
 
-<div class="h-screen bg-white dark:bg-gray-950 overflow-hidden flex flex-col">
+<div class="h-screen font-sans bg-white dark:bg-gray-950 overflow-hidden flex flex-col">
   <!-- Global API error banner (e.g. rate limit, set directory failure) -->
   {#if $apiError}
     <div class="flex-shrink-0 bg-amber-50 dark:bg-amber-950/40 border-b border-amber-200 dark:border-amber-900/60 px-4 py-2 flex items-center justify-between gap-3">

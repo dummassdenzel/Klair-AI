@@ -89,7 +89,7 @@
         alt="Klair AI"
         class="w-20 h-20 mx-auto mb-4 object-contain"
       />
-      <h1 class="text-4xl font-bold tracking-tight text-[#37352F] dark:text-gray-100 mb-2">
+      <h1 class="text-7xl font-bold tracking-tight text-[#37352F] dark:text-gray-100 mb-2">
         Welcome to Klair AI
       </h1>
       <p class="text-gray-600 dark:text-gray-400 text-sm max-w-md mx-auto">

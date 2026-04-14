@@ -1,6 +1,7 @@
 <script lang="ts">
     import { createEventDispatcher } from 'svelte';
     import type { ChatSession } from '$lib/api/types';
+    import { formatCalendarDate } from '$lib/utils/dateFormat';
     
     export let session: ChatSession | null = null;
     export let isEditing: boolean = false;
@@ -87,7 +88,7 @@
           
           {#if session}
             <div class="text-sm text-gray-500 mt-1">
-              Created {new Date(session.created_at).toLocaleDateString()}
+              Created {formatCalendarDate(session.created_at)}
             </div>
           {/if}
         {/if}

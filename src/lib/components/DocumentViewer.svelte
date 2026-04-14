@@ -249,7 +249,7 @@
             max-width: 900px;
             margin: 0 auto;
             background: white;
-            font-family: 'Poppins', sans-serif;
+            font-family: var(--font-sans);
             line-height: 1.6;
             color: #37352F;
           ">
@@ -278,7 +278,7 @@
           max-width: 900px;
           margin: 0 auto;
           background: white;
-          font-family: 'Poppins', sans-serif;
+          font-family: var(--font-sans);
           line-height: 1.8;
           color: #37352F;
           white-space: pre-wrap;
@@ -342,7 +342,7 @@
         const workbook = xlsx.read(arrayBuffer, { type: 'array', cellStyles: true });
         
         // Build HTML for all sheets
-        let html = '<div class="excel-viewer" style="padding: 40px; max-width: 100%; margin: 0 auto; background: white; font-family: \'Poppins\', sans-serif;">';
+        let html = '<div class="excel-viewer" style="padding: 40px; max-width: 100%; margin: 0 auto; background: white; font-family: var(--font-sans), sans-serif;">';
         
         // Process each sheet
         workbook.SheetNames.forEach((sheetName: string, index: number) => {
@@ -690,7 +690,7 @@
       max-width: 100%;
       margin: 0 auto;
       background: white;
-      font-family: 'Poppins', sans-serif;
+      font-family: var(--font-sans);
     }
   
     :global(.excel-sheet-header) {

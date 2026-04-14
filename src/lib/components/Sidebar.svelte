@@ -5,6 +5,7 @@
   import { updateQueueStatus, systemStatus } from '$lib/stores/api';
   import DocumentTreeNav from '$lib/components/DocumentTreeNav.svelte';
   import type { DocumentTreeNode } from '$lib/api/types';
+  import { formatCalendarDate } from '$lib/utils/dateFormat';
 
   let {
     currentRoute = '/',
@@ -470,7 +471,7 @@
             <div
               class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
             >
-              <span>{new Date(session.created_at).toLocaleDateString()}</span>
+              <span>{formatCalendarDate(session.created_at)}</span>
               <span
                 class="bg-[#443C68]/10 text-[#443C68] dark:text-[#B9B2E6] px-2.5 py-1 rounded-full font-medium"
               >
