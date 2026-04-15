@@ -133,13 +133,18 @@ class RetrievalService:
             response_prompt = (
                 f"You are a document assistant. {user_question_line}Folder overview:\n"
                 f"{corpus_summary_text}\n\nDocuments in this folder:\n\n{context}\n\n"
-                "Tailor your response to what the user asked:\n"
-                "- If they asked what kind or type of files: give a short summary by file format "
-                "and document category (e.g. \"You have PDFs, spreadsheets, Word docs: invoices, "
-                "permits, reports, ...\") and do NOT list every filename.\n"
+                "Tailor your response precisely to what the user asked:\n"
+                "- If they asked how many of a specific category/type (e.g. 'how many delivery "
+                "receipts', 'count invoices'): identify EVERY document in the list above that "
+                "matches that category by reading its filename AND content preview, enumerate them "
+                "with their filenames, and state the exact count. Do NOT give a general summary.\n"
+                "- If they asked what kind or type of files exist: give a short summary by file "
+                "format and document category (e.g. 'PDFs, spreadsheets, Word docs: invoices, "
+                "permits, reports…') — do NOT list every filename.\n"
                 "- If they asked to list, show, or tell about all documents: list each document "
                 "with filename, brief description, file type, and status.\n"
-                "Be consistent: one style for \"kind/type\" (summary), another for \"list/show all\" (full list)."
+                "Be precise and consistent. Never say 'the context does not contain' — the full "
+                "document list is provided above; always derive your answer from it."
             )
 
             response_text = await self.llm_service.generate_simple(

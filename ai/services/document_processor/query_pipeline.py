@@ -64,6 +64,12 @@ class QueryPipelineService:
         "When the user asks what files exist or for an overview, use list_documents and/or summarize_corpus; "
         "do not use search_documents for that. When the user asks about a specific file by name, use "
         "search_specific_document with that name. "
+        "IMPORTANT — counting and category queries: when the user asks 'how many [type] do we have', "
+        "'count [category]', or anything that requires enumerating documents by category (e.g. delivery "
+        "receipts, invoices, permits), ALWAYS call list_documents first. The returned document list includes "
+        "filenames AND content previews that let you identify each document's category. Never use "
+        "search_documents or summarize_corpus for counting — search only returns top-N chunks and may "
+        "miss documents, while summarize_corpus returns only aggregate stats without individual filenames. "
         "When the user asks for 'related' documents or 'other files related to X', use search_documents with a "
         "descriptive query (e.g. 'BIP-12046 related documents' or 'documents related to BIP-12046 receipt delivery'), "
         "not just the document identifier. "
@@ -794,10 +800,16 @@ class QueryPipelineService:
         return (
             "You are a planner for a document assistant. Output ONLY valid JSON, no other text.\n\n"
             f"Available tools:\n{tools_text}\n\n"
-            "Rules: If the user asks what files or documents exist, or for an overview of the folder, "
-            "use list_documents and/or summarize_corpus; do not use search_documents for that. "
-            "Use search_specific_document when the user names a file. Use search_documents only for "
-            "factual questions about content or \"related documents\". For greetings or small talk output empty tools.\n"
+            "Rules:\n"
+            "- If the user asks what files or documents exist, or for an overview of the folder, "
+            "use list_documents and/or summarize_corpus; do not use search_documents for that.\n"
+            "- COUNTING / CATEGORY queries ('how many [type] do we have', 'count invoices', "
+            "'list all delivery receipts', etc.): use list_documents ONLY — never summarize_corpus "
+            "for these, because summarize_corpus returns only aggregate stats without individual "
+            "filenames. The LLM needs the full file list with content previews to count by category.\n"
+            "- Use search_specific_document when the user names a specific file.\n"
+            "- Use search_documents only for factual questions about document content or 'related documents'.\n"
+            "- For greetings or small talk output empty tools.\n"
             'Output format: {"tools": [{"tool": "tool_name", "query": "..." or "document_name": "..." as needed}]}'
             ' or {"tools": []} for no tools.\n\n'
             f"{history_snippet}User: {question}\n\nJSON output:"
@@ -879,12 +891,19 @@ class QueryPipelineService:
             if tool_name == TOOL_LIST_DOCUMENTS:
                 docs = result.get("documents") or []
                 count = result.get("count", 0)
-                lines = [f"Document list ({count} items):"] + [
-                    f"- {d.get('filename', d.get('file_path', ''))} ({d.get('file_type', '')})"
-                    for d in docs[:50]
-                ]
-                if count > 50:
-                    lines.append(f"... and {count - 50} more.")
+                doc_lines = []
+                for d in docs:
+                    name = d.get("filename") or d.get("file_path", "")
+                    ftype = d.get("file_type", "")
+                    preview = (d.get("content_preview") or "").strip()
+                    # Trim preview to 120 chars so the listing stays concise but informative
+                    if len(preview) > 120:
+                        preview = preview[:120].rstrip() + "…"
+                    entry = f"- {name} ({ftype})"
+                    if preview:
+                        entry += f": {preview}"
+                    doc_lines.append(entry)
+                lines = [f"Document list ({count} items):"] + doc_lines
                 parts.append("\n".join(lines))
             elif tool_name == TOOL_SUMMARIZE_CORPUS:
                 parts.append(f"[Folder overview]\n{result.get('summary', '')}")

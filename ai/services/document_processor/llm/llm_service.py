@@ -131,6 +131,47 @@ class LLMService:
                 logger.error(f"Failed to initialize Ollama client: {e}")
                 raise
     
+    def switch_provider(
+        self,
+        provider: str,
+        *,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> None:
+        """Switch the active LLM provider (and optionally model/key/url) at runtime.
+
+        Clears cached clients so they are re-initialized on the next call.
+        """
+        provider = provider.lower().strip()
+        if provider not in ("ollama", "gemini", "groq"):
+            raise ValueError(f"Unknown provider: {provider!r}. Must be ollama, gemini, or groq.")
+
+        if provider == "ollama":
+            if model:
+                self.model = model
+            if base_url:
+                self.base_url = base_url
+        elif provider == "gemini":
+            if model:
+                self.gemini_model = model
+            if api_key:
+                self.gemini_api_key = api_key
+        elif provider == "groq":
+            if model:
+                self.groq_model = model
+            if api_key:
+                self.groq_api_key = api_key
+
+        # Reset all cached clients so _initialize_client() rebuilds them
+        self.http_client = None
+        self._gemini = None
+        self._groq = None
+
+        self.provider = provider
+        self._adapter = create_adapter_for_provider(self.provider, settings)
+        logger.info("LLM provider switched to: %s", self.provider)
+
     async def generate_response(self, query: str, context: str, conversation_history: list = None) -> str:
         """Generate response using selected provider."""
         try:

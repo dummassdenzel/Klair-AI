@@ -8,6 +8,8 @@ import type {
   SearchResult,
   ChatSession,
   ChatMessage,
+  LLMConfig,
+  LLMConfigUpdate,
 } from './types';
 
 // Core API Services
@@ -203,6 +205,17 @@ export const apiService = {
 
   async updateConfiguration(config: Record<string, any>): Promise<Record<string, any>> {
     const response = await apiClient.post('/update-configuration', config);
+    return response.data;
+  },
+
+  // LLM provider configuration
+  async getLLMConfig(): Promise<LLMConfig> {
+    const response = await apiClient.get('/llm/config');
+    return response.data;
+  },
+
+  async updateLLMConfig(update: LLMConfigUpdate): Promise<LLMConfig> {
+    const response = await apiClient.post('/llm/config', update);
     return response.data;
   },
 

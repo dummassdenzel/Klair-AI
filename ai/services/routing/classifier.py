@@ -62,7 +62,13 @@ _LISTING_PATTERNS: list[re.Pattern] = [
         r"^what(?:'s| is) (?:in )?(?:the|my|our) (?:directory|folder|workspace|index)",
         r"^overview of (?:(?:all|our|my|the) )?(?:files?|documents?)",
         r"^describe (?:(?:all|our|my|the) )?(?:files?|documents?)\s*$",
+        # "how many files/documents do we have" (generic count)
         r"^(?:how many|total(?: number of)?) (?:files?|documents?) (?:do )?(?:we|i) have",
+        # "how many [document category] do we have / are there" (category count)
+        # Matches: "how many delivery receipts do we have", "how many invoices are there", etc.
+        r"how many [\w\s]+ (?:do (?:we|i) have|are (?:there|in (?:our|my|the) (?:folder|files?|index))|exist)",
+        # "count [category]" / "total number of [category]"
+        r"^(?:count|total(?: number of)?|give me (?:a )?count of) [\w\s]+$",
     ]
 ]
 

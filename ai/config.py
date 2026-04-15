@@ -94,7 +94,13 @@ class Settings:
             "supported_extensions": self.SUPPORTED_EXTENSIONS,
         }
 
-    _UPDATABLE = {"chunk_size", "chunk_overlap", "max_file_size_mb", "ollama_model", "ollama_base_url"}
+    _UPDATABLE = {
+        "chunk_size", "chunk_overlap", "max_file_size_mb",
+        "llm_provider",
+        "ollama_model", "ollama_base_url",
+        "gemini_model", "gemini_api_key",
+        "groq_model", "groq_api_key",
+    }
 
     def update(self, **kwargs) -> None:
         """Update allowlisted settings at runtime (e.g. from /api/update-configuration)."""
@@ -102,8 +108,13 @@ class Settings:
             "chunk_size": "CHUNK_SIZE",
             "chunk_overlap": "CHUNK_OVERLAP",
             "max_file_size_mb": "MAX_FILE_SIZE_MB",
+            "llm_provider": "LLM_PROVIDER",
             "ollama_model": "OLLAMA_MODEL",
             "ollama_base_url": "OLLAMA_BASE_URL",
+            "gemini_model": "GEMINI_MODEL",
+            "gemini_api_key": "GEMINI_API_KEY",
+            "groq_model": "GROQ_MODEL",
+            "groq_api_key": "GROQ_API_KEY",
         }
         for key, value in kwargs.items():
             attr = mapping.get(key)

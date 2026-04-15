@@ -92,3 +92,26 @@ export interface ChatRequest {
     response_time: number;
     timestamp: string;
   }
+
+  // LLM Configuration
+  export type LLMProvider = 'ollama' | 'gemini' | 'groq';
+
+  export interface LLMConfig {
+    provider: LLMProvider;
+    ollama_model: string;
+    ollama_base_url: string;
+    gemini_model: string;
+    gemini_api_key_set: boolean;
+    groq_model: string;
+    groq_api_key_set: boolean;
+  }
+
+  export interface LLMConfigUpdate {
+    provider: LLMProvider;
+    ollama_model?: string;
+    ollama_base_url?: string;
+    gemini_model?: string;
+    gemini_api_key?: string;
+    groq_model?: string;
+    groq_api_key?: string;
+  }
