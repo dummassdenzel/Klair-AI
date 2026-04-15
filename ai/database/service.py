@@ -610,3 +610,31 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Error getting chat session {session_id}: {e}")
             return None
+
+    async def has_indexed_documents_for_directory(self, directory_path: str) -> bool:
+        """Return True if at least one fully-indexed document exists under directory_path."""
+        import os
+        normalized = os.path.normpath(os.path.abspath(directory_path))
+        async with AsyncSessionLocal() as session:
+            stmt = select(func.count(IndexedDocument.id)).where(
+                IndexedDocument.processing_status == "indexed",
+                IndexedDocument.file_path.like(f"{normalized}%"),
+            )
+            count = await session.scalar(stmt)
+            return (count or 0) > 0
+
+    async def get_indexed_docs_for_directory(self, directory_path: str) -> Dict[str, Any]:
+        """
+        Return a dict of {file_path: IndexedDocument} for all indexed/metadata_only
+        documents under directory_path. Used by resume-mode indexing to skip unchanged files.
+        """
+        import os
+        normalized = os.path.normpath(os.path.abspath(directory_path))
+        async with AsyncSessionLocal() as session:
+            stmt = select(IndexedDocument).where(
+                IndexedDocument.processing_status.in_(["indexed", "metadata_only"]),
+                IndexedDocument.file_path.like(f"{normalized}%"),
+            )
+            result = await session.execute(stmt)
+            docs = result.scalars().all()
+            return {doc.file_path: doc for doc in docs}

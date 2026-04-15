@@ -83,29 +83,54 @@ class BM25Service:
     
     def add_documents(self, documents: List[Dict]) -> None:
         """
-        Add documents to BM25 index
-        
+        Add documents to BM25 index. Does NOT auto-save to disk; call save() explicitly
+        after a batch is complete (e.g. at the end of background indexing).
+
         Args:
             documents: List of dicts with 'id', 'text', 'metadata'
         """
         try:
-            # Add to corpus
             for doc in documents:
                 self.corpus.append(doc)
                 tokenized = self._tokenize(doc['text'])
                 self.tokenized_corpus.append(tokenized)
-            
-            # Rebuild BM25 index
+
             if self.tokenized_corpus:
                 self.bm25 = BM25Okapi(self.tokenized_corpus)
-                logger.info(f"BM25 index built with {len(self.corpus)} documents")
-            
-            # Persist to disk
-            self._save_index()
-            
+                logger.debug(f"BM25 index rebuilt with {len(self.corpus)} documents")
+
         except Exception as e:
             logger.error(f"Failed to add documents to BM25: {e}")
             raise
+
+    def remove_file_chunks(self, file_path: str) -> int:
+        """
+        Remove all BM25 chunks belonging to file_path and rebuild the index.
+        Returns the number of chunks removed. Used before re-indexing a changed file
+        so stale entries do not accumulate.
+        """
+        before = len(self.corpus)
+        if before == 0:
+            return 0
+
+        paired = [
+            (doc, tok)
+            for doc, tok in zip(self.corpus, self.tokenized_corpus)
+            if doc.get("metadata", {}).get("file_path") != file_path
+        ]
+        removed = before - len(paired)
+        if removed == 0:
+            return 0
+
+        self.corpus = [p[0] for p in paired]
+        self.tokenized_corpus = [p[1] for p in paired]
+        self.bm25 = BM25Okapi(self.tokenized_corpus) if self.tokenized_corpus else None
+        logger.debug(f"Removed {removed} BM25 chunks for {file_path}")
+        return removed
+
+    def save(self) -> None:
+        """Explicitly persist the BM25 index to disk. Call after batch indexing is complete."""
+        self._save_index()
     
     def search(self, query: str, top_k: int = 15) -> List[Tuple[str, float, Dict]]:
         """

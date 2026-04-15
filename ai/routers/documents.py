@@ -57,6 +57,15 @@ async def set_directory(request: Request):
         if old_processor:
             await old_processor.cancel_background_work()
 
+        # Detect a restart / same-directory scenario: the app has no current_directory
+        # (fresh start) but the DB already holds fully-indexed documents for this path.
+        # In that case we skip clear_all_data() so the persisted BM25 pickle is reused
+        # and only new/changed files are re-processed.
+        is_resume = (
+            current_dir is None
+            and await db_service.has_indexed_documents_for_directory(directory_path)
+        )
+
         doc_processor = DocumentProcessorOrchestrator(
             persist_dir=settings.CHROMA_PERSIST_DIR,
             embed_model_name=settings.EMBED_MODEL_NAME,
@@ -72,21 +81,30 @@ async def set_directory(request: Request):
             llm_provider=settings.LLM_PROVIDER,
         )
 
-        logger.info(f"Initializing document processor for directory: {directory_path}")
+        if is_resume:
+            logger.info(
+                f"Resuming previously-indexed directory: {directory_path} "
+                "(skipping clear — reusing persisted BM25 and ChromaDB data)"
+            )
+        else:
+            logger.info(f"Initializing document processor for directory: {directory_path}")
+            await doc_processor.clear_all_data()
 
-        await doc_processor.clear_all_data()
         file_monitor = FileMonitorService(doc_processor)
         init_timeout = settings.INITIALIZE_DIRECTORY_TIMEOUT
         try:
             await asyncio.wait_for(
-                doc_processor.initialize_from_directory(directory_path),
+                doc_processor.initialize_from_directory(directory_path, resume_mode=is_resume),
                 timeout=init_timeout,
             )
         except asyncio.TimeoutError:
             logger.error(f"Directory initialization timed out after {init_timeout}s for {directory_path}")
             raise HTTPException(
                 status_code=504,
-                detail=f"Directory initialization timed out after {init_timeout} seconds. Try a smaller directory or increase INITIALIZE_DIRECTORY_TIMEOUT.",
+                detail=(
+                    f"Directory initialization timed out after {init_timeout} seconds. "
+                    "Try a smaller directory or increase INITIALIZE_DIRECTORY_TIMEOUT."
+                ),
             )
         await file_monitor.start_monitoring(directory_path)
 
@@ -94,11 +112,17 @@ async def set_directory(request: Request):
         request.app.state.file_monitor = file_monitor
         request.app.state.current_directory = directory_path
 
+        processing_status = "resumed" if is_resume else "background_processing"
+        message = (
+            "Directory resumed. Only new or changed files are being re-processed."
+            if is_resume
+            else "Directory set successfully. Documents are being processed in the background."
+        )
         return {
             "status": "success",
-            "message": "Directory set successfully. Documents are being processed in the background.",
+            "message": message,
             "directory": directory_path,
-            "processing_status": "background_processing",
+            "processing_status": processing_status,
         }
     except HTTPException:
         raise

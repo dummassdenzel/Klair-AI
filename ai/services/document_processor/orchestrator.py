@@ -330,8 +330,17 @@ class DocumentProcessorOrchestrator:
                 pass
         self._indexing_task = None
     
-    async def initialize_from_directory(self, directory_path: str):
-        """Initialize processor with documents from directory using metadata-first indexing"""
+    async def initialize_from_directory(self, directory_path: str, resume_mode: bool = False):
+        """
+        Initialize processor with documents from directory using metadata-first indexing.
+
+        Args:
+            directory_path: Absolute path to the folder to index.
+            resume_mode: When True the app is resuming a previously-indexed directory
+                (e.g. after a restart). Already-indexed unchanged files are skipped so
+                the existing BM25 pickle loaded from disk stays valid and only new /
+                changed files are re-processed.
+        """
         start_time = asyncio.get_event_loop().time()
         
         try:
@@ -342,102 +351,138 @@ class DocumentProcessorOrchestrator:
             if not dir_path.is_dir():
                 raise ValueError(f"Path is not a directory: {directory_path}")
             
-            # Check if already initializing or already initialized for this directory
             if self.is_initializing:
-                logger.warning(f"Already initializing directory, skipping duplicate initialization")
+                logger.warning("Already initializing directory, skipping duplicate initialization")
                 return
             
             if self.current_directory == directory_path and self.filename_trie.file_count > 0:
-                logger.info(f"Directory {directory_path} already initialized with {self.filename_trie.file_count} files, skipping re-initialization")
+                logger.info(
+                    f"Directory {directory_path} already initialized with "
+                    f"{self.filename_trie.file_count} files, skipping re-initialization"
+                )
                 return
             
-            logger.info(f"Initializing from directory: {directory_path}")
+            logger.info(
+                f"Initializing from directory: {directory_path}"
+                + (" (resume mode — skipping unchanged files)" if resume_mode else "")
+            )
             self.current_directory = directory_path
-            self.is_initializing = True  # Set flag to prevent file monitor events
-            
+            self.is_initializing = True
+
             # PHASE 1: Build metadata index (FAST - < 1 second for most directories)
             metadata_start = asyncio.get_event_loop().time()
-            metadata_files = await self._build_metadata_index(directory_path)
+            metadata_files = await self._build_metadata_index(directory_path, resume_mode=resume_mode)
             metadata_elapsed = asyncio.get_event_loop().time() - metadata_start
-            
+
             if not metadata_files:
-                logger.warning(f"No supported files found in {directory_path}")
+                if resume_mode:
+                    logger.info(
+                        f"Resume mode: all files in {directory_path} are already indexed and unchanged"
+                    )
+                else:
+                    logger.warning(f"No supported files found in {directory_path}")
+                self.is_initializing = False
                 return
-            
+
             logger.info(f"Metadata index built: {len(metadata_files)} files in {metadata_elapsed:.2f}s")
             logger.info("Files are now queryable by filename/metadata")
-            
+
             # PHASE 2: Background content indexing (non-blocking)
             logger.info(f"Starting background content indexing for {len(metadata_files)} files...")
             self._shutdown = False
             self._indexing_task = asyncio.create_task(
                 self._index_content_background(metadata_files, directory_path)
             )
-            
+
             elapsed = asyncio.get_event_loop().time() - start_time
-            logger.info(f"Initialization complete: {len(metadata_files)} files metadata-indexed in {elapsed:.2f}s")
-            logger.info(f"Content indexing running in background (non-blocking)")
-            
-            # Clear initialization flag after metadata indexing completes
-            # File monitor can now process events (content indexing happens in background)
+            logger.info(f"Initialization complete: {len(metadata_files)} files queued in {elapsed:.2f}s")
+            logger.info("Content indexing running in background (non-blocking)")
+
             self.is_initializing = False
             logger.debug("Initialization flag cleared, file monitor events now enabled")
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize from directory: {e}")
-            # Clear flag even on error
             self.is_initializing = False
             raise
     
-    async def _build_metadata_index(self, directory_path: str) -> List[str]:
+    async def _build_metadata_index(
+        self, directory_path: str, resume_mode: bool = False
+    ) -> List[str]:
         """
         Build metadata index quickly (< 1 second for most directories).
         Stores file metadata in database immediately, allowing filename queries.
         Returns list of file paths that need content indexing.
+
+        In resume_mode, files that are already fully indexed and whose mtime has not
+        changed are added to the trie but excluded from the returned list. This keeps
+        the on-disk BM25 pickle valid and avoids redundant re-processing on restart.
         """
         dir_path = Path(directory_path)
         supported_files = []
-        
-        # Fast scan: only check file existence and basic metadata
+
+        # Pre-load existing index map with a single DB query (resume mode only)
+        existing_docs: Dict[str, Any] = {}
+        if resume_mode:
+            existing_docs = await self.database_service.get_indexed_docs_for_directory(
+                directory_path
+            )
+            logger.info(
+                f"Resume mode: {len(existing_docs)} existing indexed documents found in DB"
+            )
+
         for file_path in dir_path.rglob("*"):
             if not file_path.is_file():
                 continue
-            
-            # Quick validation (no hash calculation yet - that's expensive)
+
             is_valid, error = self.file_validator.validate_file(str(file_path))
             if not is_valid:
                 if error and "Unsupported file type" not in error:
                     logger.debug(f"Skipping {file_path}: {error}")
                 continue
-            
+
             try:
-                # Extract lightweight metadata (no content reading, no hashing)
                 path_obj = Path(file_path)
                 stat_info = path_obj.stat()
-                
-                # Calculate hash only for metadata (we'll recalculate during content indexing)
-                # For now, use a placeholder hash based on path + mtime for quick comparison
+                file_path_str = str(file_path)
+
+                # Add to trie regardless of resume status (trie is always rebuilt in-memory)
+                filename = path_obj.name
+                self.filename_trie.add(filename, file_path_str)
+
+                if resume_mode:
+                    existing = existing_docs.get(file_path_str)
+                    if existing and existing.processing_status == "indexed":
+                        stored_mtime = existing.last_modified
+                        if stored_mtime is not None:
+                            try:
+                                stored_ts = (
+                                    stored_mtime.timestamp()
+                                    if hasattr(stored_mtime, "timestamp")
+                                    else float(stored_mtime)
+                                )
+                                # 1-second tolerance handles filesystem timestamp rounding
+                                if abs(stored_ts - stat_info.st_mtime) < 1.0:
+                                    # Unchanged: trie updated, skip content re-indexing
+                                    continue
+                            except (TypeError, ValueError, OSError):
+                                pass  # Cannot compare mtimes; fall through to re-index
+
+                # New or changed file: store metadata and queue for content indexing
                 quick_hash = f"{file_path}:{stat_info.st_mtime}"
-                
-                # Store metadata immediately in database
                 await self.database_service.store_metadata_only(
-                    file_path=str(file_path),
-                    file_hash=quick_hash,  # Placeholder, will be updated during content indexing
+                    file_path=file_path_str,
+                    file_hash=quick_hash,
                     file_type=path_obj.suffix.lower(),
                     file_size=stat_info.st_size,
-                    last_modified=datetime.fromtimestamp(stat_info.st_mtime)
+                    last_modified=datetime.fromtimestamp(stat_info.st_mtime),
                 )
-                
-                # Add to Filename Trie for fast search
-                filename = path_obj.name
-                self.filename_trie.add(filename, str(file_path))
-                
-                supported_files.append(str(file_path))
-                
+                supported_files.append(file_path_str)
+
             except Exception as e:
                 logger.warning(f"Failed to index metadata for {file_path}: {e}")
                 continue
-        
+
         return supported_files
     
     async def _index_content_background(self, file_paths: List[str], directory_path: str):
@@ -465,14 +510,23 @@ class DocumentProcessorOrchestrator:
                         logger.error(f"Background indexing failed: {result}")
                     else:
                         processed += 1
+                # Persist BM25 after each batch so partial progress survives a crash
+                await asyncio.to_thread(self.bm25_service.save)
                 if (i + batch_size) % 50 == 0 or i + batch_size >= len(file_paths):
-                    logger.info(f"Background indexing progress: {processed + failed}/{len(file_paths)} files "
-                              f"({processed} indexed, {failed} failed)")
+                    logger.info(
+                        f"Background indexing progress: {processed + failed}/{len(file_paths)} files "
+                        f"({processed} indexed, {failed} failed)"
+                    )
                 if i + batch_size < len(file_paths):
                     await asyncio.sleep(0.1)
             logger.info(f"Background content indexing complete: {processed} indexed, {failed} failed")
         except asyncio.CancelledError:
             logger.info("Background content indexing task was cancelled")
+            # Still save whatever we managed to index before cancellation
+            try:
+                await asyncio.to_thread(self.bm25_service.save)
+            except Exception:
+                pass
             raise
         except Exception as e:
             logger.error(f"Background content indexing error: {e}")
@@ -625,8 +679,9 @@ class DocumentProcessorOrchestrator:
             if stored_hash and stored_hash != current_hash:
                 logger.info(f"File {file_path} changed, removing old chunks")
                 await self.vector_store.remove_document_chunks(file_path)
-                # Also remove from BM25 (we'll re-add below)
-                # Note: BM25 doesn't have a remove method, so we'll just re-add
+                removed = self.bm25_service.remove_file_chunks(file_path)
+                if removed:
+                    logger.debug(f"Removed {removed} stale BM25 chunks for {file_path}")
             
             # Process document content...
             text = await self.text_extractor.extract_text_async(file_path)
