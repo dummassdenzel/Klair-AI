@@ -1,135 +1,82 @@
-import asyncio
-import json
-import logging
-import os
-import re
-from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple, Any, AsyncIterator
-from datetime import datetime, timezone
-from pathlib import Path
+"""
+DocumentProcessorOrchestrator — thin coordinator (Phase 7 refactoring).
 
-from .models import QueryResult, ProcessingResult, FileMetadata
+Constructs all primitive services, composes the three focused services:
+  - IndexingService  : file ingestion, chunking, embedding, storage
+  - RetrievalService : hybrid search, reranking, context assembly
+  - QueryPipelineService : routing, tool calling, planner, response generation
+
+Then exposes a single stable public API that callers (routers, file monitor)
+depend on; every method is a one-line delegation.
+
+Target: ≤ 300 lines.  No business logic lives here.
+"""
+
+import asyncio
+import logging
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+
+from .models import QueryResult
 from .extraction.text_extractor import TextExtractor
 from .extraction.chunker import DocumentChunker
 from .extraction.embedding_service import EmbeddingService
-from .storage.vector_store import VectorStoreService
-from .llm.llm_service import LLMService
 from .extraction.file_validator import FileValidator
 from .extraction.ocr_service import OCRService
+from .storage.vector_store import VectorStoreService
 from .storage.bm25_service import BM25Service
+from .llm.llm_service import LLMService
 from .retrieval.hybrid_search import HybridSearchService
 from .retrieval.reranker_service import ReRankingService
-from .retrieval.filename_trie import FilenameTrie
-from .updates.update_queue import UpdateQueue, UpdateTask, UpdatePriority
+from .updates.update_queue import UpdateQueue
 from .updates.update_executor import UpdateExecutor
 from .updates.update_worker import UpdateWorker
 from .updates.chunk_differ import ChunkDiffer
 from .updates.update_strategy import UpdateStrategySelector
-from .query_config import RetrievalConfig, default_retrieval_config, is_aggregation_query
-from .corpus_summary import summarize_corpus
-from .tools.contract import (
-    ListDocumentsResult,
-    SearchDocumentsResult,
-    SummarizeCorpusResult,
-    TOOL_LIST_DOCUMENTS,
-    TOOL_SEARCH_DOCUMENTS,
-    TOOL_SEARCH_SPECIFIC_DOCUMENT,
-    TOOL_SUMMARIZE_CORPUS,
-    get_openai_format_tools,
-    get_tools_for_planner,
-    validate_tool_call,
-    validate_tool_calls,
-)
+from .query_config import RetrievalConfig, default_retrieval_config
+from .indexing_service import IndexingService
+from .retrieval_service import RetrievalService
+from .query_pipeline import QueryPipelineService
 from database import DatabaseService
-from ..routing import Router, QueryClassifier, Route
-from ..context_compressor import compress_chunks
+from ..routing import Router, QueryClassifier
 
 
 logger = logging.getLogger(__name__)
 
-# Default max size for metadata cache (prevents unbounded memory with 1000+ files)
-DEFAULT_METADATA_CACHE_MAX_SIZE = 2000
-
-# Phase B.3 – Agent loop guards
-MAX_TOOL_CALLS_PER_QUERY = 4
-TOOL_EXECUTION_TIMEOUT_SECONDS = 10
-
-CONTEXT_CHUNK_SEP = "\n\n---\n\n"
-
-
-class MetadataCache:
-    """
-    Bounded LRU cache for file_path -> (hash, metadata).
-    Prevents unbounded memory growth; DB is source of truth on miss.
-    """
-    __slots__ = ("_cache", "max_size")
-
-    def __init__(self, max_size: int = DEFAULT_METADATA_CACHE_MAX_SIZE):
-        self.max_size = max(1, max_size)
-        self._cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
-
-    def get(self, file_path: str) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """Return (hash, metadata) or None. Moves entry to end (LRU)."""
-        if file_path not in self._cache:
-            return None
-        self._cache.move_to_end(file_path)
-        entry = self._cache[file_path]
-        return entry["hash"], entry["metadata"]
-
-    def set(self, file_path: str, hash_val: str, metadata: Dict[str, Any]) -> None:
-        """Set or update entry. Evicts oldest if at capacity."""
-        if file_path in self._cache:
-            self._cache.move_to_end(file_path)
-            self._cache[file_path] = {"hash": hash_val, "metadata": metadata}
-            return
-        while len(self._cache) >= self.max_size:
-            self._cache.popitem(last=False)
-        self._cache[file_path] = {"hash": hash_val, "metadata": metadata}
-
-    def remove(self, file_path: str) -> None:
-        self._cache.pop(file_path, None)
-
-    def clear(self) -> None:
-        self._cache.clear()
-
-    def __contains__(self, file_path: str) -> bool:
-        return file_path in self._cache
-
-    def __len__(self) -> int:
-        return len(self._cache)
-
-    def keys(self):
-        return self._cache.keys()
-
 
 class DocumentProcessorOrchestrator:
-    """Main orchestrator that coordinates all document processing services"""
-    
-    def __init__(self, 
-                 persist_dir: str = "./chroma_db",
-                 embed_model_name: str = "BAAI/bge-small-en-v1.5",
-                 max_file_size_mb: int = 50,
-                 chunk_size: int = 1000,
-                 chunk_overlap: int = 200,
-                 ollama_base_url: str = "http://localhost:11434",
-                 ollama_model: str = "tinyllama",
-                 gemini_api_key: Optional[str] = None,
-                 gemini_model: str = "gemini-2.5-pro",
-                 groq_api_key: Optional[str] = None,
-                 groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
-                 llm_provider: str = "ollama"):
-        
-        # Initialize OCR service (optional, for scanned documents and images)
-        # Try to import settings, but use defaults if not available
+    """
+    Thin coordinator that constructs and wires all services.
+
+    External callers (routers, file monitor) interact only with this class;
+    they are unaffected by the internal decomposition.
+    """
+
+    def __init__(
+        self,
+        persist_dir: str = "./chroma_db",
+        embed_model_name: str = "BAAI/bge-small-en-v1.5",
+        max_file_size_mb: int = 50,
+        chunk_size: int = 300,       # tokens
+        chunk_overlap: int = 50,     # tokens
+        max_chunk_tokens: int = 512,
+        ollama_base_url: str = "http://localhost:11434",
+        ollama_model: str = "tinyllama",
+        gemini_api_key: Optional[str] = None,
+        gemini_model: str = "gemini-2.5-pro",
+        groq_api_key: Optional[str] = None,
+        groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
+        llm_provider: str = "ollama",
+    ) -> None:
+        # ── OCR (optional) ────────────────────────────────────────────────────
         try:
             import sys
-            from pathlib import Path
-            # Add ai directory to path if not already there
-            ai_dir = Path(__file__).parent.parent.parent.parent
+            from pathlib import Path as _Path
+
+            ai_dir = _Path(__file__).parent.parent.parent.parent
             if str(ai_dir) not in sys.path:
                 sys.path.insert(0, str(ai_dir))
             from config import settings
-            
+
             ocr_service = OCRService(
                 tesseract_path=settings.TESSERACT_PATH if settings.TESSERACT_PATH else None,
                 cache_dir=settings.OCR_CACHE_DIR,
@@ -139,13 +86,12 @@ class DocumentProcessorOrchestrator:
         except (ImportError, AttributeError):
             logger.info("OCR settings not available, using defaults")
             ocr_service = OCRService()
-        
-        # Initialize all services
+
+        # ── Primitive services ────────────────────────────────────────────────
         self.text_extractor = TextExtractor(ocr_service=ocr_service)
-        self.chunker = DocumentChunker(chunk_size, chunk_overlap)
+        self.chunker = DocumentChunker(chunk_size, chunk_overlap, max_tokens=max_chunk_tokens)
         self.embedding_service = EmbeddingService(embed_model_name)
         self.vector_store = VectorStoreService(persist_dir)
-        # LLM service now supports provider switch (ollama | gemini)
         self.llm_service = LLMService(
             ollama_base_url=ollama_base_url,
             ollama_model=ollama_model,
@@ -153,29 +99,19 @@ class DocumentProcessorOrchestrator:
             gemini_model=gemini_model,
             groq_api_key=groq_api_key,
             groq_model=groq_model,
-            provider=llm_provider
+            provider=llm_provider,
         )
         self.file_validator = FileValidator(max_file_size_mb, ocr_service=ocr_service)
         self.database_service = DatabaseService()
-        
-        # Hybrid search services (semantic + keyword)
         self.bm25_service = BM25Service(persist_dir)
-        self.hybrid_search = HybridSearchService(k=60)  # RRF constant
-        
-        # Re-ranking service (cross-encoder for improved relevance)
+        self.hybrid_search = HybridSearchService(k=60)
         self.reranker = ReRankingService(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
-        
-        # Filename Trie for fast O(m) filename search
-        self.filename_trie = FilenameTrie()
-        
-        # Retrieval configuration
-        self.retrieval_config = default_retrieval_config
+        self.retrieval_config: RetrievalConfig = default_retrieval_config
 
-        # Agentic routing: classification + route resolution
-        self.router = Router(QueryClassifier(self.llm_service))
-        
-        # Phase 3: Incremental Updates components
-        self.update_queue = UpdateQueue(max_queue_size=1000)
+        # ── UpdateWorker stack ────────────────────────────────────────────────
+        # Single UpdateQueue shared by UpdateWorker and IndexingService.
+        _update_queue = UpdateQueue(max_queue_size=1000)
+
         self.chunk_differ = ChunkDiffer(self.embedding_service)
         self.strategy_selector = UpdateStrategySelector()
         self.update_executor = UpdateExecutor(
@@ -188,122 +124,166 @@ class DocumentProcessorOrchestrator:
             chunk_differ=self.chunk_differ,
             file_validator=self.file_validator,
         )
-        self.update_worker = UpdateWorker(
-            update_queue=self.update_queue,
+        _update_worker = UpdateWorker(
+            update_queue=_update_queue,
             update_executor=self.update_executor,
             chunk_differ=self.chunk_differ,
             strategy_selector=self.strategy_selector,
             chunker=self.chunker,
-            text_extractor=self.text_extractor
+            text_extractor=self.text_extractor,
         )
-        
-        # State tracking (bounded LRU cache; DB is source of truth)
-        self._metadata_cache = MetadataCache(max_size=DEFAULT_METADATA_CACHE_MAX_SIZE)
-        self.current_directory: Optional[str] = None
-        self.is_initializing: bool = False  # Flag to prevent file monitor events during initial indexing
-        self.files_being_processed: set = set()  # Track files currently being indexed to prevent duplicate processing
-        self._indexing_task: Optional[asyncio.Task] = None  # So caller can cancel when switching directory
-        self._shutdown: bool = False  # Set when directory is switched so background indexing exits
-        
-        logger.info("DocumentProcessorOrchestrator initialized with hybrid search (semantic + keyword) and incremental updates")
-        
-        # Load existing indexed documents into memory
-        asyncio.create_task(self._load_existing_metadata())
-        
-        # Start update worker for incremental updates
-        asyncio.create_task(self.update_worker.start())
-    
-    async def _load_existing_metadata(self):
-        """Load existing documents: rebuild trie for all, fill LRU cache up to max_size."""
-        try:
-            from database.database import AsyncSessionLocal
-            from database.models import IndexedDocument
-            from sqlalchemy import select
-            
-            async with AsyncSessionLocal() as db_session:
-                stmt = select(IndexedDocument).where(
-                    IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
-                )
-                result = await db_session.execute(stmt)
-                docs = result.scalars().all()
-                
-                for doc in docs:
-                    filename = Path(doc.file_path).name
-                    self.filename_trie.add(filename, doc.file_path)
-                    if len(self._metadata_cache) < self._metadata_cache.max_size:
-                        meta = {
-                            "file_type": doc.file_type,
-                            "size_bytes": doc.file_size,
-                            "modified_at": doc.last_modified,
-                            "chunks": doc.chunks_count,
-                            "processing_status": doc.processing_status,
-                        }
-                        self._metadata_cache.set(doc.file_path, doc.file_hash or "", meta)
 
-            indexed_count = sum(1 for d in docs if d.processing_status == "indexed")
-            metadata_only_count = sum(1 for d in docs if d.processing_status == "metadata_only")
-            logger.info(
-                f"Loaded {len(docs)} documents (trie); cache has {len(self._metadata_cache)} entries "
-                f"({indexed_count} indexed, {metadata_only_count} metadata-only)"
-            )
-        except Exception as e:
-            logger.warning(f"Could not load existing metadata: {e}")
-    
-    async def _get_cached_or_db_hash_metadata(self, file_path: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-        """Return (stored_hash, stored_metadata) from LRU cache or DB. Caches DB result."""
-        cached = self._metadata_cache.get(file_path)
-        if cached is not None:
-            return cached[0], cached[1]
-        doc = await self.database_service.get_document_by_path(file_path)
-        if doc is None:
-            return None, None
-        meta = {
-            "file_type": doc.file_type,
-            "size_bytes": doc.file_size,
-            "modified_at": doc.last_modified,
-            "chunks": doc.chunks_count,
-            "processing_status": doc.processing_status,
-        }
-        self._metadata_cache.set(file_path, doc.file_hash or "", meta)
-        return doc.file_hash, meta
+        # ── Composed services ─────────────────────────────────────────────────
+        self.indexing = IndexingService(
+            text_extractor=self.text_extractor,
+            file_validator=self.file_validator,
+            chunker=self.chunker,
+            embedding_service=self.embedding_service,
+            vector_store=self.vector_store,
+            bm25_service=self.bm25_service,
+            database_service=self.database_service,
+            update_queue=_update_queue,
+            update_executor=self.update_executor,
+            update_worker=_update_worker,
+            chunk_differ=self.chunk_differ,
+            strategy_selector=self.strategy_selector,
+        )
+
+        self.retrieval = RetrievalService(
+            embedding_service=self.embedding_service,
+            vector_store=self.vector_store,
+            bm25_service=self.bm25_service,
+            hybrid_search=self.hybrid_search,
+            reranker=self.reranker,
+            llm_service=self.llm_service,
+            retrieval_config=self.retrieval_config,
+            filename_trie=self.indexing.filename_trie,  # shared reference
+        )
+
+        _router = Router(QueryClassifier(self.llm_service))
+        self.pipeline = QueryPipelineService(
+            llm_service=self.llm_service,
+            embedding_service=self.embedding_service,
+            router=_router,
+            retrieval_service=self.retrieval,
+        )
+
+        logger.info(
+            "DocumentProcessorOrchestrator initialized with hybrid search "
+            "(semantic + keyword) and incremental updates"
+        )
+
+    # ── Pass-through properties ───────────────────────────────────────────────
+
+    @property
+    def is_initializing(self) -> bool:
+        return self.indexing.is_initializing
+
+    @property
+    def files_being_processed(self) -> set:
+        return self.indexing.files_being_processed
+
+    @property
+    def filename_trie(self):
+        return self.indexing.filename_trie
+
+    @property
+    def update_queue(self):
+        return self.indexing.update_queue
+
+    @property
+    def current_directory(self) -> Optional[str]:
+        return self.indexing.current_directory
+
+    # ── Lifecycle ────────────────────────────────────────────────────────────
 
     async def __aenter__(self):
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.cleanup()
-    
-    async def clear_all_data(self):
-        """Clear all indexed data (vector store, BM25, and database records)"""
+
+    async def initialize(self) -> None:
+        """Start background initialization tasks (metadata loader + update worker)."""
+        await self.indexing.initialize()
+
+    # ── Indexing delegation ───────────────────────────────────────────────────
+
+    def set_post_index_hook(self, hook) -> None:
+        self.indexing.set_post_index_hook(hook)
+
+    async def cancel_background_work(self) -> None:
+        await self.indexing.cancel_background_work()
+
+    async def initialize_from_directory(
+        self, directory_path: str, resume_mode: bool = False
+    ) -> None:
+        await self.indexing.initialize_from_directory(directory_path, resume_mode)
+
+    async def add_document(
+        self, file_path: str, force_reindex: bool = False, use_queue: bool = True
+    ) -> None:
+        await self.indexing.add_document(file_path, force_reindex, use_queue)
+
+    async def remove_document(self, file_path: str) -> None:
+        await self.indexing.remove_document(file_path)
+
+    async def enqueue_update(
+        self,
+        file_path: str,
+        update_type: str = "modified",
+        user_requested: bool = False,
+    ) -> bool:
+        return await self.indexing.enqueue_update(file_path, update_type, user_requested)
+
+    # ── Query delegation ──────────────────────────────────────────────────────
+
+    async def query(
+        self, question: str, max_results: int = 15, conversation_history: list = None
+    ) -> QueryResult:
+        return await self.pipeline.query(question, max_results, conversation_history)
+
+    async def query_stream(
+        self, question: str, max_results: int = 15, conversation_history: list = None
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        async for event in self.pipeline.query_stream(question, max_results, conversation_history):
+            yield event
+
+    async def build_conversation_history(
+        self,
+        message_pairs: List[Dict[str, str]],
+        session_id: Optional[int] = None,
+    ) -> List[Dict[str, str]]:
+        return await self.pipeline.build_conversation_history(message_pairs, session_id)
+
+    # ── Data management ───────────────────────────────────────────────────────
+
+    async def clear_all_data(self) -> None:
+        """Clear all indexed data: update queue, vector store, BM25, trie, router cache, DB."""
         logger.info("Clearing all indexed data...")
-        
-        # Clear update queue first to prevent processing stale updates
-        if hasattr(self, 'update_queue'):
+
+        if hasattr(self, "update_queue"):
             await self.update_queue.clear()
             logger.info("Update queue cleared")
-        
-        # Clear vector store
+
         await self.vector_store.clear_collection()
-        self._metadata_cache.clear()
-        self.files_being_processed.clear()
+        self.indexing._metadata_cache.clear()
+        self.indexing.files_being_processed.clear()
         logger.info("Vector store cleared")
-        
-        # Clear BM25 index
+
         self.bm25_service.clear()
         logger.info("BM25 index cleared")
-        
-        # Clear Filename Trie
-        self.filename_trie.clear()
+
+        self.indexing.filename_trie.clear()
         logger.info("Filename Trie cleared")
 
-        self.router.clear_cache()
-        
-        # Clear database records
+        self.pipeline.router.clear_cache()
+
         try:
             from database.database import AsyncSessionLocal
             from database.models import IndexedDocument
             from sqlalchemy import delete
-            
+
             async with AsyncSessionLocal() as session:
                 try:
                     stmt = delete(IndexedDocument)
@@ -316,2019 +296,67 @@ class DocumentProcessorOrchestrator:
         except Exception as e:
             logger.warning(f"Failed to clear database records: {e}")
 
-    async def cancel_background_work(self) -> None:
-        """
-        Cancel in-flight background content indexing (e.g. when user switches directory).
-        Prevents the old orchestrator from writing to the DB after the new one has cleared it.
-        """
-        self._shutdown = True
-        if self._indexing_task and not self._indexing_task.done():
-            self._indexing_task.cancel()
-            try:
-                await self._indexing_task
-            except asyncio.CancelledError:
-                pass
-        self._indexing_task = None
-    
-    async def initialize_from_directory(self, directory_path: str, resume_mode: bool = False):
-        """
-        Initialize processor with documents from directory using metadata-first indexing.
-
-        Args:
-            directory_path: Absolute path to the folder to index.
-            resume_mode: When True the app is resuming a previously-indexed directory
-                (e.g. after a restart). Already-indexed unchanged files are skipped so
-                the existing BM25 pickle loaded from disk stays valid and only new /
-                changed files are re-processed.
-        """
-        start_time = asyncio.get_event_loop().time()
-        
+    async def clear_collection(self) -> None:
+        """Clear all documents from the vector store and reset tracking."""
         try:
-            dir_path = Path(directory_path)
-            if not dir_path.exists():
-                raise ValueError(f"Directory does not exist: {directory_path}")
-            
-            if not dir_path.is_dir():
-                raise ValueError(f"Path is not a directory: {directory_path}")
-            
-            if self.is_initializing:
-                logger.warning("Already initializing directory, skipping duplicate initialization")
-                return
-            
-            if self.current_directory == directory_path and self.filename_trie.file_count > 0:
-                logger.info(
-                    f"Directory {directory_path} already initialized with "
-                    f"{self.filename_trie.file_count} files, skipping re-initialization"
-                )
-                return
-            
-            logger.info(
-                f"Initializing from directory: {directory_path}"
-                + (" (resume mode — skipping unchanged files)" if resume_mode else "")
-            )
-            self.current_directory = directory_path
-            self.is_initializing = True
-
-            # PHASE 1: Build metadata index (FAST - < 1 second for most directories)
-            metadata_start = asyncio.get_event_loop().time()
-            metadata_files = await self._build_metadata_index(directory_path, resume_mode=resume_mode)
-            metadata_elapsed = asyncio.get_event_loop().time() - metadata_start
-
-            if not metadata_files:
-                if resume_mode:
-                    logger.info(
-                        f"Resume mode: all files in {directory_path} are already indexed and unchanged"
-                    )
-                else:
-                    logger.warning(f"No supported files found in {directory_path}")
-                self.is_initializing = False
-                return
-
-            logger.info(f"Metadata index built: {len(metadata_files)} files in {metadata_elapsed:.2f}s")
-            logger.info("Files are now queryable by filename/metadata")
-
-            # PHASE 2: Background content indexing (non-blocking)
-            logger.info(f"Starting background content indexing for {len(metadata_files)} files...")
-            self._shutdown = False
-            self._indexing_task = asyncio.create_task(
-                self._index_content_background(metadata_files, directory_path)
-            )
-
-            elapsed = asyncio.get_event_loop().time() - start_time
-            logger.info(f"Initialization complete: {len(metadata_files)} files queued in {elapsed:.2f}s")
-            logger.info("Content indexing running in background (non-blocking)")
-
-            self.is_initializing = False
-            logger.debug("Initialization flag cleared, file monitor events now enabled")
-
+            await self.vector_store.clear_collection()
+            self.indexing._metadata_cache.clear()
+            self.pipeline.router.clear_cache()
+            logger.info("Document collection cleared successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize from directory: {e}")
-            self.is_initializing = False
+            logger.error(f"Error clearing collection: {e}")
             raise
-    
-    async def _build_metadata_index(
-        self, directory_path: str, resume_mode: bool = False
-    ) -> List[str]:
-        """
-        Build metadata index quickly (< 1 second for most directories).
-        Stores file metadata in database immediately, allowing filename queries.
-        Returns list of file paths that need content indexing.
 
-        In resume_mode, files that are already fully indexed and whose mtime has not
-        changed are added to the trie but excluded from the returned list. This keeps
-        the on-disk BM25 pickle valid and avoids redundant re-processing on restart.
-        """
-        dir_path = Path(directory_path)
-        supported_files = []
+    # ── Status & stats ────────────────────────────────────────────────────────
 
-        # Pre-load existing index map with a single DB query (resume mode only)
-        existing_docs: Dict[str, Any] = {}
-        if resume_mode:
-            existing_docs = await self.database_service.get_indexed_docs_for_directory(
-                directory_path
-            )
-            logger.info(
-                f"Resume mode: {len(existing_docs)} existing indexed documents found in DB"
-            )
-
-        for file_path in dir_path.rglob("*"):
-            if not file_path.is_file():
-                continue
-
-            is_valid, error = self.file_validator.validate_file(str(file_path))
-            if not is_valid:
-                if error and "Unsupported file type" not in error:
-                    logger.debug(f"Skipping {file_path}: {error}")
-                continue
-
-            try:
-                path_obj = Path(file_path)
-                stat_info = path_obj.stat()
-                file_path_str = str(file_path)
-
-                # Add to trie regardless of resume status (trie is always rebuilt in-memory)
-                filename = path_obj.name
-                self.filename_trie.add(filename, file_path_str)
-
-                if resume_mode:
-                    existing = existing_docs.get(file_path_str)
-                    if existing and existing.processing_status == "indexed":
-                        stored_mtime = existing.last_modified
-                        if stored_mtime is not None:
-                            try:
-                                stored_ts = (
-                                    stored_mtime.timestamp()
-                                    if hasattr(stored_mtime, "timestamp")
-                                    else float(stored_mtime)
-                                )
-                                # 1-second tolerance handles filesystem timestamp rounding
-                                if abs(stored_ts - stat_info.st_mtime) < 1.0:
-                                    # Unchanged: trie updated, skip content re-indexing
-                                    continue
-                            except (TypeError, ValueError, OSError):
-                                pass  # Cannot compare mtimes; fall through to re-index
-
-                # New or changed file: store metadata and queue for content indexing
-                quick_hash = f"{file_path}:{stat_info.st_mtime}"
-                await self.database_service.store_metadata_only(
-                    file_path=file_path_str,
-                    file_hash=quick_hash,
-                    file_type=path_obj.suffix.lower(),
-                    file_size=stat_info.st_size,
-                    last_modified=datetime.fromtimestamp(stat_info.st_mtime),
-                )
-                supported_files.append(file_path_str)
-
-            except Exception as e:
-                logger.warning(f"Failed to index metadata for {file_path}: {e}")
-                continue
-
-        return supported_files
-    
-    async def _index_content_background(self, file_paths: List[str], directory_path: str):
-        """
-        Background content indexing. Processes files in batches without blocking.
-        Updates documents from 'metadata_only' to 'indexed' status.
-        Exits early if _shutdown is set (e.g. user switched to another directory).
-        """
-        from config import settings
-        logger.info(f"Background content indexing started for {len(file_paths)} files")
-        batch_size = settings.BATCH_SIZE
-        processed = 0
-        failed = 0
+    def is_ready(self) -> bool:
+        """Check if basic services are initialized."""
         try:
-            for i in range(0, len(file_paths), batch_size):
-                if self._shutdown:
-                    logger.info("Background content indexing cancelled (directory was changed)")
-                    return
-                batch = file_paths[i:i + batch_size]
-                tasks = [self._process_single_file(file_path) for file_path in batch]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        failed += 1
-                        logger.error(f"Background indexing failed: {result}")
-                    else:
-                        processed += 1
-                # Persist BM25 after each batch so partial progress survives a crash
-                await asyncio.to_thread(self.bm25_service.save)
-                if (i + batch_size) % 50 == 0 or i + batch_size >= len(file_paths):
-                    logger.info(
-                        f"Background indexing progress: {processed + failed}/{len(file_paths)} files "
-                        f"({processed} indexed, {failed} failed)"
-                    )
-                if i + batch_size < len(file_paths):
-                    await asyncio.sleep(0.1)
-            logger.info(f"Background content indexing complete: {processed} indexed, {failed} failed")
-        except asyncio.CancelledError:
-            logger.info("Background content indexing task was cancelled")
-            # Still save whatever we managed to index before cancellation
-            try:
-                await asyncio.to_thread(self.bm25_service.save)
-            except Exception:
-                pass
-            raise
-        except Exception as e:
-            logger.error(f"Background content indexing error: {e}")
-        finally:
-            self._indexing_task = None
-            if not self._shutdown and file_paths and processed > 0:
-                try:
-                    n = await self.database_service.set_documents_indexed(file_paths)
-                    if n:
-                        logger.debug(f"Synced {n} document(s) to indexed status for search consistency")
-                except Exception as e:
-                    logger.warning(f"Final sync of indexed status failed: {e}")
-    
-    async def _process_single_file(self, file_path: str) -> ProcessingResult:
-        """Process a single file (used in batch processing)"""
-        start_time = asyncio.get_event_loop().time()
-        
-        try:
-            await self.add_document(file_path, use_queue=False)  # Initial indexing, don't use queue
-            processing_time = asyncio.get_event_loop().time() - start_time
-            
-            return ProcessingResult(
-                success=True,
-                file_path=file_path,
-                chunks_created=0,
-                processing_time=processing_time
+            return (
+                self.text_extractor is not None
+                and self.chunker is not None
+                and self.file_validator is not None
             )
-            
-        except Exception as e:
-            processing_time = asyncio.get_event_loop().time() - start_time
-            logger.error(f"Failed to process {file_path}: {e}")
-            
-            return ProcessingResult(
-                success=False,
-                file_path=file_path,
-                chunks_created=0,
-                error_message=str(e),
-                processing_time=processing_time
-            )
-    
-    async def enqueue_update(
-        self,
-        file_path: str,
-        update_type: str = "modified",
-        user_requested: bool = False
-    ) -> bool:
-        """
-        Enqueue a document update to the priority queue (Phase 3).
-        
-        Args:
-            file_path: Path to file to update
-            update_type: Type of update ("created", "modified", "deleted")
-            user_requested: Whether user explicitly requested update
-            
-        Returns:
-            True if enqueued successfully, False otherwise
-        """
-        try:
-            # Get file metadata for priority calculation
-            file_metadata = self.file_validator.extract_file_metadata(file_path)
-            file_size_bytes = file_metadata.get("size_bytes", 0)
-            
-            last_queried = file_metadata.get("modified_at") or datetime.now(timezone.utc)
-            
-            # Check if in active session (simplified - can be enhanced)
-            is_in_active_session = False  # TODO: Track active sessions
-            
-            # Enqueue with automatic priority calculation
-            success = await self.update_queue.enqueue(
-                file_path=file_path,
-                update_type=update_type,
-                file_size_bytes=file_size_bytes,
-                last_queried=last_queried,
-                is_in_active_session=is_in_active_session,
-                user_requested=user_requested
-            )
-            
-            if success:
-                logger.info(f"Enqueued update for {file_path} (type: {update_type})")
-            else:
-                logger.warning(f"Failed to enqueue update for {file_path} (queue may be full)")
-            
-            return success
-            
-        except Exception as e:
-            logger.error(f"Error enqueueing update for {file_path}: {e}")
+        except Exception:
             return False
-    
-    async def add_document(self, file_path: str, force_reindex: bool = False, use_queue: bool = True):
-        """
-        Add or update a document with incremental indexing.
-        
-        Args:
-            file_path: Path to the file to index
-            force_reindex: If True, re-index even if file hasn't changed
-            use_queue: If True, use update queue (Phase 3). If False, process directly (for initial indexing)
-        """
-        # Phase 3: Use queue for updates (unless it's initial indexing)
-        if use_queue:
-            current_hash = self.file_validator.calculate_file_hash(file_path)
-            stored_hash, _ = await self._get_cached_or_db_hash_metadata(file_path)
-            
-            if not force_reindex and stored_hash == current_hash:
-                logger.debug(f"File {file_path} unchanged, skipping update")
-                return
-            
-            # Enqueue update instead of processing directly
-            await self.enqueue_update(file_path, update_type="modified")
-            return
-        
-        # Direct processing (for initial indexing or when queue is disabled)
-        # Prevent duplicate processing
-        if file_path in self.files_being_processed:
-            logger.debug(f"File {file_path} is already being processed, skipping duplicate")
-            return
-        
-        self.files_being_processed.add(file_path)
-        
-        try:
-            # Get real file metadata
-            file_metadata = self.file_validator.extract_file_metadata(file_path)
-            current_hash = self.file_validator.calculate_file_hash(file_path)
-            
-            # Check if file has changed (incremental update)
-            stored_hash, _ = await self._get_cached_or_db_hash_metadata(file_path)
-            if not force_reindex and stored_hash == current_hash:
-                logger.debug(f"File {file_path} unchanged, skipping re-index")
-                # Remove from processing set before returning
-                self.files_being_processed.discard(file_path)
-                return
-            
-            # Check if document exists in database and get current status
-            from database.database import AsyncSessionLocal
-            from database.models import IndexedDocument
-            from sqlalchemy import select
-            
-            async with AsyncSessionLocal() as db_session:
-                stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
-                result = await db_session.execute(stmt)
-                existing_doc = result.scalar_one_or_none()
-                
-                if existing_doc and existing_doc.processing_status == "indexed" and existing_doc.file_hash == current_hash:
-                    if not force_reindex:
-                        logger.debug(f"File {file_path} already fully indexed, skipping")
-                    self._metadata_cache.set(file_path, current_hash, file_metadata)
-                    self.files_being_processed.discard(file_path)
-                    return
-            
-            # Remove old chunks if re-indexing
-            if stored_hash and stored_hash != current_hash:
-                logger.info(f"File {file_path} changed, removing old chunks")
-                await self.vector_store.remove_document_chunks(file_path)
-                removed = self.bm25_service.remove_file_chunks(file_path)
-                if removed:
-                    logger.debug(f"Removed {removed} stale BM25 chunks for {file_path}")
-            
-            # Process document content...
-            text = await self.text_extractor.extract_text_async(file_path)
-            if not text or not text.strip():
-                logger.warning(f"No text extracted from {file_path}")
-                # Update status to indicate extraction failed
-                await self.database_service.store_document_metadata(
-                    file_path=file_path,
-                    file_hash=current_hash,
-                    file_type=file_metadata["file_type"],
-                    file_size=file_metadata["size_bytes"],
-                    last_modified=file_metadata["modified_at"],
-                    content_preview="",
-                    chunks_count=0,
-                    processing_status="error"
-                )
-                # Remove from processing set before returning
-                self.files_being_processed.discard(file_path)
-                return
-            
-            chunks = self.chunker.create_chunks(text, file_path)
-            content_preview = text[:500]
-            embeddings = self.embedding_service.encode_texts([chunk.text for chunk in chunks])
-            await self.vector_store.batch_insert_chunks(chunks, embeddings)
-            bm25_documents = [
-                {
-                    'id': f"{chunk.file_path}:{chunk.chunk_id}",
-                    'text': chunk.text,
-                    'metadata': {
-                        'file_path': chunk.file_path,
-                        'chunk_id': chunk.chunk_id,
-                        'file_type': file_metadata["file_type"]
-                    }
-                }
-                for chunk in chunks
-            ]
-            self.bm25_service.add_documents(bm25_documents)
-            logger.debug(f"Added {len(chunks)} chunks to BM25 index for {file_path}")
-            await self.database_service.store_document_metadata(
-                file_path=file_path,
-                file_hash=current_hash,
-                file_type=file_metadata["file_type"],
-                file_size=file_metadata["size_bytes"],
-                last_modified=file_metadata["modified_at"],
-                content_preview=content_preview,
-                chunks_count=len(chunks),
-                processing_status="indexed",
-            )
-            
-            # Update tracking
-            self._metadata_cache.set(file_path, current_hash, file_metadata)
-            
-        except Exception as e:
-            logger.error(f"Error processing document {file_path}: {e}")
-            # Update status to error
-            try:
-                await self.database_service.store_document_metadata(
-                    file_path=file_path,
-                    file_hash="",
-                    file_type=Path(file_path).suffix.lower(),
-                    file_size=0,
-                    last_modified=datetime.now(timezone.utc),
-                    content_preview="",
-                    chunks_count=0,
-                    processing_status="error"
-                )
-            except Exception:
-                pass
-            raise
-        finally:
-            # Always remove from processing set, even on error
-            self.files_being_processed.discard(file_path)
-    
-    async def remove_document(self, file_path: str):
-        """Remove document and clean up tracking"""
-        try:
-            await self.vector_store.remove_document_chunks(file_path)
-            
-            # Remove from Filename Trie
-            filename = Path(file_path).name
-            self.filename_trie.remove(filename, file_path)
-            
-            self._metadata_cache.remove(file_path)
-            
-            logger.info(f"Removed document: {file_path}")
-            
-        except Exception as e:
-            logger.error(f"Error removing document {file_path}: {e}")
-    
-    def _find_explicit_filename(self, question: str) -> Optional[str]:
-        """
-        Detect explicit document identifiers so we can resolve to a single file.
-        Handles: quoted names, full filenames with extension, and stems like BIP-12046.
-        """
-        # Quoted filenames
-        quoted = re.findall(r'"([^"]+)"', question)
-        if quoted:
-            return quoted[0]
-        
-        # Full filename with extension (e.g. BIP-12046.pdf, report.docx)
-        with_ext = re.search(
-            r'\b([A-Za-z][A-Za-z0-9_.-]+\.(pdf|docx|txt|xlsx|xls|pptx))\b',
-            question,
-            re.IGNORECASE,
-        )
-        if with_ext:
-            return with_ext.group(1)
-        
-        # Stem-only identifier (e.g. BIP-12046, TCO005) so "explain BIP-12046" resolves to BIP-12046.pdf.
-        # Require digit/hyphen/underscore to avoid matching normal words like "explain" or "document".
-        stem = re.search(
-            r'\b([A-Za-z][A-Za-z0-9_-]{2,})\b',
-            question,
-        )
-        if stem:
-            token = stem.group(1)
-            if any(c in token for c in "0123456789-_"):
-                return token
-        return None
-    
-    async def _select_relevant_files(self, question: str) -> Optional[List[str]]:
-        """
-        Simplified file selection: only use Trie for explicit filenames.
-        For all other queries, return None and let retrieval handle relevance.
-        
-        Returns:
-            List of file paths if explicit filename found, None otherwise
-        """
-        try:
-            if self.filename_trie.file_count == 0:
-                return None
-            
-            # Only check for explicit filenames (quoted or obvious patterns)
-            explicit_filename = self._find_explicit_filename(question)
-            if explicit_filename:
-                # Search Trie for the explicit filename
-                matching_files = self.filename_trie.search(explicit_filename.lower())
-                if matching_files:
-                    logger.info(f"Found explicit filename '{explicit_filename}': {len(matching_files)} files")
-                    return list(matching_files)
-            
-            # No explicit filename - let retrieval handle it
-            logger.info("No explicit filename detected, using retrieval for relevance")
-            return None
-            
-        except Exception as e:
-            logger.error(f"File selection failed: {e}, falling back to retrieval")
-            return None
-    
-    async def _generate_direct_response(self, question: str, response_type: str) -> str:
-        """
-        Generate a direct response without document retrieval.
-        Used for greetings and general queries.
-        """
-        try:
-            if response_type == 'greeting':
-                prompt = f"""You are a friendly AI assistant for a document management system.
-
-User said: "{question}"
-
-Respond warmly and briefly (1-2 sentences). Let them know you can help with documents.
-
-Your response:"""
-            else:  # general
-                prompt = f"""You are an AI assistant for a document management system.
-
-User asked: "{question}"
-
-Answer their question. Your capabilities:
-- Search and analyze indexed documents
-- Answer questions about specific files
-- List and compare documents
-- Find information across multiple files
-
-Keep your response concise and helpful (2-3 sentences).
-
-Your response:"""
-
-            # Use generate_simple for direct responses (not the Q&A method)
-            response = await self.llm_service.generate_simple(prompt, prompt_type="short_direct")
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"Direct response generation failed: {e}")
-            return "Hello! I'm your document assistant. I can help you search and analyze your indexed documents. What would you like to know?"
-
-    async def _retrieve_chunks(
-        self,
-        query: str,
-        query_type: str,
-        explicit_filename: Optional[str] = None,
-        query_embedding: Optional[List[float]] = None,
-        is_aggregation: bool = False,
-        retrieval_params_override: Optional[Dict[str, int]] = None,
-    ) -> tuple:
-        """
-        Single retrieval pipeline for all document queries.
-        Hybrid search: semantic (ChromaDB) + keyword (BM25) with reranking.
-        When retrieval_params_override is set (e.g. multi-variant expanded search), use it instead of config.
-        """
-        params = retrieval_params_override or self.retrieval_config.get_retrieval_params(query_type, False, is_aggregation)
-        top_k = params['top_k']
-        rerank_top_k = params['rerank_top_k']
-        final_top_k = params['final_top_k']
-        logger.info(f"Retrieval params: top_k={top_k}, rerank_top_k={rerank_top_k}, final_top_k={final_top_k}")
-
-        if query_embedding is None:
-            query_embedding = self.embedding_service.encode_single_text(query)
-        semantic_task = asyncio.create_task(
-            self.vector_store.search_similar(query_embedding, top_k)
-        )
-        bm25_task = asyncio.to_thread(self.bm25_service.search, query, top_k)
-        semantic_results, bm25_results = await asyncio.gather(semantic_task, bm25_task)
-
-        if not semantic_results['documents'] or not semantic_results['documents'][0]:
-            return ([], [], [], 0, 0)
-        
-        # Step 2: Apply BM25 boost (results already fetched above)
-        bm25_hits = set()
-        for doc_id, score, meta in (bm25_results or []):
-            fp = meta.get('file_path', '')
-            cid = meta.get('chunk_id')
-            if fp and cid is not None:
-                bm25_hits.add((fp, cid))
-        
-        semantic_count = len(semantic_results['documents'][0]) if semantic_results['documents'] else 0
-        keyword_count = len(bm25_results) if bm25_results else 0
-        
-        logger.info(
-            f"Hybrid search: {semantic_count} semantic, {len(bm25_hits)} BM25 boosts",
-            extra={'extra_fields': {
-                'event_type': 'retrieval',
-                'semantic_results': semantic_count,
-                'keyword_results': keyword_count,
-                'bm25_boosts': len(bm25_hits)
-            }}
-        )
-        
-        # Step 3: Combine semantic + BM25 boost
-        documents = []
-        metadatas = []
-        scores = []
-        
-        for doc, meta, dist in zip(
-            semantic_results['documents'][0],
-            semantic_results['metadatas'][0],
-            semantic_results['distances'][0]
-        ):
-            if not doc or not doc.strip():
-                continue
-            
-            base_score = max(0.0, 1.0 - float(dist))
-            fp = meta.get('file_path', '')
-            cid = meta.get('chunk_id')
-            
-            # Apply BM25 boost
-            boost = self.retrieval_config.bm25_boost if (fp, cid) in bm25_hits else 0.0
-            final_score = min(1.0, base_score + boost)
-            
-            documents.append(doc)
-            metadatas.append(meta)
-            scores.append(final_score)
-        
-        retrieval_count = len(documents)
-        
-        # Guard: if we lost everything, fall back to unboosted semantic
-        if not documents:
-            documents = semantic_results['documents'][0]
-            metadatas = semantic_results['metadatas'][0]
-            scores = [max(0.0, 1.0 - float(d)) for d in semantic_results['distances'][0]]
-            logger.warning("Boosting produced no usable chunks, falling back to semantic-only results")
-        
-        # Step 4: Re-ranking (if enabled); run in thread to avoid blocking event loop
-        rerank_count = 0
-        if rerank_top_k > 0 and len(documents) > final_top_k:
-            logger.info(f"Re-ranking top {min(rerank_top_k, len(documents))} of {len(documents)} results...")
-            
-            docs_to_rerank = documents[:min(rerank_top_k, len(documents))]
-            metas_to_rerank = metadatas[:min(rerank_top_k, len(metadatas))]
-            scores_to_rerank = scores[:min(rerank_top_k, len(scores))]
-            
-            reranked_docs, reranked_metas, reranked_scores = await asyncio.to_thread(
-                self.reranker.rerank_with_metadata,
-                query=query,
-                documents=docs_to_rerank,
-                metadata_list=metas_to_rerank,
-                scores_list=scores_to_rerank,
-                top_k=final_top_k,
-            )
-            
-            # Combine reranked + remaining
-            remaining_docs = documents[min(rerank_top_k, len(documents)):]
-            remaining_metas = metadatas[min(rerank_top_k, len(metadatas)):]
-            remaining_scores = scores[min(rerank_top_k, len(scores)):]
-            
-            documents = reranked_docs + remaining_docs
-            metadatas = reranked_metas + remaining_metas
-            scores = reranked_scores + remaining_scores
-            rerank_count = len(docs_to_rerank)
-            
-            logger.info(
-                f"Re-ranked {len(docs_to_rerank)} -> top {len(reranked_docs)} (kept {len(remaining_docs)} lower-ranked)",
-                extra={'extra_fields': {
-                    'event_type': 'rerank',
-                    'input_count': len(docs_to_rerank),
-                    'output_count': len(reranked_docs),
-                    'rerank_top_k': final_top_k
-                }}
-            )
-        
-        # Step 5: Filter by explicit filename if provided
-        if explicit_filename:
-            filtered_docs = []
-            filtered_metas = []
-            filtered_scores = []
-            for doc, meta, score in zip(documents, metadatas, scores):
-                if explicit_filename.lower() in meta.get('file_path', '').lower():
-                    filtered_docs.append(doc)
-                    filtered_metas.append(meta)
-                    filtered_scores.append(score)
-            if filtered_docs:
-                documents = filtered_docs
-                metadatas = filtered_metas
-                scores = filtered_scores
-                logger.info(f"Filtered to {len(documents)} chunks from explicit filename '{explicit_filename}'")
-
-        # Step 6: File-diversity selection (general search only). Cap chunks per file so
-        # multiple documents appear in context; avoid one file dominating when final_top_k is small.
-        if not explicit_filename and len(documents) > final_top_k:
-            max_per_file = getattr(
-                self.retrieval_config, "max_chunks_per_file", 2
-            )
-            if max_per_file > 0:
-                selected_docs = []
-                selected_metas = []
-                selected_scores = []
-                file_counts: Dict[str, int] = {}
-                for doc, meta, score in zip(documents, metadatas, scores):
-                    fp = meta.get("file_path", "")
-                    count = file_counts.get(fp, 0)
-                    if count < max_per_file:
-                        selected_docs.append(doc)
-                        selected_metas.append(meta)
-                        selected_scores.append(score)
-                        file_counts[fp] = count + 1
-                    if len(selected_docs) >= final_top_k:
-                        break
-                documents = selected_docs
-                metadatas = selected_metas
-                scores = selected_scores
-                logger.info(
-                    "File-diversity selection: %s chunks from %s files (max %s per file)",
-                    len(documents),
-                    len(file_counts),
-                    max_per_file,
-                )
-
-        return (documents, metadatas, scores, retrieval_count, rerank_count)
-
-    async def _get_all_indexed_docs(self) -> List[Any]:
-        """Return all indexed documents (indexed or metadata_only) for the current DB. Used by listing and tools."""
-        from database.database import AsyncSessionLocal
-        from database.models import IndexedDocument
-        from sqlalchemy import select
-
-        async with AsyncSessionLocal() as db_session:
-            stmt = select(IndexedDocument).where(
-                IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
-            )
-            result = await db_session.execute(stmt)
-            return list(result.scalars().all())
-    
-    async def _get_document_listing(self, question: str = "") -> QueryResult:
-        """
-        Get listing of all documents from database.
-        Used for document_listing queries. Pass user question so the response can be tailored.
-        """
-        try:
-            all_docs = await self._get_all_indexed_docs()
-            if not all_docs:
-                return QueryResult(
-                    message="No documents are currently indexed.",
-                    sources=[],
-                    response_time=0.0,
-                    query_type="document_listing",
-                    retrieval_count=0,
-                    rerank_count=0
-                )
-
-            # Phase A: corpus summary for "what kind of files" / "explain our files" (future summarize_corpus tool)
-            corpus_summary_text = summarize_corpus(all_docs)
-            
-            # Build context from all documents. Cap per-doc preview so all files fit under
-            # provider limit (from adapter); ensures "list all" shows every file.
-            sources = []
-            context_parts = []
-            listing_context_max = self.llm_service.get_max_listing_context_chars()
-            per_doc_max = max(80, listing_context_max // len(all_docs)) if all_docs else 500
-            for doc in all_docs:
-                filename = Path(doc.file_path).name
-                if doc.processing_status == "metadata_only":
-                    preview = f"[Indexing in progress...] {filename}"
-                else:
-                    preview = doc.content_preview if doc.content_preview else ""
-                    if not preview and doc.chunks_count > 0:
-                        preview = f"[File indexed with {doc.chunks_count} chunk(s)]"
-                    if len(preview) > per_doc_max:
-                        preview = preview[:per_doc_max].rstrip() + "..."
-                context_parts.append(f"[Document: {filename}]\n{preview}")
-                sources.append({
-                    "file_path": doc.file_path,
-                    "relevance_score": 1.0,
-                    "content_snippet": preview[:300] + "..." if len(preview) > 300 else preview,
-                    "chunks_found": doc.chunks_count,
-                    "file_type": doc.file_type,
-                    "processing_status": doc.processing_status
-                })
-            
-            context = "\n\n---\n\n".join(context_parts)
-            
-            # Generate response tailored to the user's question (avoids same generic answer for different questions)
-            user_question_line = f'The user asked: "{question.strip()}"\n\n' if question and question.strip() else ""
-            response_prompt = f"""You are a document assistant. {user_question_line}Folder overview:
-{corpus_summary_text}
-
-Documents in this folder:
-
-{context}
-
-Tailor your response to what the user asked:
-- If they asked what kind or type of files: give a short summary by file format and document category (e.g. "You have PDFs, spreadsheets, Word docs: invoices, permits, reports, ...") and do NOT list every filename.
-- If they asked to list, show, or tell about all documents: list each document with filename, brief description, file type, and status.
-Be consistent: one style for "kind/type" (summary), another for "list/show all" (full list)."""
-
-            response_text = await self.llm_service.generate_simple(
-                response_prompt, prompt_type="document_listing"
-            )
-            
-            return QueryResult(
-                message=response_text,
-                sources=sources,
-                response_time=0.0,  # Will be set by caller
-                query_type="document_listing",
-                retrieval_count=len(all_docs),
-                rerank_count=0
-            )
-            
-        except Exception as e:
-            logger.error(f"Document listing failed: {e}")
-            return QueryResult(
-                message=f"Sorry, I encountered an error while retrieving the document list: {str(e)}",
-                sources=[],
-                response_time=0.0,
-                query_type="document_listing",
-                retrieval_count=0,
-                rerank_count=0
-            )
-
-    # -------------------------------------------------------------------------
-    # Phase B.2 – Tool layer (stable contract for planner / tool-calling)
-    # -------------------------------------------------------------------------
-
-    async def run_tool_list_documents(self) -> ListDocumentsResult:
-        """Tool: list_documents. Returns all indexed documents with metadata."""
-        all_docs = await self._get_all_indexed_docs()
-        documents: List[Dict[str, Any]] = []
-        for doc in all_docs:
-            filename = Path(doc.file_path).name
-            preview = (doc.content_preview or "")[:300]
-            if len((doc.content_preview or "")) > 300:
-                preview += "..."
-            documents.append({
-                "file_path": doc.file_path,
-                "file_type": doc.file_type,
-                "filename": filename,
-                "chunks_count": getattr(doc, "chunks_count", 0) or 0,
-                "content_preview": preview,
-                "processing_status": getattr(doc, "processing_status", "indexed"),
-            })
-        return {"documents": documents, "count": len(documents)}
-
-    async def run_tool_search_documents(self, query: str) -> Optional[SearchDocumentsResult]:
-        """Tool: search_documents. Single hybrid retrieval + rerank; returns context and sources. (Phase T.1: LLM query expansion removed.)"""
-        if not query or not str(query).strip():
-            return None
-        embedding = self.embedding_service.encode_single_text(query.strip())
-        rag = await self._retrieve_and_build_context(
-            question=query.strip(),
-            query_type="document_search",
-            query_embedding=embedding,
-        )
-        if rag is None:
-            return None
-        chunks = [s.strip() for s in rag["context"].split(CONTEXT_CHUNK_SEP) if s.strip()]
-        return {
-            "context": rag["context"],
-            "chunks": chunks,
-            "sources": rag["sources"],
-            "retrieval_count": rag["retrieval_count"],
-            "rerank_count": rag["rerank_count"],
-        }
-
-    async def run_tool_search_specific_document(self, document_name: str) -> Optional[SearchDocumentsResult]:
-        """Tool: search_specific_document. Restricts retrieval to the named document (FilenameTrie). No query expansion (scope is already narrow)."""
-        if not document_name or not str(document_name).strip():
-            return None
-        query = document_name.strip()
-        embedding = self.embedding_service.encode_single_text(query)
-        rag = await self._retrieve_and_build_context(
-            question=query,
-            query_type="document_search",
-            query_embedding=embedding,
-            explicit_filename_override=query,
-        )
-        if rag is None:
-            return None
-        chunks = [s.strip() for s in rag["context"].split(CONTEXT_CHUNK_SEP) if s.strip()]
-        return {
-            "context": rag["context"],
-            "chunks": chunks,
-            "sources": rag["sources"],
-            "retrieval_count": rag["retrieval_count"],
-            "rerank_count": rag["rerank_count"],
-        }
-
-    async def run_tool_summarize_corpus(self) -> SummarizeCorpusResult:
-        """Tool: summarize_corpus. Returns folder summary and metadata (Phase A)."""
-        all_docs = await self._get_all_indexed_docs()
-        from .corpus_summary import corpus_metadata_from_documents
-
-        metadata = corpus_metadata_from_documents(all_docs)
-        summary = summarize_corpus(all_docs)
-        date_range_str = ""
-        if metadata.get("date_range") and len(metadata["date_range"]) == 2:
-            low, high = metadata["date_range"]
-            if hasattr(low, "strftime") and hasattr(high, "strftime"):
-                try:
-                    date_range_str = f"{low.strftime('%b %Y')} – {high.strftime('%b %Y')}"
-                except (TypeError, ValueError):
-                    pass
-        return {
-            "summary": summary,
-            "document_count": metadata.get("document_count", 0),
-            "file_type_counts": metadata.get("file_type_counts") or {},
-            "date_range": date_range_str,
-        }
-
-    async def run_tool(
-        self,
-        tool: str,
-        *,
-        query: Optional[str] = None,
-        name: Optional[str] = None,
-        document_name: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Single entry point for tool execution. Validates the tool call, then
-        dispatches to the appropriate run_tool_* method. Returns the tool result
-        dict or None if invalid or execution failed.
-        For search_specific_document use document_name= (or name= for backward compat).
-        """
-        doc_name = document_name or name
-        ok, err = validate_tool_call(tool, query=query, name=doc_name, document_name=doc_name)
-        if not ok:
-            logger.warning("Tool validation failed: %s", err)
-            return None
-        try:
-            if tool == TOOL_LIST_DOCUMENTS:
-                return await self.run_tool_list_documents()
-            if tool == TOOL_SEARCH_DOCUMENTS:
-                return await self.run_tool_search_documents(query or "")
-            if tool == TOOL_SEARCH_SPECIFIC_DOCUMENT:
-                return await self.run_tool_search_specific_document(doc_name or "")
-            if tool == TOOL_SUMMARIZE_CORPUS:
-                return await self.run_tool_summarize_corpus()
-        except Exception as e:
-            logger.error("Tool execution failed for %s: %s", tool, e)
-            return None
-        return None
-
-    async def run_tools(
-        self,
-        tool_calls: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        Execute multiple tool calls (e.g. planner returns list_documents + summarize_corpus).
-        Validates all calls first; runs each in order and appends results. Invalid calls are skipped
-        and do not appear in the result list (so result length may be less than len(tool_calls)).
-        """
-        ok, errors = validate_tool_calls(tool_calls)
-        if not ok:
-            for e in errors:
-                logger.warning("Tool call validation: %s", e)
-        results: List[Dict[str, Any]] = []
-        for call in tool_calls:
-            if not isinstance(call, dict):
-                continue
-            tool = call.get("tool")
-            if not tool:
-                continue
-            result = await self.run_tool(
-                tool,
-                query=call.get("query"),
-                name=call.get("name"),
-                document_name=call.get("document_name"),
-            )
-            if result is not None:
-                results.append({"tool": tool, "result": result})
-        return results
-
-    # -------------------------------------------------------------------------
-    # Phase B.3 – Single-loop tool calling (agent path when provider supports it)
-    # -------------------------------------------------------------------------
-
-    AGENT_SYSTEM_MESSAGE = (
-        "You are a helpful document assistant. The user has selected a folder; you have access to tools "
-        "to list documents, search across them, search within a specific document, or get a folder summary. "
-        "Use the tools when the user asks about files, document content, or the folder. "
-        "For greetings or small talk (e.g. 'what's up?', 'hello'), respond directly without calling tools. "
-        "When the user asks what files exist or for an overview, use list_documents and/or summarize_corpus; "
-        "do not use search_documents for that. When the user asks about a specific file by name, use "
-        "search_specific_document with that name. "
-        "When the user asks for 'related' documents or 'other files related to X', use search_documents with a "
-        "descriptive query (e.g. 'BIP-12046 related documents' or 'documents related to BIP-12046 receipt delivery'), "
-        "not just the document identifier. "
-        "Citation format: when citing list_documents or summarize_corpus results, use [Folder Overview] or [Document List], "
-        "not [Document: list_documents]. When citing search results that mention a specific file, use [Document: filename]."
-    )
-
-    def _build_agent_messages(
-        self,
-        question: str,
-        conversation_history: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Build messages for the agent: system + history + user (rewritten question)."""
-        messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": self.AGENT_SYSTEM_MESSAGE},
-        ]
-        for h in conversation_history or []:
-            role = h.get("role", "user")
-            content = h.get("content") or ""
-            if not content and "content" in h:
-                continue
-            messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": question})
-        return messages
-
-    @staticmethod
-    def _tool_error_payload(message: str, retryable: bool = False) -> Dict[str, Any]:
-        """Structured tool failure payload so the model can reason about failures."""
-        return {"tool_error": True, "message": message, "retryable": retryable}
-
-    @staticmethod
-    def _format_tool_result_content(tool_name: str, result_payload: Dict[str, Any]) -> str:
-        """Format tool result for the LLM; add citation hint for folder-level tools so model uses [Folder Overview] not [Document: list_documents]."""
-        body = json.dumps(result_payload, default=str)
-        if result_payload.get("tool_error"):
-            return body
-        if tool_name in (TOOL_LIST_DOCUMENTS, TOOL_SUMMARIZE_CORPUS):
-            return "Cite this as [Folder Overview] when referring to this information.\n" + body
-        return body
-
-    def _parse_groq_tool_calls(
-        self,
-        raw_tool_calls: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Convert Groq/OpenAI tool_calls to our run_tools format: [{tool, query?, document_name?}]."""
-        out: List[Dict[str, Any]] = []
-        for tc in raw_tool_calls or []:
-            fn = tc.get("function") or {}
-            name = fn.get("name") or ""
-            if name not in (TOOL_LIST_DOCUMENTS, TOOL_SEARCH_DOCUMENTS, TOOL_SEARCH_SPECIFIC_DOCUMENT, TOOL_SUMMARIZE_CORPUS):
-                continue
-            args_str = fn.get("arguments") or "{}"
-            try:
-                args = json.loads(args_str) if isinstance(args_str, str) else (args_str or {})
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug("Tool arguments parse failed for %s: %s", name, e)
-                args = {}
-            call: Dict[str, Any] = {"tool": name}
-            if name == TOOL_SEARCH_DOCUMENTS:
-                call["query"] = args.get("query") or ""
-            if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
-                call["document_name"] = args.get("document_name") or args.get("name") or ""
-            # Log tool decision for debugging
-            if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
-                logger.info("Agent tool decision: %s(%s)", name, call.get("document_name", ""))
-            elif name == TOOL_SEARCH_DOCUMENTS:
-                logger.info("Agent tool decision: %s(%s)", name, (call.get("query", "") or "")[:80])
-            else:
-                logger.info("Agent tool decision: %s", name)
-            out.append(call)
-        return out
-
-    def _collect_sources_from_tool_results(
-        self,
-        tool_results: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Extract source entries from search tool results for QueryResult.sources."""
-        sources: List[Dict[str, Any]] = []
-        for tr in tool_results or []:
-            result = tr.get("result") or {}
-            if "sources" in result:
-                sources.extend(result["sources"])
-        return sources
-
-    async def _query_via_tool_loop(
-        self,
-        question: str,
-        conversation_history: Optional[List[Dict[str, Any]]] = None,
-    ) -> QueryResult:
-        """
-        Phase B.3 – Single-loop agent: LLM with tools, run tools if requested, then final answer.
-        Used when the provider (e.g. Groq) supports native tool calling.
-        """
-        start_time = asyncio.get_event_loop().time()
-        from config import settings
-        max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
-        messages = self._build_agent_messages(question, conversation_history or [])
-        tools = get_openai_format_tools()
-
-        content, raw_tool_calls = await self.llm_service.chat_with_tools(messages, tools, max_tokens=max_tokens)
-
-        if raw_tool_calls and len(raw_tool_calls) > MAX_TOOL_CALLS_PER_QUERY:
-            raw_tool_calls = raw_tool_calls[:MAX_TOOL_CALLS_PER_QUERY]
-            logger.warning("Agent returned more than %s tool calls; capping at %s", MAX_TOOL_CALLS_PER_QUERY, MAX_TOOL_CALLS_PER_QUERY)
-
-        # No tool calls: the first response is the final answer
-        if not raw_tool_calls:
-            response_time = round(asyncio.get_event_loop().time() - start_time, 3)
-            return QueryResult(
-                message=content or "I couldn't generate a response.",
-                sources=[],
-                response_time=response_time,
-                query_type="agent",
-                retrieval_count=0,
-                rerank_count=0,
-            )
-
-        # Parse and run tools
-        our_calls = self._parse_groq_tool_calls(raw_tool_calls)
-        if not our_calls:
-            response_time = round(asyncio.get_event_loop().time() - start_time, 3)
-            return QueryResult(
-                message=content or "I couldn't process the tool request.",
-                sources=[],
-                response_time=response_time,
-                query_type="agent",
-                retrieval_count=0,
-                rerank_count=0,
-            )
-
-        # One result per tool call (same order as raw_tool_calls), with timeout
-        results_by_index: List[Dict[str, Any]] = []
-        for call in our_calls:
-            try:
-                r = await asyncio.wait_for(
-                    self.run_tool(
-                        call["tool"],
-                        query=call.get("query"),
-                        document_name=call.get("document_name"),
-                    ),
-                    timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
-                )
-                results_by_index.append(r if r is not None else self._tool_error_payload("Tool execution failed", retryable=False))
-            except asyncio.TimeoutError:
-                logger.warning("Tool %s timed out after %s s", call.get("tool"), TOOL_EXECUTION_TIMEOUT_SECONDS)
-                results_by_index.append(self._tool_error_payload("Tool execution timed out", retryable=True))
-            except Exception as e:
-                logger.warning("Tool %s failed: %s", call.get("tool"), e)
-                results_by_index.append(self._tool_error_payload(str(e), retryable=False))
-        sources = self._collect_sources_from_tool_results(
-            [{"tool": our_calls[i].get("tool"), "result": results_by_index[i]} for i in range(len(our_calls))]
-        )
-
-        # Build assistant message with tool_calls (Groq format) and tool result messages
-        assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content or ""}
-        assistant_msg["tool_calls"] = raw_tool_calls
-        messages.append(assistant_msg)
-        for i, tc in enumerate(raw_tool_calls):
-            result_payload = results_by_index[i] if i < len(results_by_index) else {}
-            tool_name = our_calls[i].get("tool", "") if i < len(our_calls) else ""
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.get("id"),
-                "content": self._format_tool_result_content(tool_name, result_payload),
-            })
-
-        # Second LLM call: stream or non-stream for final answer
-        final_parts: List[str] = []
-        async for delta in self.llm_service.chat_messages_stream(messages, max_tokens=max_tokens):
-            final_parts.append(delta)
-        final_message = "".join(final_parts).strip() or "I couldn't generate a response."
-        response_time = round(asyncio.get_event_loop().time() - start_time, 3)
-        return QueryResult(
-            message=final_message,
-            sources=sources,
-            response_time=response_time,
-            query_type="agent",
-            retrieval_count=len(sources),
-            rerank_count=0,
-        )
-
-    async def _query_stream_via_tool_loop(
-        self,
-        question: str,
-        conversation_history: Optional[List[Dict[str, Any]]] = None,
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        """
-        Phase B.3 – Same as _query_via_tool_loop but streams the final answer.
-        Yields meta (sources), then token deltas, then done.
-        """
-        start_time = asyncio.get_event_loop().time()
-        from config import settings
-        max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
-        messages = self._build_agent_messages(question, conversation_history or [])
-        tools = get_openai_format_tools()
-
-        content, raw_tool_calls = await self.llm_service.chat_with_tools(messages, tools, max_tokens=max_tokens)
-
-        if raw_tool_calls and len(raw_tool_calls) > MAX_TOOL_CALLS_PER_QUERY:
-            raw_tool_calls = raw_tool_calls[:MAX_TOOL_CALLS_PER_QUERY]
-            logger.warning("Agent returned more than %s tool calls; capping at %s", MAX_TOOL_CALLS_PER_QUERY, MAX_TOOL_CALLS_PER_QUERY)
-
-        # No tool calls: yield the content as the answer (one token event)
-        if not raw_tool_calls:
-            response_time = round(asyncio.get_event_loop().time() - start_time, 3)
-            yield ("meta", {"sources": [], "query_type": "agent"})
-            yield ("token", content or "I couldn't generate a response.")
-            yield ("done", {
-                "message": content or "I couldn't generate a response.",
-                "response_time": response_time,
-                "query_type": "agent",
-                "retrieval_count": 0,
-                "rerank_count": 0,
-            })
-            return
-
-        our_calls = self._parse_groq_tool_calls(raw_tool_calls)
-        if not our_calls:
-            response_time = round(asyncio.get_event_loop().time() - start_time, 3)
-            yield ("meta", {"sources": [], "query_type": "agent"})
-            yield ("token", content or "I couldn't process the tool request.")
-            yield ("done", {"message": content or "", "response_time": response_time, "query_type": "agent", "retrieval_count": 0, "rerank_count": 0})
-            return
-
-        results_by_index = []
-        for call in our_calls:
-            try:
-                r = await asyncio.wait_for(
-                    self.run_tool(
-                        call["tool"],
-                        query=call.get("query"),
-                        document_name=call.get("document_name"),
-                    ),
-                    timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
-                )
-                results_by_index.append(r if r is not None else self._tool_error_payload("Tool execution failed", retryable=False))
-            except asyncio.TimeoutError:
-                logger.warning("Tool %s timed out after %s s", call.get("tool"), TOOL_EXECUTION_TIMEOUT_SECONDS)
-                results_by_index.append(self._tool_error_payload("Tool execution timed out", retryable=True))
-            except Exception as e:
-                logger.warning("Tool %s failed: %s", call.get("tool"), e)
-                results_by_index.append(self._tool_error_payload(str(e), retryable=False))
-        sources = self._collect_sources_from_tool_results(
-            [{"tool": our_calls[j].get("tool"), "result": results_by_index[j]} for j in range(len(our_calls))]
-        )
-        yield ("meta", {"sources": sources, "query_type": "agent"})
-
-        assistant_msg = {"role": "assistant", "content": content or "", "tool_calls": raw_tool_calls}
-        messages.append(assistant_msg)
-        for i, tc in enumerate(raw_tool_calls):
-            result_payload = results_by_index[i] if i < len(results_by_index) else {}
-            tool_name = our_calls[i].get("tool", "") if i < len(our_calls) else ""
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.get("id"),
-                "content": self._format_tool_result_content(tool_name, result_payload),
-            })
-
-        full_parts: List[str] = []
-        async for delta in self.llm_service.chat_messages_stream(messages, max_tokens=max_tokens):
-            full_parts.append(delta)
-            yield ("token", delta)
-        response_time = round(asyncio.get_event_loop().time() - start_time, 3)
-        yield ("done", {
-            "message": "".join(full_parts),
-            "response_time": response_time,
-            "query_type": "agent",
-            "retrieval_count": len(sources),
-            "rerank_count": 0,
-        })
-
-    # -------------------------------------------------------------------------
-    # Phase B.4 – Two-step planner fallback (when provider has no tool calling)
-    # -------------------------------------------------------------------------
-
-    PLANNER_MAX_TOKENS = 400
-
-    def _build_planner_prompt(self, question: str, conversation_history: List[Dict[str, Any]]) -> str:
-        """Build prompt for planner LLM: output JSON only with tool choice(s)."""
-        tools_desc = []
-        for t in get_tools_for_planner():
-            name = t.get("name", "")
-            desc = t.get("description", "")
-            when = t.get("when_to_use", "")
-            params = t.get("parameters") or {}
-            line = f"- {name}: {desc} {when}".strip()
-            if name == TOOL_SEARCH_DOCUMENTS:
-                line += " Include \"query\" with the search text."
-            if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
-                line += " Include \"document_name\" with the file name or identifier."
-            tools_desc.append(line)
-        tools_text = "\n".join(tools_desc)
-        history_snippet = ""
-        if conversation_history:
-            recent = conversation_history[-4:]  # last 2 exchanges
-            parts = []
-            for h in recent:
-                role = h.get("role", "user")
-                content = (h.get("content") or "")[:200].strip()
-                if content:
-                    parts.append(f"{role}: {content}")
-            if parts:
-                history_snippet = "Recent conversation:\n" + "\n".join(parts) + "\n\n"
-        return f"""You are a planner for a document assistant. Output ONLY valid JSON, no other text.
-
-Available tools:
-{tools_text}
-
-Rules: If the user asks what files or documents exist, or for an overview of the folder, use list_documents and/or summarize_corpus; do not use search_documents for that. Use search_specific_document when the user names a file. Use search_documents only for factual questions about content or "related documents". For greetings or small talk output empty tools.
-Output format: {{"tools": [{{"tool": "tool_name", "query": "..." or "document_name": "..." as needed}}]}} or {{"tools": []}} for no tools.
-
-{history_snippet}User: {question}
-
-JSON output:"""
-
-    def _parse_planner_output(self, response: str) -> Optional[List[Dict[str, Any]]]:
-        """Parse planner LLM response into list of tool calls. Returns None on parse failure, [] for no tools."""
-        if not response or not response.strip():
-            return None
-        text = response.strip()
-        # Try to extract JSON from markdown code block if present
-        if "```" in text:
-            m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
-            if m:
-                text = m.group(1)
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            logger.warning("Planner output not valid JSON: %s", text[:200])
-            return None
-        if not isinstance(data, dict):
-            return None
-        tools = data.get("tools")
-        if tools is None:
-            return None
-        if not isinstance(tools, list):
-            return None
-        # Normalize: each item must be dict with "tool" key; allow empty list
-        out: List[Dict[str, Any]] = []
-        for i, item in enumerate(tools):
-            if not isinstance(item, dict):
-                continue
-            name = item.get("tool")
-            if name not in (TOOL_LIST_DOCUMENTS, TOOL_SEARCH_DOCUMENTS, TOOL_SEARCH_SPECIFIC_DOCUMENT, TOOL_SUMMARIZE_CORPUS):
-                continue
-            call: Dict[str, Any] = {"tool": name}
-            if name == TOOL_SEARCH_DOCUMENTS:
-                call["query"] = item.get("query") or ""
-            if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
-                call["document_name"] = item.get("document_name") or item.get("name") or ""
-            out.append(call)
-        return out
-
-    async def _get_safe_tool_calls_from_classifier(
-        self,
-        question: str,
-        conversation_history: Optional[List[Dict[str, Any]]] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        B.5 Safe default: when planner output is invalid or inappropriate, use classifier
-        to choose a safe tool set. Do not blindly execute a mismatched tool.
-        """
-        try:
-            route_result = await self.router.resolve(question, conversation_history or [])
-        except Exception as e:
-            logger.warning("Router failed for safe default: %s; using no tools", e)
-            return []
-        route = route_result.route
-        if route in (Route.GREETING, Route.GENERAL):
-            return []
-        if route == Route.DOCUMENT_LISTING:
-            return [
-                {"tool": TOOL_LIST_DOCUMENTS},
-                {"tool": TOOL_SUMMARIZE_CORPUS},
-            ]
-        if route == Route.DOCUMENT_SEARCH:
-            return [{"tool": TOOL_SEARCH_DOCUMENTS, "query": question}]
-        # Default: search with user question
-        return [{"tool": TOOL_SEARCH_DOCUMENTS, "query": question}]
-
-    def _format_tool_results_for_answer(self, tool_results: List[Dict[str, Any]]) -> str:
-        """Format tool results as a single context string for the answer LLM (RAG-style prompt)."""
-        if not tool_results:
-            return "No document tools were used. Answer the user directly based on general knowledge."
-        parts = []
-        for tr in tool_results:
-            tool_name = tr.get("tool", "")
-            result = tr.get("result") or {}
-            if result.get("tool_error"):
-                parts.append(f"[{tool_name}]: Error - {result.get('message', 'unknown')}")
-                continue
-            if tool_name == TOOL_LIST_DOCUMENTS:
-                docs = result.get("documents") or []
-                count = result.get("count", 0)
-                lines = [f"Document list ({count} items):"] + [
-                    f"- {d.get('filename', d.get('file_path', ''))} ({d.get('file_type', '')})"
-                    for d in docs[:50]
-                ]
-                if count > 50:
-                    lines.append(f"... and {count - 50} more.")
-                parts.append("\n".join(lines))
-            elif tool_name == TOOL_SUMMARIZE_CORPUS:
-                parts.append(f"[Folder overview]\n{result.get('summary', '')}")
-            elif tool_name in (TOOL_SEARCH_DOCUMENTS, TOOL_SEARCH_SPECIFIC_DOCUMENT):
-                parts.append(result.get("context", ""))
-            else:
-                parts.append(json.dumps(result, default=str)[:2000])
-        return "\n\n---\n\n".join(parts)
-
-    async def _query_via_planner_fallback(
-        self,
-        question: str,
-        conversation_history: Optional[List[Dict[str, Any]]] = None,
-    ) -> QueryResult:
-        """
-        Phase B.4 – Two-step: planner LLM → run tools → answer LLM.
-        Used when the provider does not support native tool calling (e.g. Ollama, Gemini).
-        """
-        start_time = asyncio.get_event_loop().time()
-        from config import settings
-        max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
-        prompt = self._build_planner_prompt(question, conversation_history or [])
-        from .llm.provider_adapters import PROMPT_TYPE_CLASSIFICATION
-        planner_response = await self.llm_service.generate_simple(
-            prompt,
-            prompt_type=PROMPT_TYPE_CLASSIFICATION,
-            max_completion_tokens=self.PLANNER_MAX_TOKENS,
-        )
-        tool_calls = self._parse_planner_output(planner_response)
-        # B.5 Schema validation: reject malformed or invalid tool calls; use safe default
-        if tool_calls is None or (tool_calls and not validate_tool_calls(tool_calls)[0]):
-            if tool_calls:
-                logger.warning("Planner output failed validation; using safe default from classifier")
-            else:
-                logger.info("Planner output invalid or empty; using safe default from classifier")
-            tool_calls = await self._get_safe_tool_calls_from_classifier(question, conversation_history or [])
-
-        # Run tools (possibly empty)
-        if tool_calls:
-            results_by_index = []
-            for call in tool_calls:
-                try:
-                    r = await asyncio.wait_for(
-                        self.run_tool(
-                            call["tool"],
-                            query=call.get("query"),
-                            document_name=call.get("document_name"),
-                        ),
-                        timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
-                    )
-                    results_by_index.append(r if r is not None else self._tool_error_payload("Tool execution failed", retryable=False))
-                except asyncio.TimeoutError:
-                    results_by_index.append(self._tool_error_payload("Tool execution timed out", retryable=True))
-                except Exception as e:
-                    results_by_index.append(self._tool_error_payload(str(e), retryable=False))
-            tool_results = [{"tool": tool_calls[i].get("tool"), "result": results_by_index[i]} for i in range(len(tool_calls))]
-            context = self._format_tool_results_for_answer(tool_results)
-            sources = self._collect_sources_from_tool_results(tool_results)
-        else:
-            context = self._format_tool_results_for_answer([])
-            sources = []
-        response_text = await self.llm_service.generate_response(
-            question, context, conversation_history=conversation_history or []
-        )
-        response_time = round(asyncio.get_event_loop().time() - start_time, 3)
-        return QueryResult(
-            message=response_text,
-            sources=sources,
-            response_time=response_time,
-            query_type="planner",
-            retrieval_count=len(sources),
-            rerank_count=0,
-        )
-
-    async def _query_stream_via_planner_fallback(
-        self,
-        question: str,
-        conversation_history: Optional[List[Dict[str, Any]]] = None,
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        """Phase B.4 – Two-step planner fallback, streaming the final answer."""
-        start_time = asyncio.get_event_loop().time()
-        from config import settings
-        max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
-        prompt = self._build_planner_prompt(question, conversation_history or [])
-        from .llm.provider_adapters import PROMPT_TYPE_CLASSIFICATION
-        planner_response = await self.llm_service.generate_simple(
-            prompt,
-            prompt_type=PROMPT_TYPE_CLASSIFICATION,
-            max_completion_tokens=self.PLANNER_MAX_TOKENS,
-        )
-        tool_calls = self._parse_planner_output(planner_response)
-        if tool_calls is None or (tool_calls and not validate_tool_calls(tool_calls)[0]):
-            if tool_calls:
-                logger.warning("Planner output failed validation; using safe default from classifier")
-            else:
-                logger.info("Planner output invalid or empty; using safe default from classifier")
-            tool_calls = await self._get_safe_tool_calls_from_classifier(question, conversation_history or [])
-
-        if tool_calls:
-            results_by_index = []
-            for call in tool_calls:
-                try:
-                    r = await asyncio.wait_for(
-                        self.run_tool(
-                            call["tool"],
-                            query=call.get("query"),
-                            document_name=call.get("document_name"),
-                        ),
-                        timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
-                    )
-                    results_by_index.append(r if r is not None else self._tool_error_payload("Tool execution failed", retryable=False))
-                except asyncio.TimeoutError:
-                    results_by_index.append(self._tool_error_payload("Tool execution timed out", retryable=True))
-                except Exception as e:
-                    results_by_index.append(self._tool_error_payload(str(e), retryable=False))
-            tool_results = [{"tool": tool_calls[i].get("tool"), "result": results_by_index[i]} for i in range(len(tool_calls))]
-            context = self._format_tool_results_for_answer(tool_results)
-            sources = self._collect_sources_from_tool_results(tool_results)
-        else:
-            context = self._format_tool_results_for_answer([])
-            sources = []
-        yield ("meta", {"sources": sources, "query_type": "planner"})
-        full_parts: List[str] = []
-        async for delta in self.llm_service.generate_response_stream(
-            question, context, conversation_history=conversation_history or []
-        ):
-            full_parts.append(delta)
-            yield ("token", delta)
-        response_time = round(asyncio.get_event_loop().time() - start_time, 3)
-        yield ("done", {
-            "message": "".join(full_parts),
-            "response_time": response_time,
-            "query_type": "planner",
-            "retrieval_count": len(sources),
-            "rerank_count": 0,
-        })
-
-    async def build_conversation_history(
-        self,
-        message_pairs: List[Dict[str, str]],
-    ) -> List[Dict[str, str]]:
-        """
-        Build LLM-ready conversation history with lightweight summarization.
-        
-        - If the conversation is short, include all turns.
-        - If it's longer, summarize older turns into a compact system message
-          and keep the most recent exchanges verbatim.
-        """
-        if not message_pairs:
-            return []
-
-        # How many recent user/assistant pairs to keep verbatim
-        max_recent_pairs = 6  # 12 messages (user+assistant)
-
-        # Short conversations: just return all turns
-        if len(message_pairs) <= max_recent_pairs:
-            history: List[Dict[str, str]] = []
-            for pair in message_pairs:
-                user_msg = (pair.get("user") or "").strip()
-                ai_msg = (pair.get("assistant") or "").strip()
-                if user_msg:
-                    history.append({"role": "user", "content": user_msg})
-                if ai_msg:
-                    history.append({"role": "assistant", "content": ai_msg})
-            return history
-
-        # Longer conversations: summarize older part, keep last N pairs verbatim
-        older_pairs = message_pairs[:-max_recent_pairs]
-        recent_pairs = message_pairs[-max_recent_pairs:]
-
-        summary_text = ""
-        try:
-            # Build a plain-text transcript of older turns
-            lines: List[str] = []
-            for pair in older_pairs:
-                user_msg = (pair.get("user") or "").strip()
-                ai_msg = (pair.get("assistant") or "").strip()
-                if user_msg:
-                    lines.append(f"User: {user_msg}")
-                if ai_msg:
-                    lines.append(f"Assistant: {ai_msg}")
-            transcript = "\n".join(lines)
-
-            # Limit input size for the summarization call
-            max_input_chars = 4000
-            if len(transcript) > max_input_chars:
-                # Keep the most recent portion of older history
-                transcript = transcript[-max_input_chars:]
-
-            prompt = (
-                "Summarize the following conversation between a user and an AI assistant.\n"
-                "Focus on key facts about the user's documents, goals, constraints, and decisions.\n"
-                "Write 3–6 short bullet points.\n\n"
-                f"Conversation:\n{transcript}"
-            )
-            summary = await self.llm_service.generate_simple(
-                prompt,
-                prompt_type="short_direct",
-                max_completion_tokens=256,
-            )
-            summary_text = (summary or "").strip()
-        except Exception as e:
-            logger.warning(f"Conversation summarization failed, falling back to recent turns only: {e}")
-            summary_text = ""
-
-        history: List[Dict[str, str]] = []
-        if summary_text:
-            history.append(
-                {
-                    "role": "system",
-                    "content": "Summary of earlier conversation:\n" + summary_text,
-                }
-            )
-
-        for pair in recent_pairs:
-            user_msg = (pair.get("user") or "").strip()
-            ai_msg = (pair.get("assistant") or "").strip()
-            if user_msg:
-                history.append({"role": "user", "content": user_msg})
-            if ai_msg:
-                history.append({"role": "assistant", "content": ai_msg})
-
-        return history
-    
-    async def _retrieve_and_build_context(
-        self,
-        question: str,
-        query_type: str,
-        query_embedding: List[float],
-        explicit_filename_override: Optional[str] = None,
-        retrieval_params_override: Optional[Dict[str, int]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Shared retrieval + context-building pipeline for document_search queries.
-        Returns dict with context, sources, retrieval_count, rerank_count -- or None if no results.
-        If explicit_filename_override is set (e.g. from search_specific_document tool), use it
-        instead of detecting from the question.
-        When retrieval_params_override is set (e.g. multi-variant expanded search), use lower per-variant limits.
-        """
-        explicit_filename = explicit_filename_override if explicit_filename_override is not None else self._find_explicit_filename(question)
-        selected_files = await self._select_relevant_files(question)
-        is_aggregation = is_aggregation_query(question)
-        if is_aggregation:
-            logger.info("Aggregation-style query detected: using higher recall and per-doc cap")
-
-        documents, metadatas, scores, retrieval_count, rerank_count = await self._retrieve_chunks(
-            question, query_type, explicit_filename,
-            query_embedding=query_embedding,
-            is_aggregation=is_aggregation,
-            retrieval_params_override=retrieval_params_override,
-        )
-        if not documents:
-            return None
-
-        if selected_files:
-            prioritized_docs, prioritized_metas, prioritized_scores = [], [], []
-            other_docs, other_metas, other_scores = [], [], []
-            for doc, meta, score in zip(documents, metadatas, scores):
-                fp = meta.get("file_path", "")
-                if any(sf in fp for sf in selected_files):
-                    prioritized_docs.append(doc)
-                    prioritized_metas.append(meta)
-                    prioritized_scores.append(score)
-                else:
-                    other_docs.append(doc)
-                    other_metas.append(meta)
-                    other_scores.append(score)
-            documents = prioritized_docs + other_docs
-            metadatas = prioritized_metas + other_metas
-            scores = prioritized_scores + other_scores
-            logger.info(f"Prioritized {len(prioritized_docs)} chunks from {len(selected_files)} selected files")
-
-        # T.3 Context compression: extract relevant portions only. Skip for aggregation (need raw data),
-        # specific-doc, small context, or few chunks.
-        total_context_chars = sum(len(d) for d in documents)
-        if (
-            not explicit_filename
-            and not is_aggregation
-            and len(documents) >= 2
-            and total_context_chars >= 2000
-        ):
-            filenames_for_compression = [Path(meta.get("file_path", "")).name for meta in metadatas]
-            compressed = await compress_chunks(
-                question, documents, self.llm_service, filenames=filenames_for_compression
-            )
-            if len(compressed) == len(documents):
-                documents = compressed
-
-        file_chunks: Dict[str, list] = {}
-        for doc, metadata, score in zip(documents, metadatas, scores):
-            raw_path = metadata.get("file_path", "Unknown")
-            fp = os.path.normpath(raw_path) if raw_path else "Unknown"
-            file_chunks.setdefault(fp, []).append({
-                "text": doc,
-                "score": score,
-                "chunk_id": metadata.get("chunk_id", 0),
-                "metadata": metadata,
-            })
-
-        # ------------------------------------------------------------------
-        # Smarter context selection: detect single-file intent and, when
-        # appropriate, build a richer context focused on that file.
-        # ------------------------------------------------------------------
-        single_file_mode = False
-        primary_file_path: Optional[str] = None
-
-        if file_chunks:
-            # Count chunks per file from retrieval results
-            per_file_counts = {fp: len(chunks) for fp, chunks in file_chunks.items()}
-            total_chunks = sum(per_file_counts.values())
-            primary_file_path, primary_count = max(per_file_counts.items(), key=lambda kv: kv[1])
-
-            if len(per_file_counts) == 1:
-                # Only one file in play – clear single-file intent
-                single_file_mode = True
-            else:
-                dominant_ratio = primary_count / max(1, total_chunks)
-                # If user mentioned a filename explicitly, be more willing to
-                # treat it as single-file even if a few other chunks appear.
-                if explicit_filename and not is_aggregation and dominant_ratio >= 0.6:
-                    single_file_mode = True
-                # Otherwise require a stronger dominance signal.
-                elif not is_aggregation and dominant_ratio >= 0.8 and primary_count >= 3:
-                    single_file_mode = True
-
-        sources: List[Dict] = []
-        context_parts: List[str] = []
-
-        # Single-file path: try to load all chunks for the primary file from the
-        # vector store so the model sees a coherent view of that document.
-        if single_file_mode and primary_file_path:
-            try:
-                all_chunks_data = self.vector_store.get_document_chunks(primary_file_path)
-            except Exception as e:
-                logger.warning(f"Could not load full chunks for {primary_file_path}: {e}")
-                all_chunks_data = None
-
-            full_text = ""
-            full_chunk_count = 0
-            if all_chunks_data and all_chunks_data.get("documents"):
-                docs_list = all_chunks_data.get("documents") or []
-                metas_list = all_chunks_data.get("metadatas") or [{} for _ in docs_list]
-                pairs = list(zip(docs_list, metas_list))
-                pairs.sort(key=lambda p: p[1].get("chunk_id", 0))
-                full_text = "\n".join(doc for doc, _ in pairs)
-                full_chunk_count = len(pairs)
-            else:
-                # Fallback: use only retrieved chunks for that file
-                chunks = file_chunks.get(primary_file_path, [])
-                chunks.sort(key=lambda x: x["chunk_id"])
-                full_text = "\n".join(c["text"] for c in chunks)
-                full_chunk_count = len(chunks)
-
-            max_per_doc = self.retrieval_config.get_rag_max_per_doc_chars(is_aggregation)
-            if max_per_doc > 0 and len(full_text) > max_per_doc:
-                full_text_display = full_text[:max_per_doc].rstrip() + "\n[...]"
-            else:
-                full_text_display = full_text
-
-            filename = Path(primary_file_path).name
-            context_parts.append(f"[Document: {filename}]\n{full_text_display}")
-
-            primary_chunks = file_chunks.get(primary_file_path, [])
-            if primary_chunks:
-                avg_score = sum(c["score"] for c in primary_chunks) / len(primary_chunks)
-                sample_meta = primary_chunks[0]["metadata"]
-                snippet_source = full_text if full_text else "\n".join(c["text"] for c in primary_chunks)
-                snippet = snippet_source[:300] + "..." if len(snippet_source) > 300 else snippet_source
-                sources.append({
-                    "file_path": primary_file_path,
-                    "relevance_score": round(min(1.0, avg_score * 50), 3),
-                    "content_snippet": snippet,
-                    "chunks_found": full_chunk_count or len(primary_chunks),
-                    "file_type": sample_meta.get("file_type", "unknown"),
-                })
-            else:
-                # Extremely defensive: should not happen if we had retrieval results
-                snippet = full_text[:300] + "..." if len(full_text) > 300 else full_text
-                sources.append({
-                    "file_path": primary_file_path,
-                    "relevance_score": 1.0,
-                    "content_snippet": snippet,
-                    "chunks_found": full_chunk_count,
-                    "file_type": "unknown",
-                })
-        else:
-            # Multi-file path: keep existing behavior (group by file, cap per doc).
-            files_to_process = file_chunks.items()
-            if selected_files:
-                files_to_process = [
-                    (fp, ch)
-                    for fp, ch in file_chunks.items()
-                    if any(sf in fp for sf in selected_files)
-                ]
-
-            max_per_doc = self.retrieval_config.get_rag_max_per_doc_chars(is_aggregation)
-            for fp, chunks in files_to_process:
-                chunks.sort(key=lambda x: x["chunk_id"])
-                filename = Path(fp).name
-                file_text = "\n".join(c["text"] for c in chunks)
-                if max_per_doc > 0 and len(file_text) > max_per_doc:
-                    file_text = file_text[:max_per_doc].rstrip() + "\n[...]"
-                context_parts.append(f"[Document: {filename}]\n{file_text}")
-                avg_score = sum(c["score"] for c in chunks) / len(chunks)
-                snippet = file_text[:300] + "..." if len(file_text) > 300 else file_text
-                sources.append({
-                    "file_path": fp,
-                    "relevance_score": round(min(1.0, avg_score * 50), 3),
-                    "content_snippet": snippet,
-                    "chunks_found": len(chunks),
-                    "file_type": chunks[0]["metadata"].get("file_type", "unknown"),
-                })
-
-            sources.sort(key=lambda x: x["relevance_score"], reverse=True)
-            source_limit = self.retrieval_config.get_source_limit(
-                query_type, explicit_filename is not None, is_aggregation
-            )
-            sources = sources[:source_limit]
-
-        return {
-            "context": "\n\n---\n\n".join(context_parts),
-            "sources": sources,
-            "retrieval_count": retrieval_count,
-            "rerank_count": rerank_count,
-        }
-
-    async def query(self, question: str, max_results: int = 15, conversation_history: list = None) -> QueryResult:
-        """
-        Query the document index.
-        Primary path (B.6 migrated): tool-calling (Groq) or planner (Ollama/Gemini) → model chooses tools → answer.
-        Greeting, listing, and search are handled by the model + tools; no regex routing in the main path.
-        """
-        start_time = asyncio.get_event_loop().time()
-        if self.llm_service.supports_tool_calling():
-            return await self._query_via_tool_loop(question, conversation_history or [])
-        # B.4/B.5: two-step planner (with safe default from classifier when planner invalid)
-        try:
-            return await self._query_via_planner_fallback(question, conversation_history or [])
-        except Exception as e:
-            logger.warning("Planner path failed: %s; falling back to legacy classifier", e)
-
-        # B.6 Legacy fallback: classifier-based routing only when planner path raises.
-        # Primary paths (greeting / listing / search) are migrated to tool/planner flow above.
-        try:
-            route_task = asyncio.create_task(self.router.resolve(question, conversation_history))
-            embed_task = asyncio.to_thread(self.embedding_service.encode_single_text, question)
-            route_result = await route_task
-            query_embedding = await embed_task
-            query_type = route_result.query_type
-
-            if route_result.route in (Route.GREETING, Route.GENERAL):
-                response_text = await self._generate_direct_response(question, query_type)
-                return QueryResult(
-                    message=response_text, sources=[],
-                    response_time=round(asyncio.get_event_loop().time() - start_time, 3),
-                    query_type=query_type, retrieval_count=0, rerank_count=0,
-                )
-
-            if route_result.route == Route.DOCUMENT_LISTING:
-                result = await self._get_document_listing(question=question)
-                result.response_time = round(asyncio.get_event_loop().time() - start_time, 3)
-                return result
-
-            rag = await self._retrieve_and_build_context(question, query_type, query_embedding)
-            if rag is None:
-                return QueryResult(
-                    message="I don't have information about that in the current documents.",
-                    sources=[], response_time=round(asyncio.get_event_loop().time() - start_time, 3),
-                    query_type=query_type, retrieval_count=0, rerank_count=0,
-                )
-
-            response_text = await self.llm_service.generate_response(
-                question, rag["context"], conversation_history=conversation_history or []
-            )
-            return QueryResult(
-                message=response_text, sources=rag["sources"],
-                response_time=round(asyncio.get_event_loop().time() - start_time, 3),
-                query_type=query_type,
-                retrieval_count=rag["retrieval_count"], rerank_count=rag["rerank_count"],
-            )
-
-        except Exception as e:
-            logger.error(f"Query failed: {e}")
-            return QueryResult(
-                message=f"Sorry, I encountered an error while processing your query: {str(e)}",
-                sources=[], response_time=round(asyncio.get_event_loop().time() - start_time, 3),
-                query_type="error",
-                retrieval_count=0, rerank_count=0,
-            )
-
-    async def query_stream(
-        self, question: str, max_results: int = 15, conversation_history: list = None
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        """
-        Same pipeline as query() but yields SSE events (meta, token, done, error).
-        Primary path: tool loop or planner; legacy classifier only when planner raises.
-        """
-        start_time = asyncio.get_event_loop().time()
-        if self.llm_service.supports_tool_calling():
-            async for event_type, payload in self._query_stream_via_tool_loop(question, conversation_history or []):
-                yield (event_type, payload)
-            return
-        # B.4/B.5: two-step planner (with safe default when planner invalid)
-        try:
-            async for event_type, payload in self._query_stream_via_planner_fallback(question, conversation_history or []):
-                yield (event_type, payload)
-            return
-        except Exception as e:
-            logger.warning("Planner stream path failed: %s; falling back to legacy classifier", e)
-        # B.6 Legacy fallback: classifier-based routing only when planner path raises.
-        try:
-            route_task = asyncio.create_task(self.router.resolve(question, conversation_history))
-            embed_task = asyncio.to_thread(self.embedding_service.encode_single_text, question)
-            route_result = await route_task
-            query_embedding = await embed_task
-            query_type = route_result.query_type
-
-            if route_result.route in (Route.GREETING, Route.GENERAL):
-                yield ("meta", {"sources": [], "query_type": query_type})
-                response_text = await self._generate_direct_response(question, query_type)
-                rt = round(asyncio.get_event_loop().time() - start_time, 3)
-                yield ("token", response_text)
-                yield ("done", {"message": response_text, "response_time": rt, "query_type": query_type, "retrieval_count": 0, "rerank_count": 0})
-                return
-
-            if route_result.route == Route.DOCUMENT_LISTING:
-                result = await self._get_document_listing(question=question)
-                result.response_time = round(asyncio.get_event_loop().time() - start_time, 3)
-                yield ("meta", {"sources": result.sources, "query_type": query_type})
-                yield ("token", result.message)
-                yield ("done", {"message": result.message, "response_time": result.response_time, "query_type": query_type, "retrieval_count": getattr(result, "retrieval_count", 0) or 0, "rerank_count": 0})
-                return
-
-            rag = await self._retrieve_and_build_context(question, query_type, query_embedding)
-            if rag is None:
-                yield ("meta", {"sources": []})
-                msg = "I don't have information about that in the current documents."
-                yield ("token", msg)
-                yield ("done", {"message": msg, "response_time": round(asyncio.get_event_loop().time() - start_time, 3)})
-                return
-
-            yield ("meta", {"sources": rag["sources"], "query_type": query_type})
-            full_parts: List[str] = []
-            async for delta in self.llm_service.generate_response_stream(
-                question, rag["context"], conversation_history=conversation_history or []
-            ):
-                full_parts.append(delta)
-                yield ("token", delta)
-            rt = round(asyncio.get_event_loop().time() - start_time, 3)
-            yield ("done", {"message": "".join(full_parts), "response_time": rt, "query_type": query_type, "retrieval_count": rag["retrieval_count"], "rerank_count": rag["rerank_count"]})
-        except Exception as e:
-            logger.error(f"Query stream failed: {e}")
-            yield ("error", {"detail": str(e)})
 
     async def get_stats(self) -> Dict:
-        """Get comprehensive stats (DB for totals; only a small sample of paths to avoid large payloads)."""
+        """Return comprehensive stats (DB totals, a small sample of paths for the UI)."""
         try:
             collection_count = self.vector_store.get_collection_count()
             db_stats = await self.database_service.get_document_stats()
             total_files = db_stats.get("total_documents", 0) or 0
-            # Fetch only a small sample of paths for UI preview; avoid returning hundreds of paths
             indexed_files_sample = await self.database_service.get_indexed_file_paths(limit=20)
             return {
                 "total_files": total_files,
                 "total_chunks": collection_count,
-                "current_directory": self.current_directory,
+                "current_directory": self.indexing.current_directory,
                 "indexed_files_count": total_files,
                 "indexed_files": indexed_files_sample,
-                "metadata_cache_size": len(self._metadata_cache),
+                "metadata_cache_size": len(self.indexing._metadata_cache),
                 "avg_chunks_per_file": (collection_count / total_files) if total_files else 0,
                 "embedding_model": self.embedding_service.model_name,
                 "chunk_size": self.chunker.chunk_size,
-                "chunk_overlap": self.chunker.chunk_overlap
+                "chunk_overlap": self.chunker.chunk_overlap,
             }
         except Exception as e:
             logger.error(f"Error getting stats: {e}")
             return {"error": str(e)}
 
     def get_llm_token_usage(self) -> Dict[str, int]:
-        """
-        Expose cumulative LLM token usage for monitoring.
-        Values are best-effort and primarily populated when using Groq.
-        """
+        """Expose cumulative LLM token usage for monitoring (mainly Groq)."""
         try:
             return self.llm_service.get_token_usage()
         except Exception:
             return {"prompt": 0, "completion": 0, "total": 0}
 
-    async def cleanup(self):
-        """Proper cleanup method"""
+    async def cleanup(self) -> None:
+        """Release all resources."""
         try:
-            # Cleanup all services
             await self.llm_service.cleanup()
             self.vector_store.cleanup()
             self.embedding_service.cleanup()
-            
-            self._metadata_cache.clear()
-            
+            self.indexing._metadata_cache.clear()
             logger.info("DocumentProcessorOrchestrator cleaned up successfully")
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
-    
-    async def clear_collection(self):
-        """Clear all documents from the vector store and reset tracking"""
-        try:
-            # Clear vector store
-            await self.vector_store.clear_collection()
-            
-            self._metadata_cache.clear()
-            self.router.clear_cache()
-            
-            logger.info("Document collection cleared successfully")
-        except Exception as e:
-            logger.error(f"Error clearing collection: {e}")
-            raise
-    
-    def is_ready(self) -> bool:
-        """Check if the orchestrator is ready (basic services initialized)"""
-        try:
-            # Check if basic services are available
-            return (
-                self.text_extractor is not None and
-                self.chunker is not None and
-                self.file_validator is not None
-            )
-        except Exception:
-            return False

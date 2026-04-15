@@ -117,7 +117,7 @@ def test_reciprocal_rank_fusion():
     print(f"\nRanking: {fused_ids}")
     
     # Analyze fusion
-    analysis = hybrid.analyze_fusion(semantic_results, keyword_results, fused, top_k=3)
+    analysis = hybrid._analyze_fusion(semantic_results, keyword_results, fused, top_k=3)
     print(f"\nFusion analysis:")
     print(f"  Semantic count: {analysis['semantic_count']}")
     print(f"  Keyword count: {analysis['keyword_count']}")

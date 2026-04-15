@@ -90,7 +90,7 @@ class HybridSearchService:
         
         return fused_results
     
-    def analyze_fusion(
+    def _analyze_fusion(
         self,
         semantic_results: List[Tuple[str, float, Dict]],
         keyword_results: List[Tuple[str, float, Dict]],
@@ -98,10 +98,7 @@ class HybridSearchService:
         top_k: int = 5
     ) -> Dict:
         """
-        Analyze how fusion affected rankings (for debugging/optimization)
-        
-        Returns:
-            Dict with fusion statistics
+        Analyze how fusion affected rankings (debug/optimization only — not called in production).
         """
         semantic_ids = {doc_id for doc_id, _, _ in semantic_results[:top_k]}
         keyword_ids = {doc_id for doc_id, _, _ in keyword_results[:top_k]}

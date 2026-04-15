@@ -15,14 +15,28 @@ class Settings:
     CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR") or os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
     EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL_NAME") or os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
-    # Chunking
-    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
-    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
+    # Chunking — values are in TOKENS, not characters.
+    # BAAI/bge-small-en-v1.5 has a 512-token context window; keep CHUNK_SIZE <= MAX_CHUNK_TOKENS.
+    # Rule of thumb: 1 token ≈ 4 English characters.
+    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "300"))          # tokens per chunk
+    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "50"))     # overlap in tokens
+    MAX_CHUNK_TOKENS: int = int(os.getenv("MAX_CHUNK_TOKENS", "512"))  # hard cap = embedding model max
 
     # File processing
     MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "10"))
     SUPPORTED_EXTENSIONS: List[str] = os.getenv("SUPPORTED_EXTENSIONS", ".pdf,.docx,.txt,.xlsx,.xls,.pptx").split(",")
+
+    # Context Compression
+    # Off by default: compression calls the LLM once *per retrieved chunk* (in parallel),
+    # adding significant latency on Ollama and wasting API tokens on Groq/Gemini for
+    # most queries. Enable it only for deployments where context regularly exceeds the
+    # LLM's context window and a fast provider is in use.
+    CONTEXT_COMPRESSION_ENABLED: bool = os.getenv("CONTEXT_COMPRESSION_ENABLED", "false").lower() in ("1", "true", "yes")
+    # Minimum total retrieved-context size (chars) before compression is even attempted.
+    # At the default of 8 000 chars ≈ 2 000 tokens — well above chunk noise but below
+    # typical 4 k-token Ollama windows. Raise this for large-context cloud models.
+    CONTEXT_COMPRESSION_MIN_CHARS: int = int(os.getenv("CONTEXT_COMPRESSION_MIN_CHARS", "8000"))
 
     # LLM (set LLM_PROVIDER to switch: ollama | gemini | groq)
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")
@@ -73,6 +87,7 @@ class Settings:
             "max_file_size_mb": self.MAX_FILE_SIZE_MB,
             "chunk_size": self.CHUNK_SIZE,
             "chunk_overlap": self.CHUNK_OVERLAP,
+            "max_chunk_tokens": self.MAX_CHUNK_TOKENS,
             "ollama_base_url": self.OLLAMA_BASE_URL,
             "ollama_model": self.OLLAMA_MODEL,
             "batch_size": self.BATCH_SIZE,

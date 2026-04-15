@@ -2,9 +2,17 @@
 Query classifier: pure heuristic, zero LLM calls.
 Returns one of: greeting, general, document_listing, document_search.
 
-NOTE (Phase A / Strategic plan): These patterns are INTERIM until the planner+tools
-architecture is in place. Do not expand the regex list as a long-term strategy;
-see docs/REFACTOR_PLAN_STRATEGIC_AI.md.
+Role in the pipeline
+--------------------
+1. Pre-filter in _run_shared_pipeline(): called before the planner on every query
+   for Ollama/Gemini providers.  GREETING, GENERAL, and DOCUMENT_LISTING routes
+   are short-circuited here without any LLM call.  Only DOCUMENT_SEARCH proceeds
+   to the planner.
+2. Fallback in _pipeline_legacy(): used as the full routing path when the planner
+   raises an exception.
+
+Expanding the regex/word lists is fine; they are the authoritative signal for
+non-search intents and carry no LLM latency cost.
 """
 
 import logging

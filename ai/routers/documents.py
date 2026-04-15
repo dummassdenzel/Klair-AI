@@ -72,6 +72,7 @@ async def set_directory(request: Request):
             max_file_size_mb=settings.MAX_FILE_SIZE_MB,
             chunk_size=settings.CHUNK_SIZE,
             chunk_overlap=settings.CHUNK_OVERLAP,
+            max_chunk_tokens=settings.MAX_CHUNK_TOKENS,
             ollama_base_url=settings.OLLAMA_BASE_URL,
             ollama_model=settings.OLLAMA_MODEL,
             gemini_api_key=settings.GEMINI_API_KEY,
@@ -89,6 +90,23 @@ async def set_directory(request: Request):
         else:
             logger.info(f"Initializing document processor for directory: {directory_path}")
             await doc_processor.clear_all_data()
+
+        # Start background tasks now that the DB is in its correct state.
+        # Calling initialize() here (rather than in __init__) guarantees we are
+        # inside an async context and that _load_existing_metadata reads the DB
+        # *after* any clear_all_data() call has committed.
+        await doc_processor.initialize()
+
+        # Invalidate any cached query results — they belong to the old index
+        app_cache = getattr(request.app.state, "query_cache", None)
+        if app_cache:
+            app_cache.clear()
+            logger.info("Query cache cleared for new directory")
+
+        # When background content indexing finishes, clear the cache again so the
+        # first post-indexing queries are not served stale "no information" answers
+        if app_cache:
+            doc_processor.set_post_index_hook(app_cache.clear)
 
         file_monitor = FileMonitorService(doc_processor)
         init_timeout = settings.INITIALIZE_DIRECTORY_TIMEOUT

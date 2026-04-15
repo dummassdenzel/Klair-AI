@@ -63,9 +63,6 @@ class RetrievalConfig:
     general_rerank_top_k: int = 15
     general_final_top_k: int = 10
 
-    # BM25 boost settings
-    bm25_boost: float = 0.1
-
     # File-diversity retrieval: max chunks per file in final selection (general search only).
     # Prevents one document from dominating when final_top_k is small (e.g. 5).
     # Specific-document queries (explicit_filename) do not apply this cap.
@@ -138,4 +135,8 @@ class RetrievalConfig:
 
 # Default configuration instance
 default_retrieval_config = RetrievalConfig()
+
+# Separator used between context chunks when building and parsing retrieved document context.
+# Both RetrievalService (joins) and QueryPipelineService (splits) must use the same value.
+CONTEXT_CHUNK_SEP = "\n\n---\n\n"
 

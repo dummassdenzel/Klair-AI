@@ -180,6 +180,15 @@ class BM25Service:
             logger.error(f"BM25 search failed: {e}")
             return []
     
+    def get_texts(self, chunk_ids: List[str]) -> Dict[str, str]:
+        """Return a mapping of chunk_id -> text for the requested IDs.
+        
+        Used to recover document text for BM25-only results after RRF fusion.
+        Any IDs not found in the corpus are silently omitted.
+        """
+        id_set = set(chunk_ids)
+        return {doc["id"]: doc["text"] for doc in self.corpus if doc["id"] in id_set}
+
     def clear(self) -> None:
         """Clear all BM25 data"""
         self.bm25 = None

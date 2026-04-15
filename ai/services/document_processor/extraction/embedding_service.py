@@ -71,6 +71,19 @@ class EmbeddingService:
             logger.error(f"Error getting embedding dimension: {e}")
             return 0
     
+    def get_tokenizer(self):
+        """
+        Return the underlying HuggingFace tokenizer from the loaded SentenceTransformer.
+        Triggers lazy model initialization if the model has not been loaded yet.
+        Returns None if the model does not expose a tokenizer attribute.
+        """
+        try:
+            self._initialize_model()
+            return getattr(self.embed_model, "tokenizer", None)
+        except Exception as e:
+            logger.warning("Could not retrieve tokenizer from embedding model: %s", e)
+            return None
+
     def reload_model(self, model_name: str = None):
         """Reload the embedding model"""
         if model_name:

@@ -53,6 +53,12 @@ class QueryCache:
         self._order[key] = None
         self._order.move_to_end(key)
 
+    def clear(self) -> None:
+        """Invalidate all cache entries. Call when the document index changes."""
+        self._store.clear()
+        self._order.clear()
+        logger.debug("Query cache cleared")
+
     def __len__(self) -> int:
         return len(self._store)
 

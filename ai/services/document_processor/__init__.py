@@ -1,27 +1,27 @@
 """
 Document Processor Service Package
 
-This package provides a modular, service-oriented architecture for processing documents
-and building a RAG (Retrieval-Augmented Generation) system.
+Modular, service-oriented architecture for processing documents and building a
+RAG (Retrieval-Augmented Generation) system.
 
-Services:
-- TextExtractor: Handles text extraction from various file formats
-- DocumentChunker: Creates semantic chunks from document text
-- EmbeddingService: Manages document embeddings using sentence transformers
-- VectorStoreService: Handles ChromaDB vector store operations
-- LLMService: Manages LLM interactions via Ollama
-- FileValidator: Validates files and extracts metadata
-- DocumentProcessorOrchestrator: Main orchestrator that coordinates all services
+Architecture (Phase 7 decomposition):
+- IndexingService       : file ingestion, chunking, embedding, storage
+- RetrievalService      : hybrid search, reranking, context assembly
+- QueryPipelineService  : routing, tool calling, planner, response generation
+- DocumentProcessorOrchestrator : thin coordinator that wires all services
 
 Usage:
     from services.document_processor import DocumentProcessorOrchestrator
-    
+
     processor = DocumentProcessorOrchestrator()
     await processor.initialize_from_directory("/path/to/documents")
     result = await processor.query("What is this document about?")
 """
 
 from .orchestrator import DocumentProcessorOrchestrator
+from .indexing_service import IndexingService, MetadataCache
+from .retrieval_service import RetrievalService
+from .query_pipeline import QueryPipelineService
 from .models import (
     DocumentChunk, QueryResult, FileMetadata, ProcessingResult,
     ChunkMatch, ChunkDiffResult
@@ -38,6 +38,10 @@ from .updates import (
 
 __all__ = [
     "DocumentProcessorOrchestrator",
+    "IndexingService",
+    "MetadataCache",
+    "RetrievalService",
+    "QueryPipelineService",
     "DocumentChunk",
     "QueryResult", 
     "FileMetadata",

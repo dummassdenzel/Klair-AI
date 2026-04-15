@@ -59,7 +59,7 @@ async def _build_conversation_history(session_id: int, doc_processor) -> list:
 
         # Prefer orchestrator's summarization-aware history builder when available
         if hasattr(doc_processor, "build_conversation_history"):
-            return await doc_processor.build_conversation_history(pairs)
+            return await doc_processor.build_conversation_history(pairs, session_id=session_id)
 
         # Fallback: keep last 3 exchanges (previous behavior)
         recent = pairs[-3:] if len(pairs) > 3 else pairs
@@ -121,7 +121,13 @@ async def chat(chat_request: ChatRequest, request: Request, state=Depends(requir
         )
 
         if cache and cache_key:
-            cache.set(cache_key, {"message": response.message, "sources": response.sources})
+            cache.set(cache_key, {
+                "message": response.message,
+                "sources": response.sources,
+                "query_type": getattr(response, "query_type", "document_search"),
+                "retrieval_count": getattr(response, "retrieval_count", 0),
+                "rerank_count": getattr(response, "rerank_count", 0),
+            })
 
         await db_service.add_chat_message(
             session_id=chat_session.id,
@@ -148,7 +154,27 @@ async def chat_stream(chat_request: ChatRequest, request: Request, state=Depends
         conversation_history = await _build_conversation_history(chat_session.id, state.doc_processor)
         rewritten_message = await _rewrite_query_for_session(chat_session.id, chat_request.message)
 
+        # Resolve cache key once so both the lookup and the populate use the same key
+        cache = getattr(state, "query_cache", None)
+        cache_key = get_query_cache_key(chat_session.id, rewritten_message) if cache else None
+
         async def event_generator():
+            # --- Cache hit: serve cached response as SSE events ---
+            if cache and cache_key:
+                cached = cache.get(cache_key)
+                if cached is not None:
+                    logger.info(f"Stream query cache hit for session {chat_session.id}")
+                    yield _format_sse("meta", {"sources": cached["sources"], "session_id": chat_session.id})
+                    yield _format_sse("token", {"delta": cached["message"]})
+                    yield _format_sse("done", {
+                        "message": cached["message"],
+                        "response_time": 0,
+                        "query_type": cached.get("query_type", "cached"),
+                        "retrieval_count": cached.get("retrieval_count", 0),
+                        "rerank_count": cached.get("rerank_count", 0),
+                    })
+                    return
+
             sources = []
             final_message = ""
             response_time = 0.0
@@ -175,6 +201,16 @@ async def chat_stream(chat_request: ChatRequest, request: Request, state=Depends
                     elif event_type == "error":
                         yield _format_sse("error", payload)
                         return
+
+                # --- Cache populate: only on a successful, non-empty response ---
+                if cache and cache_key and final_message:
+                    cache.set(cache_key, {
+                        "message": final_message,
+                        "sources": sources,
+                        "query_type": query_type,
+                        "retrieval_count": retrieval_count,
+                        "rerank_count": rerank_count,
+                    })
 
                 await db_service.add_chat_message(
                     session_id=chat_session.id,
