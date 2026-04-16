@@ -206,7 +206,7 @@ Set `rerank_top_k = 0` for all query types in `RetrievalConfig`. The `_retrieve_
 
 | | |
 |---|---|
-| **Status** | `[ ]` |
+| **Status** | `[x]` |
 | **Severity** | High |
 | **Type** | Context window under-utilization |
 | **File** | `ai/services/document_processor/query_config.py` |
@@ -242,7 +242,7 @@ This still uses only ~29% of the Groq context window but significantly improves 
 
 | | |
 |---|---|
-| **Status** | `[ ]` |
+| **Status** | `[x]` |
 | **Severity** | Medium |
 | **Type** | Regex over-trigger (false positives) |
 | **File** | `ai/services/document_processor/query_config.py` |
@@ -410,8 +410,8 @@ Remove both methods. `switch_provider()` is the correct runtime API.
 | 2.1 | Upgrade embedding model to bge-base | `[x]` | config.py default changed; re-index required |
 | 2.2 | Add BGE query instruction prefix | `[x]` | encode_query() added; 4 call sites updated; re-index required |
 | 3.1 | Disable or replace MS MARCO reranker | `[x]` | Removed entirely — reranker_service.py deleted, all call sites cleaned up |
-| 4.1 | Increase final_top_k and max_chunks_per_file | `[ ]` | Config values only |
-| 4.2 | Tighten is_aggregation_query patterns | `[ ]` | Remove broad regexes |
+| 4.1 | Increase final_top_k and max_chunks_per_file | `[x]` | comprehensive_final_top_k 5→12, max_chunks_per_file 2→4 |
+| 4.2 | Tighten is_aggregation_query patterns | `[x]` | Removed 2 over-broad patterns; added 2 precise ones |
 | 5.1 | Spreadsheet tabular extraction pipeline | `[ ]` | Full overhaul — new extractor module |
 | 6.1 | Raise planner token limit + log fallback | `[ ]` | Small change |
 | 7.1 | Fix Gemini streaming | `[ ]` | Refactor generate_response_stream() |
