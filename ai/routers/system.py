@@ -14,6 +14,7 @@ router = APIRouter(prefix="/api", tags=["system"])
 
 class LLMConfigUpdate(BaseModel):
     provider: str
+    temperature: Optional[float] = None
     ollama_model: Optional[str] = None
     ollama_base_url: Optional[str] = None
     gemini_model: Optional[str] = None
@@ -117,6 +118,7 @@ async def get_llm_config():
     provider = (settings.LLM_PROVIDER or "ollama").lower()
     return {
         "provider": provider,
+        "temperature": getattr(settings, "LLM_TEMPERATURE", 0.1),
         "ollama_model": settings.OLLAMA_MODEL,
         "ollama_base_url": settings.OLLAMA_BASE_URL,
         "gemini_model": settings.GEMINI_MODEL,
@@ -135,6 +137,10 @@ async def update_llm_config(body: LLMConfigUpdate, request: Request):
 
     # Build kwargs for Settings.update()
     setting_updates: dict = {"llm_provider": provider}
+    if body.temperature is not None:
+        if not (0.0 <= body.temperature <= 1.0):
+            raise HTTPException(status_code=400, detail="temperature must be between 0.0 and 1.0")
+        setting_updates["llm_temperature"] = body.temperature
     if provider == "ollama":
         if body.ollama_model:
             setting_updates["ollama_model"] = body.ollama_model
@@ -175,10 +181,11 @@ async def update_llm_config(body: LLMConfigUpdate, request: Request):
         except Exception as e:
             logger.warning("Could not switch live LLMService provider: %s", e)
 
-    logger.info("LLM config updated: provider=%s", provider)
+    logger.info("LLM config updated: provider=%s, temperature=%s", provider, getattr(settings, "LLM_TEMPERATURE", 0.1))
     return {
         "status": "success",
         "provider": provider,
+        "temperature": getattr(settings, "LLM_TEMPERATURE", 0.1),
         "ollama_model": settings.OLLAMA_MODEL,
         "ollama_base_url": settings.OLLAMA_BASE_URL,
         "gemini_model": settings.GEMINI_MODEL,

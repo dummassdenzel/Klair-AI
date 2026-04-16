@@ -32,6 +32,9 @@
   let groqApiKey = $state('');
   let groqApiKeySet = $state(false);
 
+  // Generation temperature (shared across all providers)
+  let temperature = $state(0.1);
+
   const PROVIDER_LABELS: Record<LLMProvider, string> = {
     ollama: 'Ollama',
     gemini: 'Gemini',
@@ -48,6 +51,7 @@
     try {
       const cfg: LLMConfig = await apiService.getLLMConfig();
       selectedProvider = cfg.provider;
+      temperature = cfg.temperature ?? 0.1;
       ollamaBaseUrl = cfg.ollama_base_url;
       ollamaModel = cfg.ollama_model;
       geminiModel = cfg.gemini_model;
@@ -65,7 +69,7 @@
     saveState = 'saving';
     errorMessage = '';
 
-    const update: LLMConfigUpdate = { provider: selectedProvider };
+    const update: LLMConfigUpdate = { provider: selectedProvider, temperature };
 
     if (selectedProvider === 'ollama') {
       update.ollama_model = ollamaModel.trim() || undefined;
@@ -80,9 +84,10 @@
 
     try {
       const result = await apiService.updateLLMConfig(update);
-      // Sync key-set flags from response
+      // Sync key-set flags and temperature from response
       geminiApiKeySet = result.gemini_api_key_set;
       groqApiKeySet = result.groq_api_key_set;
+      if (result.temperature != null) temperature = result.temperature;
       // Clear plaintext key inputs after a successful save
       geminiApiKey = '';
       groqApiKey = '';
@@ -320,8 +325,47 @@
             </div>
           {/if}
 
+          <!-- Temperature control -->
+          <div class="mt-6 pt-5 border-t border-gray-100 dark:border-gray-800">
+            <div class="flex items-center justify-between mb-2">
+              <div>
+                <label for="llm-temperature" class="block text-xs font-medium text-gray-700 dark:text-gray-300">
+                  Response Temperature
+                </label>
+                <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  Controls answer randomness. Lower = more consistent and factual.
+                </p>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-mono font-semibold text-[#443C68] dark:text-purple-300 w-8 text-right">
+                  {temperature.toFixed(2)}
+                </span>
+                {#if temperature <= 0.2}
+                  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">
+                    Recommended
+                  </span>
+                {/if}
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <span class="text-xs text-gray-400 dark:text-gray-500 shrink-0">Precise</span>
+              <input
+                id="llm-temperature"
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                bind:value={temperature}
+                class="flex-1 h-2 rounded-full appearance-none cursor-pointer
+                  accent-[#443C68]
+                  bg-gray-200 dark:bg-gray-700"
+              />
+              <span class="text-xs text-gray-400 dark:text-gray-500 shrink-0">Creative</span>
+            </div>
+          </div>
+
           <!-- Save row -->
-          <div class="flex items-center justify-between mt-6 pt-5 border-t border-gray-100 dark:border-gray-800">
+          <div class="flex items-center justify-between mt-5">
             {#if saveState === 'success'}
               <span class="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

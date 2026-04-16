@@ -41,6 +41,10 @@ class Settings:
     # LLM (set LLM_PROVIDER to switch: ollama | gemini | groq)
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")
     LLM_MAX_RESPONSE_TOKENS: int = int(os.getenv("LLM_MAX_RESPONSE_TOKENS", "8192"))
+    # RAG generation temperature (0.0 = fully deterministic, 1.0 = fully creative).
+    # Default 0.1: low temperature keeps factual document answers consistent and reproducible.
+    # Planner / classifier calls always use 0.1 regardless of this setting.
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
     # Ollama (local)
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "tinyllama")
@@ -96,7 +100,7 @@ class Settings:
 
     _UPDATABLE = {
         "chunk_size", "chunk_overlap", "max_file_size_mb",
-        "llm_provider",
+        "llm_provider", "llm_temperature",
         "ollama_model", "ollama_base_url",
         "gemini_model", "gemini_api_key",
         "groq_model", "groq_api_key",
@@ -109,6 +113,7 @@ class Settings:
             "chunk_overlap": "CHUNK_OVERLAP",
             "max_file_size_mb": "MAX_FILE_SIZE_MB",
             "llm_provider": "LLM_PROVIDER",
+            "llm_temperature": "LLM_TEMPERATURE",
             "ollama_model": "OLLAMA_MODEL",
             "ollama_base_url": "OLLAMA_BASE_URL",
             "gemini_model": "GEMINI_MODEL",
@@ -119,7 +124,7 @@ class Settings:
         for key, value in kwargs.items():
             attr = mapping.get(key)
             if attr:
-                setattr(self, attr, value)
+                setattr(self, attr, type(getattr(self, attr))(value))
 
 
 settings = Settings()

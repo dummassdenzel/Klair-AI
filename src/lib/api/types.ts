@@ -98,6 +98,7 @@ export interface ChatRequest {
 
   export interface LLMConfig {
     provider: LLMProvider;
+    temperature: number;
     ollama_model: string;
     ollama_base_url: string;
     gemini_model: string;
@@ -108,6 +109,7 @@ export interface ChatRequest {
 
   export interface LLMConfigUpdate {
     provider: LLMProvider;
+    temperature?: number;
     ollama_model?: string;
     ollama_base_url?: string;
     gemini_model?: string;

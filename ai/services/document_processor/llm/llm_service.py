@@ -111,7 +111,7 @@ class LLMService:
                 self._gemini = genai.GenerativeModel(
                     self.gemini_model,
                     generation_config={
-                        "temperature": 0.7,
+                        "temperature": 0.1,  # Low default for planner/classifier calls via generate_simple()
                         "top_p": 0.9,
                         "max_output_tokens": max_tokens,  # Same knob as Ollama; avoids cut-off for long lists
                     }
@@ -182,7 +182,8 @@ class LLMService:
             if self.provider == "gemini":
                 try:
                     max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
-                    generation_config = {"temperature": 0.7, "top_p": 0.9, "max_output_tokens": max_tokens}
+                    rag_temp = getattr(settings, "LLM_TEMPERATURE", 0.1)
+                    generation_config = {"temperature": rag_temp, "top_p": 0.9, "max_output_tokens": max_tokens}
                     result = await asyncio.to_thread(
                         self._gemini.generate_content, prompt, generation_config=generation_config
                     )
@@ -209,7 +210,7 @@ class LLMService:
                     completion = await self._groq.chat.completions.create(
                         messages=[{"role": "user", "content": prompt}],
                         model=self.groq_model,
-                        temperature=0.7,
+                        temperature=getattr(settings, "LLM_TEMPERATURE", 0.1),
                         max_completion_tokens=max_tokens,
                         stream=False,
                     )
@@ -247,7 +248,7 @@ class LLMService:
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "temperature": 0.7,
+                        "temperature": getattr(settings, "LLM_TEMPERATURE", 0.1),
                         "top_p": 0.9,
                         "max_tokens": max_tokens
                     }
@@ -280,7 +281,8 @@ class LLMService:
                 # Gemini SDK (google.generativeai) - no async stream in this codebase; yield full response as one chunk
                 try:
                     max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
-                    generation_config = {"temperature": 0.7, "top_p": 0.9, "max_output_tokens": max_tokens}
+                    rag_temp = getattr(settings, "LLM_TEMPERATURE", 0.1)
+                    generation_config = {"temperature": rag_temp, "top_p": 0.9, "max_output_tokens": max_tokens}
                     result = await asyncio.to_thread(
                         self._gemini.generate_content, prompt, generation_config=generation_config
                     )
@@ -310,7 +312,7 @@ class LLMService:
                     stream = await self._groq.chat.completions.create(
                         messages=[{"role": "user", "content": prompt}],
                         model=self.groq_model,
-                        temperature=0.7,
+                        temperature=getattr(settings, "LLM_TEMPERATURE", 0.1),
                         max_completion_tokens=max_tokens,
                         stream=True,
                     )
@@ -339,7 +341,7 @@ class LLMService:
                     "prompt": prompt,
                     "stream": True,
                     "options": {
-                        "temperature": 0.7,
+                        "temperature": getattr(settings, "LLM_TEMPERATURE", 0.1),
                         "top_p": 0.9,
                         "max_tokens": max_tokens,
                     },
