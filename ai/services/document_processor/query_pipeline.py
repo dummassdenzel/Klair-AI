@@ -77,7 +77,9 @@ class QueryPipelineService:
         "not [Document: list_documents]. When citing search results that mention a specific file, use [Document: filename]."
     )
 
-    PLANNER_MAX_TOKENS = 400
+    # 600 tokens gives a comfortable margin for long query strings inside the JSON
+    # payload without risk of truncation on verbose aggregation queries.
+    PLANNER_MAX_TOKENS = 600
 
     def __init__(
         self,
@@ -932,9 +934,15 @@ class QueryPipelineService:
 
         if tool_calls is None or (tool_calls and not validate_tool_calls(tool_calls)[0]):
             if tool_calls:
-                logger.warning("Planner output failed validation; using safe default from classifier")
+                logger.warning(
+                    "Planner output failed tool-call validation; falling back to classifier default"
+                )
             else:
-                logger.info("Planner output invalid or empty; using safe default from classifier")
+                logger.warning(
+                    "Planner output invalid JSON or empty (response: %s…); "
+                    "falling back to classifier default",
+                    planner_response[:120] if planner_response else "<empty>",
+                )
             tool_calls = await self._get_safe_tool_calls_from_classifier(
                 question, conversation_history
             )

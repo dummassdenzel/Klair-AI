@@ -24,6 +24,7 @@ from .extraction.text_extractor import TextExtractor
 from .extraction.chunker import DocumentChunker
 from .extraction.embedding_service import EmbeddingService
 from .extraction.file_validator import FileValidator
+from .extraction.spreadsheet_extractor import SpreadsheetExtractor, is_spreadsheet
 from .storage.vector_store import VectorStoreService
 from .storage.bm25_service import BM25Service
 from .retrieval.filename_trie import FilenameTrie
@@ -103,11 +104,13 @@ class IndexingService:
         update_worker: UpdateWorker,
         chunk_differ: ChunkDiffer,
         strategy_selector: UpdateStrategySelector,
+        spreadsheet_extractor: Optional[SpreadsheetExtractor] = None,
     ) -> None:
         self.text_extractor = text_extractor
         self.file_validator = file_validator
         self.chunker = chunker
         self.embedding_service = embedding_service
+        self.spreadsheet_extractor = spreadsheet_extractor or SpreadsheetExtractor()
         self.vector_store = vector_store
         self.bm25_service = bm25_service
         self.database_service = database_service
@@ -534,24 +537,44 @@ class IndexingService:
                 if removed:
                     logger.debug(f"Removed {removed} stale BM25 chunks for {file_path}")
 
-            text = await self.text_extractor.extract_text_async(file_path)
-            if not text or not text.strip():
-                logger.warning(f"No text extracted from {file_path}")
-                await self.database_service.store_document_metadata(
-                    file_path=file_path,
-                    file_hash=current_hash,
-                    file_type=file_metadata["file_type"],
-                    file_size=file_metadata["size_bytes"],
-                    last_modified=file_metadata["modified_at"],
-                    content_preview="",
-                    chunks_count=0,
-                    processing_status="error",
+            if is_spreadsheet(file_path):
+                # Spreadsheets use a dedicated row-group extractor that preserves
+                # table structure across chunks (prose chunker destroys tables).
+                chunks, content_preview = await asyncio.to_thread(
+                    self.spreadsheet_extractor.extract_chunks, file_path
                 )
-                self.files_being_processed.discard(file_path)
-                return
-
-            chunks = self.chunker.create_chunks(text, file_path)
-            content_preview = text[:500]
+                if not chunks:
+                    logger.warning(f"No data extracted from spreadsheet {file_path}")
+                    await self.database_service.store_document_metadata(
+                        file_path=file_path,
+                        file_hash=current_hash,
+                        file_type=file_metadata["file_type"],
+                        file_size=file_metadata["size_bytes"],
+                        last_modified=file_metadata["modified_at"],
+                        content_preview="",
+                        chunks_count=0,
+                        processing_status="error",
+                    )
+                    self.files_being_processed.discard(file_path)
+                    return
+            else:
+                text = await self.text_extractor.extract_text_async(file_path)
+                if not text or not text.strip():
+                    logger.warning(f"No text extracted from {file_path}")
+                    await self.database_service.store_document_metadata(
+                        file_path=file_path,
+                        file_hash=current_hash,
+                        file_type=file_metadata["file_type"],
+                        file_size=file_metadata["size_bytes"],
+                        last_modified=file_metadata["modified_at"],
+                        content_preview="",
+                        chunks_count=0,
+                        processing_status="error",
+                    )
+                    self.files_being_processed.discard(file_path)
+                    return
+                chunks = self.chunker.create_chunks(text, file_path)
+                content_preview = text[:500]
             embeddings = self.embedding_service.encode_texts([chunk.text for chunk in chunks])
             await self.vector_store.batch_insert_chunks(chunks, embeddings)
             bm25_documents = [

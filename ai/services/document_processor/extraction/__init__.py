@@ -6,6 +6,7 @@ from .file_validator import FileValidator
 from .embedding_service import EmbeddingService
 from .pptx_converter import PPTXConverter
 from .ocr_service import OCRService
+from .spreadsheet_extractor import SpreadsheetExtractor, is_spreadsheet
 
 __all__ = [
     "TextExtractor",
@@ -13,6 +14,8 @@ __all__ = [
     "FileValidator",
     "EmbeddingService",
     "PPTXConverter",
-    "OCRService"
+    "OCRService",
+    "SpreadsheetExtractor",
+    "is_spreadsheet",
 ]
 

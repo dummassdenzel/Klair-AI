@@ -22,6 +22,7 @@ from .extraction.chunker import DocumentChunker
 from .extraction.embedding_service import EmbeddingService
 from .extraction.file_validator import FileValidator
 from .extraction.ocr_service import OCRService
+from .extraction.spreadsheet_extractor import SpreadsheetExtractor
 from .storage.vector_store import VectorStoreService
 from .storage.bm25_service import BM25Service
 from .llm.llm_service import LLMService
@@ -110,6 +111,10 @@ class DocumentProcessorOrchestrator:
         # Single UpdateQueue shared by UpdateWorker and IndexingService.
         _update_queue = UpdateQueue(max_queue_size=1000)
 
+        # Single SpreadsheetExtractor instance shared by all services that need
+        # to produce chunks from XLS/XLSX files (avoids duplicate instantiation).
+        self.spreadsheet_extractor = SpreadsheetExtractor()
+
         self.chunk_differ = ChunkDiffer(self.embedding_service)
         self.strategy_selector = UpdateStrategySelector()
         self.update_executor = UpdateExecutor(
@@ -121,6 +126,7 @@ class DocumentProcessorOrchestrator:
             database_service=self.database_service,
             chunk_differ=self.chunk_differ,
             file_validator=self.file_validator,
+            spreadsheet_extractor=self.spreadsheet_extractor,
         )
         _update_worker = UpdateWorker(
             update_queue=_update_queue,
@@ -129,6 +135,7 @@ class DocumentProcessorOrchestrator:
             strategy_selector=self.strategy_selector,
             chunker=self.chunker,
             text_extractor=self.text_extractor,
+            spreadsheet_extractor=self.spreadsheet_extractor,
         )
 
         # ── Composed services ─────────────────────────────────────────────────
@@ -145,6 +152,7 @@ class DocumentProcessorOrchestrator:
             update_worker=_update_worker,
             chunk_differ=self.chunk_differ,
             strategy_selector=self.strategy_selector,
+            spreadsheet_extractor=self.spreadsheet_extractor,
         )
 
         self.retrieval = RetrievalService(

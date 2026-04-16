@@ -282,10 +282,10 @@ if re.search(r"add\s+(up|together)\s+all", q): return True
 
 | | |
 |---|---|
-| **Status** | `[ ]` |
+| **Status** | `[x]` |
 | **Severity** | High |
 | **Type** | Modality mismatch — prose chunker applied to tabular data |
-| **File** | `ai/services/document_processor/extraction/` (new extractor needed) |
+| **File** | `ai/services/document_processor/extraction/spreadsheet_extractor.py` (new) |
 
 **Problem:**  
 The `DocumentChunker` is a generic sentence/paragraph splitter. It splits text at sentence boundaries, targeting 300-token windows. When an XLS/XLSX file is extracted to plain text, a financial table like:
@@ -317,7 +317,7 @@ Until this overhaul is done, aggregation queries over spreadsheet data will prod
 
 | | |
 |---|---|
-| **Status** | `[ ]` |
+| **Status** | `[x]` |
 | **Severity** | Medium |
 | **Type** | Output truncation — silent failure |
 | **File** | `ai/services/document_processor/query_pipeline.py` |

@@ -15,6 +15,7 @@ from .update_executor import UpdateExecutor
 from .chunk_differ import ChunkDiffer
 from .update_strategy import UpdateStrategySelector
 from ..models import DocumentChunk
+from ..extraction.spreadsheet_extractor import SpreadsheetExtractor, is_spreadsheet
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,8 @@ class UpdateWorker:
         chunk_differ: ChunkDiffer,
         strategy_selector: UpdateStrategySelector,
         chunker,  # DocumentChunker
-        text_extractor  # TextExtractor
+        text_extractor,  # TextExtractor
+        spreadsheet_extractor=None,  # SpreadsheetExtractor (optional)
     ):
         """
         Initialize UpdateWorker
@@ -52,12 +54,14 @@ class UpdateWorker:
             strategy_selector: Strategy selector to choose update approach
             chunker: Document chunker to create chunks
             text_extractor: Text extractor to get document text
+            spreadsheet_extractor: Row-group extractor for XLS/XLSX files
         """
         self.update_queue = update_queue
         self.update_executor = update_executor
         self.chunk_differ = chunk_differ
         self.strategy_selector = strategy_selector
         self.chunker = chunker
+        self.spreadsheet_extractor = spreadsheet_extractor or SpreadsheetExtractor()
         self.text_extractor = text_extractor
         
         self.is_running = False
@@ -208,14 +212,17 @@ class UpdateWorker:
         Returns:
             List of new chunks
         """
-        # Extract text
+        # Spreadsheets use a dedicated row-group extractor; prose uses text+chunker.
+        if is_spreadsheet(file_path):
+            chunks, _ = await asyncio.to_thread(
+                self.spreadsheet_extractor.extract_chunks, file_path
+            )
+            if not chunks:
+                raise ValueError(f"No data extracted from spreadsheet {file_path}")
+            return chunks
+
         text = await self.text_extractor.extract_text_async(file_path)
-        
         if not text or not text.strip():
             raise ValueError(f"No text extracted from {file_path}")
-        
-        # Create chunks
-        chunks = self.chunker.create_chunks(text, file_path)
-        
-        return chunks
+        return self.chunker.create_chunks(text, file_path)
 

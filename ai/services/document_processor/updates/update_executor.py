@@ -25,6 +25,7 @@ from ..extraction.text_extractor import TextExtractor
 from ..extraction.chunker import DocumentChunker
 from ..extraction.embedding_service import EmbeddingService
 from ..extraction.file_validator import FileValidator
+from ..extraction.spreadsheet_extractor import SpreadsheetExtractor, is_spreadsheet
 from database import DatabaseService
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class UpdateExecutor:
         database_service: DatabaseService,
         chunk_differ: ChunkDiffer,
         file_validator: Optional[FileValidator] = None,
+        spreadsheet_extractor: Optional[SpreadsheetExtractor] = None,
     ):
         """Initialize UpdateExecutor."""
         self.vector_store = vector_store
@@ -72,6 +74,7 @@ class UpdateExecutor:
         self.database_service = database_service
         self.chunk_differ = chunk_differ
         self._file_validator = file_validator if file_validator is not None else FileValidator()
+        self.spreadsheet_extractor = spreadsheet_extractor or SpreadsheetExtractor()
 
         logger.info("UpdateExecutor initialized")
 
@@ -287,14 +290,19 @@ class UpdateExecutor:
         # Remove old chunks
         await self.vector_store.remove_document_chunks(task.file_path)
         
-        # Extract text
-        text = await self.text_extractor.extract_text_async(task.file_path)
-        if not text or not text.strip():
-            raise ValueError(f"No text extracted from {task.file_path}")
-        
-        # Create chunks
-        chunks = self.chunker.create_chunks(text, task.file_path)
-        content_preview = text[:500]
+        # Extract and chunk — spreadsheets use a dedicated row-group extractor.
+        if is_spreadsheet(task.file_path):
+            chunks, content_preview = await asyncio.to_thread(
+                self.spreadsheet_extractor.extract_chunks, task.file_path
+            )
+            if not chunks:
+                raise ValueError(f"No data extracted from spreadsheet {task.file_path}")
+        else:
+            text = await self.text_extractor.extract_text_async(task.file_path)
+            if not text or not text.strip():
+                raise ValueError(f"No text extracted from {task.file_path}")
+            chunks = self.chunker.create_chunks(text, task.file_path)
+            content_preview = text[:500]
 
         embeddings = self.embedding_service.encode_texts([chunk.text for chunk in chunks])
         await self.vector_store.batch_insert_chunks(chunks, embeddings)
