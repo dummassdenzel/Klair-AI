@@ -90,7 +90,7 @@ Change `temperature=0.7` → `temperature=0.1` in all RAG generation calls (both
 
 | | |
 |---|---|
-| **Status** | `[ ]` |
+| **Status** | `[x]` |
 | **Severity** | Critical |
 | **Type** | Domain mismatch (embedding) — model-data mismatch |
 | **File** | `ai/config.py`, `ai/services/document_processor/extraction/embedding_service.py` |
@@ -122,7 +122,7 @@ EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-base-en-v1.5")
 
 | | |
 |---|---|
-| **Status** | `[ ]` |
+| **Status** | `[x]` |
 | **Severity** | Critical |
 | **Type** | API misuse (BGE prefix) |
 | **File** | `ai/services/document_processor/extraction/embedding_service.py`, `ai/services/document_processor/retrieval_service.py` |
@@ -407,8 +407,8 @@ Remove both methods. `switch_provider()` is the correct runtime API.
 | Item | Description | Status | Notes |
 |---|---|---|---|
 | 1.1 | Lower RAG temperature 0.7 → 0.1 | `[x]` | Fixed in llm_service.py + configurable via Settings UI |
-| 2.1 | Upgrade embedding model to bge-base | `[ ]` | Requires full re-index |
-| 2.2 | Add BGE query instruction prefix | `[ ]` | Requires full re-index |
+| 2.1 | Upgrade embedding model to bge-base | `[x]` | config.py default changed; re-index required |
+| 2.2 | Add BGE query instruction prefix | `[x]` | encode_query() added; 4 call sites updated; re-index required |
 | 3.1 | Disable or replace MS MARCO reranker | `[ ]` | Option A: disable (immediate); Option B: replace |
 | 4.1 | Increase final_top_k and max_chunks_per_file | `[ ]` | Config values only |
 | 4.2 | Tighten is_aggregation_query patterns | `[ ]` | Remove broad regexes |

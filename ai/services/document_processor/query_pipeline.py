@@ -444,7 +444,7 @@ class QueryPipelineService:
         """Tool: search_documents. Single hybrid retrieval + rerank; returns context and sources."""
         if not query or not str(query).strip():
             return None
-        embedding = self.embedding_service.encode_single_text(query.strip())
+        embedding = self.embedding_service.encode_query(query.strip())
         rag = await self.retrieval.retrieve_and_build_context(
             question=query.strip(),
             query_type="document_search",
@@ -468,7 +468,7 @@ class QueryPipelineService:
         if not document_name or not str(document_name).strip():
             return None
         query = document_name.strip()
-        embedding = self.embedding_service.encode_single_text(query)
+        embedding = self.embedding_service.encode_query(query)
         rag = await self.retrieval.retrieve_and_build_context(
             question=query,
             query_type="document_search",
@@ -972,7 +972,7 @@ class QueryPipelineService:
             self.router.resolve(question, conversation_history)
         )
         embed_task = asyncio.to_thread(
-            self.embedding_service.encode_single_text, question
+            self.embedding_service.encode_query, question
         )
         route_result = await route_task
         query_embedding = await embed_task

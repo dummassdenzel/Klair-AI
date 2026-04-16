@@ -13,10 +13,16 @@ class Settings:
 
     # ChromaDB / embeddings
     CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR") or os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
-    EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL_NAME") or os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    # bge-base-en-v1.5 (109M params, 768-dim) replaces the former bge-small-en-v1.5 (33M, 384-dim).
+    # Both models share the same 512-token context window and identical Python API, so chunking
+    # config and call sites are unchanged. The upgrade improves domain vocabulary coverage and
+    # cosine-similarity spread, which feeds directly into RRF fusion and reranker quality.
+    # After changing this value you MUST delete the ChromaDB directory and BM25 index, then
+    # re-index all documents (see docs/AI_QUALITY_AUDIT.md — Phase 2 Re-indexing Note).
+    EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL_NAME") or os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
     # Chunking — values are in TOKENS, not characters.
-    # BAAI/bge-small-en-v1.5 has a 512-token context window; keep CHUNK_SIZE <= MAX_CHUNK_TOKENS.
+    # Both bge-base and bge-small share a 512-token context window; keep CHUNK_SIZE <= MAX_CHUNK_TOKENS.
     # Rule of thumb: 1 token ≈ 4 English characters.
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "300"))          # tokens per chunk
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "50"))     # overlap in tokens

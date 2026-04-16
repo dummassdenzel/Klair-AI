@@ -458,7 +458,7 @@ class RetrievalService:
         )
 
         if query_embedding is None:
-            query_embedding = self.embedding_service.encode_single_text(query)
+            query_embedding = self.embedding_service.encode_query(query)
 
         semantic_task = asyncio.create_task(
             self.vector_store.search_similar(query_embedding, top_k)

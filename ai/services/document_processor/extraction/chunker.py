@@ -82,16 +82,24 @@ class DocumentChunker:
         char_window = self.chunk_size * _CHARS_PER_TOKEN
         char_overlap = self.chunk_overlap * _CHARS_PER_TOKEN
 
-        # Single-chunk fast path: whole text fits within one chunk
-        if len(text) <= char_window and self._count_tokens(text) <= self.max_tokens:
-            return [DocumentChunk(
-                text=text,
-                chunk_id=0,
-                total_chunks=1,
-                file_path=file_path,
-                start_pos=0,
-                end_pos=len(text),
-            )]
+        # Single-chunk fast path: whole text fits within one chunk.
+        # Always apply the hard-cap trim even on this path — the fallback
+        # char-based token estimate (len // 4) can undercount for dense
+        # OCR text (numbers, codes, currency), so we cannot skip the check.
+        if len(text) <= char_window:
+            chunk_text = text
+            if self._count_tokens(chunk_text) > self.max_tokens:
+                chunk_text = self._trim_to_max_tokens(chunk_text)
+            chunk_text = chunk_text.strip()
+            if chunk_text:
+                return [DocumentChunk(
+                    text=chunk_text,
+                    chunk_id=0,
+                    total_chunks=1,
+                    file_path=file_path,
+                    start_pos=0,
+                    end_pos=len(chunk_text),
+                )]
 
         chunks: List[DocumentChunk] = []
         start = 0

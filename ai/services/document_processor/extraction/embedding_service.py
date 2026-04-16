@@ -5,6 +5,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# BGE models use asymmetric encoding: queries require this prefix; documents do not.
+# See https://huggingface.co/BAAI/bge-base-en-v1.5#model-list
+BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
 
 class EmbeddingService:
     """Service for managing document embeddings"""
@@ -55,9 +59,19 @@ class EmbeddingService:
             raise
     
     def encode_single_text(self, text: str) -> List[float]:
-        """Encode a single text to embedding"""
+        """Encode a single document text to embedding (no prefix)."""
         return self.encode_texts([text])[0]
-    
+
+    def encode_query(self, text: str) -> List[float]:
+        """Encode a search query.
+
+        BGE models require the asymmetric query prefix for queries so that
+        query vectors align with document vectors in the shared embedding space.
+        Non-BGE models receive the raw text unchanged.
+        """
+        prefixed = (BGE_QUERY_PREFIX + text) if "bge" in self.model_name.lower() else text
+        return self.encode_single_text(prefixed)
+
     def get_embedding_dimension(self) -> int:
         """Get the dimension of embeddings"""
         try:

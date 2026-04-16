@@ -347,6 +347,20 @@ class IndexingService:
         batch_size = settings.BATCH_SIZE
         processed = 0
         failed = 0
+
+        # Proactively wire the embedding tokenizer into the chunker before any file
+        # is processed. Without this, the first concurrent batch of files all call
+        # create_chunks() before encode_texts() returns, leaving them all on the
+        # inaccurate char-based token fallback.
+        if self.chunker._tokenizer is None:
+            try:
+                self.embedding_service._initialize_model()
+                tok = self.embedding_service.get_tokenizer()
+                if tok is not None:
+                    self.chunker.set_tokenizer(tok)
+            except Exception as _e:
+                logger.warning("Could not pre-wire tokenizer into chunker: %s", _e)
+
         try:
             for i in range(0, len(file_paths), batch_size):
                 if self._shutdown:
@@ -539,14 +553,6 @@ class IndexingService:
             chunks = self.chunker.create_chunks(text, file_path)
             content_preview = text[:500]
             embeddings = self.embedding_service.encode_texts([chunk.text for chunk in chunks])
-
-            # Lazily wire the embedding tokenizer into the chunker on first successful
-            # encode call so subsequent chunks use accurate token counts.
-            if self.chunker._tokenizer is None:
-                tok = getattr(getattr(self.embedding_service, "embed_model", None), "tokenizer", None)
-                if tok is not None:
-                    self.chunker.set_tokenizer(tok)
-
             await self.vector_store.batch_insert_chunks(chunks, embeddings)
             bm25_documents = [
                 {
