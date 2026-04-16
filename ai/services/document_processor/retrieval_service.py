@@ -3,7 +3,6 @@ RetrievalService — owns chunk retrieval and context assembly.
 
 Responsibilities:
 - Hybrid search: semantic (ChromaDB) + keyword (BM25) fused via RRF.
-- Re-ranking with a cross-encoder.
 - Explicit-filename detection and file-priority selection.
 - Context building: single-file mode, multi-file mode, optional compression.
 - Document listing (DB query + LLM-formatted response).
@@ -24,7 +23,6 @@ from .extraction.embedding_service import EmbeddingService
 from .storage.vector_store import VectorStoreService
 from .storage.bm25_service import BM25Service
 from .retrieval.hybrid_search import HybridSearchService
-from .retrieval.reranker_service import ReRankingService
 from .retrieval.filename_trie import FilenameTrie
 from .llm.llm_service import LLMService
 from .query_config import RetrievalConfig, default_retrieval_config, is_aggregation_query, CONTEXT_CHUNK_SEP
@@ -36,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 class RetrievalService:
     """
-    Owns the read side of the RAG pipeline: retrieve → rerank → build context.
+    Owns the read side of the RAG pipeline: retrieve → build context.
 
     filename_trie is passed in by the orchestrator and is the same object held
     by IndexingService, so all trie mutations are immediately reflected here.
@@ -48,7 +46,6 @@ class RetrievalService:
         vector_store: VectorStoreService,
         bm25_service: BM25Service,
         hybrid_search: HybridSearchService,
-        reranker: ReRankingService,
         llm_service: LLMService,
         retrieval_config: RetrievalConfig,
         filename_trie: FilenameTrie,
@@ -57,7 +54,6 @@ class RetrievalService:
         self.vector_store = vector_store
         self.bm25_service = bm25_service
         self.hybrid_search = hybrid_search
-        self.reranker = reranker
         self.llm_service = llm_service
         self.retrieval_config = retrieval_config
         self.filename_trie = filename_trie
@@ -445,16 +441,15 @@ class RetrievalService:
         retrieval_params_override: Optional[Dict[str, int]] = None,
     ) -> Tuple[List, List, List, int, int]:
         """
-        Single retrieval pipeline: hybrid semantic + keyword search with RRF fusion + reranking.
+        Single retrieval pipeline: hybrid semantic + keyword search with RRF fusion.
         """
         params = retrieval_params_override or self.retrieval_config.get_retrieval_params(
             query_type, False, is_aggregation
         )
         top_k = params["top_k"]
-        rerank_top_k = params["rerank_top_k"]
         final_top_k = params["final_top_k"]
         logger.info(
-            f"Retrieval params: top_k={top_k}, rerank_top_k={rerank_top_k}, final_top_k={final_top_k}"
+            f"Retrieval params: top_k={top_k}, final_top_k={final_top_k}"
         )
 
         if query_embedding is None:
@@ -532,49 +527,6 @@ class RetrievalService:
                     scores.append(max(0.0, 1.0 - float(dist)))
             retrieval_count = len(documents)
 
-        # Re-ranking
-        rerank_count = 0
-        if rerank_top_k > 0 and len(documents) > final_top_k:
-            logger.info(
-                f"Re-ranking top {min(rerank_top_k, len(documents))} of {len(documents)} results..."
-            )
-            docs_to_rerank = documents[: min(rerank_top_k, len(documents))]
-            metas_to_rerank = metadatas[: min(rerank_top_k, len(metadatas))]
-            scores_to_rerank = scores[: min(rerank_top_k, len(scores))]
-
-            reranked_docs, reranked_metas, reranked_scores = await asyncio.to_thread(
-                self.reranker.rerank_with_metadata,
-                query=query,
-                documents=docs_to_rerank,
-                metadata_list=metas_to_rerank,
-                scores_list=scores_to_rerank,
-                top_k=final_top_k,
-            )
-
-            remaining_docs = documents[min(rerank_top_k, len(documents)):]
-            remaining_metas = metadatas[min(rerank_top_k, len(metadatas)):]
-            remaining_scores = scores[min(rerank_top_k, len(scores)):]
-
-            documents = reranked_docs + remaining_docs
-            metadatas = reranked_metas + remaining_metas
-            scores = reranked_scores + remaining_scores
-            rerank_count = len(docs_to_rerank)
-
-            logger.info(
-                "Re-ranked %s -> top %s (kept %s lower-ranked)",
-                len(docs_to_rerank),
-                len(reranked_docs),
-                len(remaining_docs),
-                extra={
-                    "extra_fields": {
-                        "event_type": "rerank",
-                        "input_count": len(docs_to_rerank),
-                        "output_count": len(reranked_docs),
-                        "rerank_top_k": final_top_k,
-                    }
-                },
-            )
-
         # Filter by explicit filename
         if explicit_filename:
             filtered_docs, filtered_metas, filtered_scores = [], [], []
@@ -617,4 +569,4 @@ class RetrievalService:
                     max_per_file,
                 )
 
-        return (documents, metadatas, scores, retrieval_count, rerank_count)
+        return (documents, metadatas, scores, retrieval_count, 0)

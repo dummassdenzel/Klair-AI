@@ -34,33 +34,27 @@ class RetrievalConfig:
     
     # Base retrieval parameters
     default_top_k: int = 15
-    default_rerank_top_k: int = 15
     default_final_top_k: int = 5
-    
+
     # Listing queries (document inventory)
     listing_top_k: int = 120
-    listing_rerank_top_k: int = 0  # No reranking for listing
     listing_final_top_k: int = 120  # Show all
-    
+
     # Comprehensive queries (document_search). T.2: reduced for lower context tokens (~10k → ~3k)
     comprehensive_top_k: int = 40
-    comprehensive_rerank_top_k: int = 12
     comprehensive_final_top_k: int = 5
-    
+
     # Aggregation-style ("all X", "total value of X") — higher recall so we don't miss documents
     aggregation_top_k: int = 100
-    aggregation_rerank_top_k: int = 60
     aggregation_final_top_k: int = 50
     aggregation_max_sources: int = 50
-    
+
     # Specific file queries
     specific_top_k: int = 30
-    specific_rerank_top_k: int = 20
     specific_final_top_k: int = 15
-    
+
     # General queries
     general_top_k: int = 60
-    general_rerank_top_k: int = 15
     general_final_top_k: int = 10
 
     # File-diversity retrieval: max chunks per file in final selection (general search only).
@@ -79,41 +73,31 @@ class RetrievalConfig:
     def get_retrieval_params(self, query_type: str, is_listing: bool = False, is_aggregation: bool = False) -> Dict[str, int]:
         """
         Get retrieval parameters based on query type.
-        
+
         Args:
             query_type: 'greeting', 'general', 'document_listing', or 'document_search'
             is_listing: Whether this is a document listing query
             is_aggregation: Whether user asked for "all X" / "total value of X" (high recall)
-            
+
         Returns:
-            Dict with top_k, rerank_top_k, final_top_k
+            Dict with top_k, final_top_k
         """
-        if is_listing:
+        if is_listing or query_type == 'document_listing':
             return {
                 'top_k': self.listing_top_k,
-                'rerank_top_k': self.listing_rerank_top_k,
-                'final_top_k': self.listing_final_top_k
+                'final_top_k': self.listing_final_top_k,
             }
-        
-        if query_type == 'document_listing':
-            return {
-                'top_k': self.listing_top_k,
-                'rerank_top_k': self.listing_rerank_top_k,
-                'final_top_k': self.listing_final_top_k
-            }
-        
+
         if is_aggregation:
             return {
                 'top_k': self.aggregation_top_k,
-                'rerank_top_k': self.aggregation_rerank_top_k,
-                'final_top_k': self.aggregation_final_top_k
+                'final_top_k': self.aggregation_final_top_k,
             }
-        
-        # For document_search, we'll use comprehensive params for enumeration-like queries
+
+        # Comprehensive (document_search)
         return {
             'top_k': self.comprehensive_top_k,
-            'rerank_top_k': self.comprehensive_rerank_top_k,
-            'final_top_k': self.comprehensive_final_top_k
+            'final_top_k': self.comprehensive_final_top_k,
         }
 
     def get_source_limit(self, query_type: str, has_selected_files: bool, is_aggregation: bool = False) -> int:

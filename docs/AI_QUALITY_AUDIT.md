@@ -167,7 +167,7 @@ Document encoding (`encode_texts()`) does NOT get the prefix.
 
 | | |
 |---|---|
-| **Status** | `[ ]` |
+| **Status** | `[x]` |
 | **Severity** | High |
 | **Type** | Domain mismatch (reranker) — negative ROI component |
 | **File** | `ai/services/document_processor/retrieval/reranker_service.py`, `ai/config.py` |
@@ -409,7 +409,7 @@ Remove both methods. `switch_provider()` is the correct runtime API.
 | 1.1 | Lower RAG temperature 0.7 → 0.1 | `[x]` | Fixed in llm_service.py + configurable via Settings UI |
 | 2.1 | Upgrade embedding model to bge-base | `[x]` | config.py default changed; re-index required |
 | 2.2 | Add BGE query instruction prefix | `[x]` | encode_query() added; 4 call sites updated; re-index required |
-| 3.1 | Disable or replace MS MARCO reranker | `[ ]` | Option A: disable (immediate); Option B: replace |
+| 3.1 | Disable or replace MS MARCO reranker | `[x]` | Removed entirely — reranker_service.py deleted, all call sites cleaned up |
 | 4.1 | Increase final_top_k and max_chunks_per_file | `[ ]` | Config values only |
 | 4.2 | Tighten is_aggregation_query patterns | `[ ]` | Remove broad regexes |
 | 5.1 | Spreadsheet tabular extraction pipeline | `[ ]` | Full overhaul — new extractor module |

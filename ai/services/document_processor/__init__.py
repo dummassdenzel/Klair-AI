@@ -6,7 +6,7 @@ RAG (Retrieval-Augmented Generation) system.
 
 Architecture (Phase 7 decomposition):
 - IndexingService       : file ingestion, chunking, embedding, storage
-- RetrievalService      : hybrid search, reranking, context assembly
+- RetrievalService      : hybrid search, context assembly
 - QueryPipelineService  : routing, tool calling, planner, response generation
 - DocumentProcessorOrchestrator : thin coordinator that wires all services
 
@@ -29,7 +29,7 @@ from .models import (
 from .extraction import TextExtractor, DocumentChunker, EmbeddingService, FileValidator
 from .storage import VectorStoreService, BM25Service
 from .llm import LLMService
-from .retrieval import HybridSearchService, ReRankingService, FilenameTrie
+from .retrieval import HybridSearchService, FilenameTrie
 from .updates import (
     ChunkDiffer, UpdateStrategy, UpdateStrategySelector, StrategySelectionResult,
     UpdateQueue, UpdateTask, UpdateResult, UpdatePriority,
@@ -56,7 +56,6 @@ __all__ = [
     "FileValidator",
     "BM25Service",
     "HybridSearchService",
-    "ReRankingService",
     "ChunkDiffer",
     "UpdateStrategy",
     "UpdateStrategySelector",

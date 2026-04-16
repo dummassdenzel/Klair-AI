@@ -3,7 +3,7 @@ DocumentProcessorOrchestrator — thin coordinator (Phase 7 refactoring).
 
 Constructs all primitive services, composes the three focused services:
   - IndexingService  : file ingestion, chunking, embedding, storage
-  - RetrievalService : hybrid search, reranking, context assembly
+  - RetrievalService : hybrid search, context assembly
   - QueryPipelineService : routing, tool calling, planner, response generation
 
 Then exposes a single stable public API that callers (routers, file monitor)
@@ -26,7 +26,6 @@ from .storage.vector_store import VectorStoreService
 from .storage.bm25_service import BM25Service
 from .llm.llm_service import LLMService
 from .retrieval.hybrid_search import HybridSearchService
-from .retrieval.reranker_service import ReRankingService
 from .updates.update_queue import UpdateQueue
 from .updates.update_executor import UpdateExecutor
 from .updates.update_worker import UpdateWorker
@@ -105,7 +104,6 @@ class DocumentProcessorOrchestrator:
         self.database_service = DatabaseService()
         self.bm25_service = BM25Service(persist_dir)
         self.hybrid_search = HybridSearchService(k=60)
-        self.reranker = ReRankingService(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2")
         self.retrieval_config: RetrievalConfig = default_retrieval_config
 
         # ── UpdateWorker stack ────────────────────────────────────────────────
@@ -154,7 +152,6 @@ class DocumentProcessorOrchestrator:
             vector_store=self.vector_store,
             bm25_service=self.bm25_service,
             hybrid_search=self.hybrid_search,
-            reranker=self.reranker,
             llm_service=self.llm_service,
             retrieval_config=self.retrieval_config,
             filename_trie=self.indexing.filename_trie,  # shared reference
