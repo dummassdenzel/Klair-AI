@@ -81,28 +81,6 @@ def _match_category_listing_intent(question: str) -> Optional[Tuple[frozenset, s
     return frozenset(matched), " or ".join(t.lower() for t in matched)
 
 
-def _concat_vector_chunks_text(vector_store: Any, file_path: str) -> str:
-    """Join all indexed chunks for a file in chunk_id order (full document text)."""
-    data = vector_store.get_document_chunks(file_path)
-    if not data:
-        return ""
-    texts = data.get("documents") or []
-    metas = data.get("metadatas") or []
-    if not texts:
-        return ""
-    if metas and len(metas) == len(texts):
-        pairs = list(zip(metas, texts))
-
-        def _ck(m: Any) -> int:
-            try:
-                return int((m or {}).get("chunk_id", 0) or 0)
-            except (TypeError, ValueError):
-                return 0
-
-        pairs.sort(key=lambda t: _ck(t[0]))
-        return "\n".join(p[1] for p in pairs)
-    return "\n".join(texts)
-
 
 class RetrievalService:
     """
@@ -691,8 +669,9 @@ class RetrievalService:
                     f"Filtered to {len(documents)} chunks from explicit filename '{explicit_filename}'"
                 )
 
-        # File-diversity selection (general search only)
-        if not explicit_filename and len(documents) > final_top_k:
+        # File-diversity selection (general search only, multi-file result sets)
+        unique_files = {meta.get("file_path", "") for meta in metadatas}
+        if not explicit_filename and len(unique_files) > 1 and len(documents) > final_top_k:
             max_per_file = getattr(self.retrieval_config, "max_chunks_per_file", 2)
             if max_per_file > 0:
                 selected_docs, selected_metas, selected_scores = [], [], []

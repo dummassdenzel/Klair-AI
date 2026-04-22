@@ -335,14 +335,4 @@ class ChunkDiffer:
         """Calculate hash of chunk text for fast comparison"""
         return hash(text.strip().lower())
     
-    def _cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
-        """Calculate cosine similarity between two vectors"""
-        dot_product = np.dot(vec1, vec2)
-        norm1 = np.linalg.norm(vec1)
-        norm2 = np.linalg.norm(vec2)
-        
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-        
-        return float(dot_product / (norm1 * norm2))
 

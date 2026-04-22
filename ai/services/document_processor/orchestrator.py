@@ -54,7 +54,7 @@ class DocumentProcessorOrchestrator:
     def __init__(
         self,
                  persist_dir: str = "./chroma_db",
-                 embed_model_name: str = "BAAI/bge-small-en-v1.5",
+                 embed_model_name: str = "BAAI/bge-base-en-v1.5",
                  max_file_size_mb: int = 50,
         chunk_size: int = 300,       # tokens
         chunk_overlap: int = 50,     # tokens
@@ -66,6 +66,7 @@ class DocumentProcessorOrchestrator:
                  groq_api_key: Optional[str] = None,
                  groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
         llm_provider: str = "ollama",
+        database_service: Optional["DatabaseService"] = None,
     ) -> None:
         # ── OCR (optional) ────────────────────────────────────────────────────
         try:
@@ -102,7 +103,7 @@ class DocumentProcessorOrchestrator:
             provider=llm_provider,
         )
         self.file_validator = FileValidator(max_file_size_mb, ocr_service=ocr_service)
-        self.database_service = DatabaseService()
+        self.database_service = database_service if database_service is not None else DatabaseService()
         self.bm25_service = BM25Service(persist_dir)
         self.hybrid_search = HybridSearchService(k=60)
         self.retrieval_config: RetrievalConfig = default_retrieval_config

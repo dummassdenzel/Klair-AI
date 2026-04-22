@@ -90,42 +90,4 @@ class HybridSearchService:
         
         return fused_results
     
-    def _analyze_fusion(
-        self,
-        semantic_results: List[Tuple[str, float, Dict]],
-        keyword_results: List[Tuple[str, float, Dict]],
-        fused_results: List[Tuple[str, float, Dict]],
-        top_k: int = 5
-    ) -> Dict:
-        """
-        Analyze how fusion affected rankings (debug/optimization only — not called in production).
-        """
-        semantic_ids = {doc_id for doc_id, _, _ in semantic_results[:top_k]}
-        keyword_ids = {doc_id for doc_id, _, _ in keyword_results[:top_k]}
-        fused_ids = {doc_id for doc_id, _, _ in fused_results[:top_k]}
-        
-        # Calculate overlap
-        semantic_only = semantic_ids - keyword_ids
-        keyword_only = keyword_ids - semantic_ids
-        both = semantic_ids & keyword_ids
-        
-        # Calculate agreement with fused top-k
-        semantic_in_fused = len(semantic_ids & fused_ids)
-        keyword_in_fused = len(keyword_ids & fused_ids)
-        
-        return {
-            "semantic_count": len(semantic_results),
-            "keyword_count": len(keyword_results),
-            "fused_count": len(fused_results),
-            "top_k": top_k,
-            "overlap": {
-                "both_methods": len(both),
-                "semantic_only": len(semantic_only),
-                "keyword_only": len(keyword_only)
-            },
-            "agreement_with_fused": {
-                "semantic": semantic_in_fused,
-                "keyword": keyword_in_fused
-            }
-        }
 

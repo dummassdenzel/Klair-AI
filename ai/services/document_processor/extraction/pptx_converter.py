@@ -173,13 +173,7 @@ class PPTXConverter:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Run conversion in thread pool (subprocess is blocking)
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None, 
-            self._convert_sync, 
-            pptx_path, 
-            str(output_dir)
-        )
+        await asyncio.to_thread(self._convert_sync, pptx_path, str(output_dir))
         
         # LibreOffice outputs with same name but .pdf extension
         # It uses the original filename, so we need to find it

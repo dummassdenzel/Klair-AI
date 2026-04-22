@@ -100,7 +100,7 @@ class UpdateExecutor:
         Returns:
             UpdateResult with update details
         """
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
         
         logger.info(f"Executing update for {task.file_path} with strategy {task.strategy}")
         
@@ -119,7 +119,7 @@ class UpdateExecutor:
             # 3. Verify update success
             await self._verify_update(task.file_path)
             
-            processing_time = asyncio.get_event_loop().time() - start_time
+            processing_time = asyncio.get_running_loop().time() - start_time
             
             result = UpdateResult(
                 success=True,
@@ -137,7 +137,7 @@ class UpdateExecutor:
             logger.error(f"Update failed for {task.file_path}: {e}, rolling back...")
             await self._rollback(checkpoint)
             
-            processing_time = asyncio.get_event_loop().time() - start_time
+            processing_time = asyncio.get_running_loop().time() - start_time
             
             result = UpdateResult(
                 success=False,

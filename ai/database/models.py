@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime, Text, JSON, ForeignKey, Float
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone
 from .database import Base
 
 class ChatSession(Base):
@@ -9,8 +9,8 @@ class ChatSession(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, default="New Chat")
     directory_path = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
     
@@ -25,7 +25,7 @@ class ChatMessage(Base):
     ai_response = Column(Text, nullable=False)
     sources = Column(JSON)  # Store source document metadata
     response_time = Column(Float)  # Response time in seconds
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     
     session = relationship("ChatSession", back_populates="messages")
 
@@ -42,8 +42,8 @@ class IndexedDocument(Base):
     document_category = Column(String, nullable=True, index=True)  # Semantic type: invoice, permit, receipt, report, etc.
     chunks_count = Column(Integer, default=0)
     processing_status = Column(String, default="indexed", index=True)  # indexed, error, processing
-    indexed_at = Column(DateTime, default=datetime.utcnow, index=True)
-    last_processed = Column(DateTime, default=datetime.utcnow)
+    indexed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    last_processed = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     
     # Add relationship to chat sessions that used this document (overlaps with ChatSession.document_usage)
     chat_sessions = relationship("ChatSession", secondary="document_chat_usage", overlaps="document_usage")
@@ -55,5 +55,5 @@ class DocumentChatUsage(Base):
     document_id = Column(Integer, ForeignKey("indexed_documents.id", ondelete="CASCADE"), primary_key=True)
     chat_session_id = Column(Integer, ForeignKey("chat_sessions.id", ondelete="CASCADE"), primary_key=True)
     usage_count = Column(Integer, default=1)
-    first_used = Column(DateTime, default=datetime.utcnow)
-    last_used = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    first_used = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_used = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

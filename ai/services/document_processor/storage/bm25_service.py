@@ -18,6 +18,12 @@ import re
 
 logger = logging.getLogger(__name__)
 
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "it", "as", "be", "was", "are",
+    "this", "that", "its", "has", "not", "do", "if",
+})
+
 
 class BM25Service:
     """Handles keyword-based search using BM25 algorithm"""
@@ -67,18 +73,16 @@ class BM25Service:
         # Captures: alphanumeric + optional (dot/dash/# + alphanumeric) patterns
         # Also captures standalone alphanumeric tokens
         tokens = re.findall(r'[a-z0-9]+(?:[.\-#]+[a-z0-9]*)*', text)
-        
-        # Additional pass: also extract individual components for partial matching
-        # This ensures "g.p.#" matches both as a whole and as parts
+
         extended_tokens = []
         for token in tokens:
+            if token in _STOP_WORDS:
+                continue
             extended_tokens.append(token)
-            # If token contains special chars, also add the parts
             if any(c in token for c in '.#-'):
-                # Split on special chars and add non-empty parts
                 parts = re.split(r'[.\-#]+', token)
-                extended_tokens.extend([p for p in parts if p])
-        
+                extended_tokens.extend([p for p in parts if len(p) > 2])
+
         return extended_tokens
     
     def add_documents(self, documents: List[Dict]) -> None:
@@ -92,13 +96,7 @@ class BM25Service:
         try:
             for doc in documents:
                 self.corpus.append(doc)
-                tokenized = self._tokenize(doc['text'])
-                self.tokenized_corpus.append(tokenized)
-
-            if self.tokenized_corpus:
-                self.bm25 = BM25Okapi(self.tokenized_corpus)
-                logger.debug(f"BM25 index rebuilt with {len(self.corpus)} documents")
-
+                self.tokenized_corpus.append(self._tokenize(doc['text']))
         except Exception as e:
             logger.error(f"Failed to add documents to BM25: {e}")
             raise
@@ -129,7 +127,10 @@ class BM25Service:
         return removed
 
     def save(self) -> None:
-        """Explicitly persist the BM25 index to disk. Call after batch indexing is complete."""
+        """Rebuild BM25 index from corpus, then persist. Call once after batch indexing is complete."""
+        if self.tokenized_corpus:
+            self.bm25 = BM25Okapi(self.tokenized_corpus)
+            logger.debug(f"BM25 index rebuilt with {len(self.corpus)} documents")
         self._save_index()
     
     def search(self, query: str, top_k: int = 15) -> List[Tuple[str, float, Dict]]:

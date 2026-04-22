@@ -2,7 +2,7 @@ import hashlib
 import logging
 import os
 from typing import Tuple, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -83,9 +83,9 @@ class FileValidator:
                 "file_type": path_obj.suffix.lower(),
                 "size_bytes": stat_info.st_size,
                 "size_mb": round(stat_info.st_size / 1024 / 1024, 2),
-                "created_at": datetime.fromtimestamp(stat_info.st_ctime),
-                "modified_at": datetime.fromtimestamp(stat_info.st_mtime),
-                "accessed_at": datetime.fromtimestamp(stat_info.st_atime),
+                "created_at": datetime.fromtimestamp(stat_info.st_ctime, tz=timezone.utc),
+                "modified_at": datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc),
+                "accessed_at": datetime.fromtimestamp(stat_info.st_atime, tz=timezone.utc),
                 "is_readable": os.access(file_path, os.R_OK),
                 "is_writable": os.access(file_path, os.W_OK),
                 "hash": self.calculate_file_hash(file_path)

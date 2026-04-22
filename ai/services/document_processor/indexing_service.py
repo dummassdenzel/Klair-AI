@@ -175,7 +175,7 @@ class IndexingService:
                 the existing BM25 pickle stays valid and only new/changed files are
                 re-processed.
         """
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
 
         try:
             dir_path = Path(directory_path)
@@ -202,11 +202,11 @@ class IndexingService:
             self.current_directory = directory_path
             self.is_initializing = True
 
-            metadata_start = asyncio.get_event_loop().time()
+            metadata_start = asyncio.get_running_loop().time()
             metadata_files = await self._build_metadata_index(
                 directory_path, resume_mode=resume_mode
             )
-            metadata_elapsed = asyncio.get_event_loop().time() - metadata_start
+            metadata_elapsed = asyncio.get_running_loop().time() - metadata_start
 
             if not metadata_files:
                 if resume_mode:
@@ -227,7 +227,7 @@ class IndexingService:
                 self._index_content_background(metadata_files, directory_path)
             )
 
-            elapsed = asyncio.get_event_loop().time() - start_time
+            elapsed = asyncio.get_running_loop().time() - start_time
             logger.info(f"Initialization complete: {len(metadata_files)} files queued in {elapsed:.2f}s")
             logger.info("Content indexing running in background (non-blocking)")
 
@@ -418,10 +418,10 @@ class IndexingService:
 
     async def _process_single_file(self, file_path: str) -> ProcessingResult:
         """Process a single file (used in batch processing)."""
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
         try:
             await self.add_document(file_path, use_queue=False)
-            processing_time = asyncio.get_event_loop().time() - start_time
+            processing_time = asyncio.get_running_loop().time() - start_time
             return ProcessingResult(
                 success=True,
                 file_path=file_path,
@@ -429,7 +429,7 @@ class IndexingService:
                 processing_time=processing_time,
             )
         except Exception as e:
-            processing_time = asyncio.get_event_loop().time() - start_time
+            processing_time = asyncio.get_running_loop().time() - start_time
             logger.error(f"Failed to process {file_path}: {e}")
             return ProcessingResult(
                 success=False,
@@ -487,7 +487,7 @@ class IndexingService:
                        If False, process directly (initial indexing).
         """
         if use_queue:
-            current_hash = self.file_validator.calculate_file_hash(file_path)
+            current_hash = await asyncio.to_thread(self.file_validator.calculate_file_hash, file_path)
             stored_hash, _ = await self._get_cached_or_db_hash_metadata(file_path)
             if not force_reindex and stored_hash and stored_hash == current_hash:
                 logger.debug(f"File {file_path} unchanged, skipping update")
@@ -503,7 +503,7 @@ class IndexingService:
 
         try:
             file_metadata = self.file_validator.extract_file_metadata(file_path)
-            current_hash = self.file_validator.calculate_file_hash(file_path)
+            current_hash = await asyncio.to_thread(self.file_validator.calculate_file_hash, file_path)
 
             stored_hash, _ = await self._get_cached_or_db_hash_metadata(file_path)
             if not force_reindex and stored_hash and stored_hash == current_hash:

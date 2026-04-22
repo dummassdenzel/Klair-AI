@@ -718,39 +718,39 @@ The PDF column-detection logic prefixes extracted text with `[Region: full]`, `[
 | F1 | Fix | Critical | Filename stem regex misdirects queries | `[x]` Fixed |
 | F2 | Fix | Critical | ChromaDB distance metric not verified on startup | `[x]` Fixed |
 | F3 | Fix | Critical | Gemini `generate_simple` ignores token cap | `[ ]` |
-| F4 | Fix | High | ChromaDB sync calls block event loop | `[ ]` |
+| F4 | Fix | High | ChromaDB sync calls block event loop | `[x]` Fixed |
 | F5 | Fix | High | RAG prompt is single text blob, not messages | `[ ]` |
-| F6 | Fix | High | `max_chunks_per_file=4` too tight | `[ ]` |
+| F6 | Fix | High | `max_chunks_per_file=4` too tight | `[x]` Fixed |
 | F7 | Fix | High | `RetrievalService` bypasses `DatabaseService` | `[ ]` |
-| F8 | Fix | Medium | BM25 O(n²) rebuild during indexing | `[ ]` |
-| F9 | Fix | Medium | BM25 noise tokens, no stop words | `[ ]` |
-| F10 | Fix | Medium | Unbounded `_summary_cache` | `[ ]` |
-| F11 | Fix | Low | No thread lock on `VectorStoreService` init | `[ ]` |
+| F8 | Fix | Medium | BM25 O(n²) rebuild during indexing | `[x]` Fixed |
+| F9 | Fix | Medium | BM25 noise tokens, no stop words | `[x]` Fixed |
+| F10 | Fix | Medium | Unbounded `_summary_cache` | `[x]` Fixed |
+| F11 | Fix | Low | No thread lock on `VectorStoreService` init | `[x]` Fixed (part of F4) |
 | F12 | Fix | Low | Ollama timeout inconsistency | `[ ]` |
-| F13 | Fix | Low | Deprecated `asyncio.get_event_loop()` | `[ ]` |
+| F13 | Fix | Low | Deprecated `asyncio.get_event_loop()` | `[x]` Fixed |
 | F14 | Fix | Critical | `_extract_docx` skips all Word table content | `[x]` Fixed |
-| F15 | Fix | Medium | `datetime.utcnow()` deprecated throughout DB layer | `[ ]` |
-| F16 | Fix | Medium | `get_chat_sessions_by_directory` full table scan | `[ ]` |
-| F17 | Fix | Medium | `search_documents` uses `LIKE '%val%'` — no index | `[ ]` |
+| F15 | Fix | Medium | `datetime.utcnow()` deprecated throughout DB layer | `[x]` Fixed |
+| F16 | Fix | Medium | `get_chat_sessions_by_directory` full table scan | `[x]` Fixed |
+| F17 | Fix | Medium | `search_documents` uses `LIKE '%val%'` — no index | `[ ]` requires FTS5 migration |
 | F18 | Fix | Medium | Router endpoints bypass `DatabaseService` | `[ ]` |
-| F19 | Fix | Low | `_extract_xlsx` / `_extract_xls` duplicated logic | `[ ]` |
+| F19 | Fix | Low | `_extract_xlsx` / `_extract_xls` dead code deleted | `[x]` Fixed |
 | F20 | Fix | Low | `_prewarm_services` warms a throwaway instance | `[ ]` |
 | F21 | Fix | High | `debug_retrieval.py` missing import — live `NameError` | `[x]` Fixed |
-| F22 | Fix | Medium | Two separate `DatabaseService` instances application-wide | `[ ]` |
-| F23 | Fix | Medium | `calculate_file_hash` blocks async event loop for large files | `[ ]` |
-| DC1 | Dead Code | Low | `_analyze_fusion` never called | `[ ]` |
-| DC2 | Dead Code | Low | `VectorStoreService.cleanup()` does nothing | `[ ]` |
-| DC3 | Dead Code | Low | `_cosine_similarity` in `ChunkDiffer` unused | `[ ]` |
-| DC4 | Dead Code | Low | Stale default embed model in `orchestrator.py` | `[ ]` |
-| DC5 | Dead Code | Low | `get_db()` generator in `database.py` never called | `[ ]` |
+| F22 | Fix | Medium | Two separate `DatabaseService` instances application-wide | `[x]` Fixed |
+| F23 | Fix | Medium | `calculate_file_hash` blocks async event loop for large files | `[x]` Fixed |
+| DC1 | Dead Code | Low | `_analyze_fusion` never called | `[x]` Fixed |
+| DC2 | Dead Code | Low | `VectorStoreService.cleanup()` does nothing | `[x]` Fixed |
+| DC3 | Dead Code | Low | `_cosine_similarity` in `ChunkDiffer` unused | `[x]` Fixed |
+| DC4 | Dead Code | Low | Stale default embed model in `orchestrator.py` | `[x]` Fixed |
+| DC5 | Dead Code | Low | `get_db()` generator in `database.py` never called | `[x]` Fixed |
 | SEC1 | Security | Critical | Live API keys in `.env` | `[x]` .gitignore confirmed |
 | SEC2 | Security | High | Debug endpoint enabled in live env | `[ ]` |
 | DES1 | Design | Critical | Logistics hardcoding in 4 files — exact locations documented | `[x]` Fixed |
 | DES2 | Design | Medium | No retry on LLM API failures | `[ ]` |
 | DES3 | Design | Medium | English-only embedding model | `[ ]` |
-| DES4 | Design | Low | `query_rewriter.py` wrong indentation | `[ ]` |
+| DES4 | Design | Low | `query_rewriter.py` wrong indentation | `[x]` Fixed |
 | DES5 | Design | Low | Token tracking in-memory only | `[ ]` |
-| DES6 | Design | Low | `[Region:]` markers embedded into chunk text | `[ ]` |
+| DES6 | Design | Low | `[Region:]` markers embedded into chunk text | `[x]` Fixed |
 
 ### What to tackle first (recommended order)
 

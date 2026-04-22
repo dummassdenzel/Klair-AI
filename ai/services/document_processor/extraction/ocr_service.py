@@ -361,11 +361,9 @@ class OCRService:
         Asynchronously extract text from an image file.
         Raises RuntimeError if OCR times out (after ocr_timeout seconds).
         """
-        loop = asyncio.get_event_loop()
         try:
             return await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
+                asyncio.to_thread(
                     self._extract_text_from_image_sync,
                     image_path,
                     use_cache,
@@ -381,11 +379,9 @@ class OCRService:
         Asynchronously extract text from a scanned PDF.
         Raises RuntimeError if OCR times out (after ocr_timeout seconds).
         """
-        loop = asyncio.get_event_loop()
         try:
             return await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
+                asyncio.to_thread(
                     self._extract_text_from_scanned_pdf_sync,
                     pdf_path,
                     use_cache,

@@ -86,7 +86,7 @@ class DatabaseService:
                     last_modified=last_modified,
                     content_preview=content_preview,
                     chunks_count=chunks_count,
-                    last_processed=datetime.utcnow(),
+                    last_processed=datetime.now(timezone.utc),
                     processing_status=processing_status,
                 )
                 if document_category is not None:
@@ -147,7 +147,7 @@ class DatabaseService:
                 stmt = (
                     update(IndexedDocument)
                     .where(IndexedDocument.file_path.in_(file_paths))
-                    .values(processing_status="indexed", last_processed=datetime.utcnow())
+                    .values(processing_status="indexed", last_processed=datetime.now(timezone.utc))
                 )
                 result = await session.execute(stmt)
                 await session.commit()
@@ -179,7 +179,7 @@ class DatabaseService:
                 existing_usage = result.scalar_one_or_none()
                 if existing_usage:
                     existing_usage.usage_count += 1
-                    existing_usage.last_used = datetime.utcnow()
+                    existing_usage.last_used = datetime.now(timezone.utc)
                     await session.commit()
                     await session.refresh(existing_usage)
                     return existing_usage
@@ -213,7 +213,7 @@ class DatabaseService:
                         file_hash="",
                         file_type=src.get("file_type", "unknown"),
                         file_size=0,
-                        last_modified=datetime.utcnow(),
+                        last_modified=datetime.now(timezone.utc),
                         content_preview=(src.get("content_snippet") or "")[:500],
                         chunks_count=src.get("chunks_found", 0),
                     )
@@ -274,15 +274,14 @@ class DatabaseService:
         normalized_path = os.path.normpath(os.path.abspath(directory_path)) if directory_path else ""
         
         async with AsyncSessionLocal() as session:
-            stmt = select(ChatSession).order_by(desc(ChatSession.updated_at))
+            stmt = (
+                select(ChatSession)
+                .where(ChatSession.directory_path == normalized_path)
+                .order_by(desc(ChatSession.updated_at))
+            )
             result = await session.execute(stmt)
-            all_sessions = result.scalars().all()
-            matching_sessions = [
-                cs for cs in all_sessions
-                if (os.path.normpath(os.path.abspath(cs.directory_path or "")) == normalized_path)
-            ]
             sessions_data = []
-            for chat_session in matching_sessions:
+            for chat_session in result.scalars().all():
                 msg_count = await session.scalar(
                     select(func.count(ChatMessage.id)).where(
                         ChatMessage.session_id == chat_session.id
@@ -320,7 +319,7 @@ class DatabaseService:
             try:
                 stmt = update(ChatSession).where(
                     ChatSession.id == session_id
-                ).values(title=new_title, updated_at=datetime.utcnow())
+                ).values(title=new_title, updated_at=datetime.now(timezone.utc))
                 result = await session.execute(stmt)
                 await session.commit()
                 return result.rowcount > 0
@@ -412,7 +411,7 @@ class DatabaseService:
     async def get_recent_documents(self, days: int = 7) -> List[IndexedDocument]:
         """Get documents indexed in the last N days"""
         async with AsyncSessionLocal() as session:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
             stmt = select(IndexedDocument).where(
                 IndexedDocument.indexed_at >= cutoff_date
             ).order_by(desc(IndexedDocument.indexed_at))
@@ -465,7 +464,7 @@ class DatabaseService:
                     desc('usage_count')
                 ).limit(10)
             )
-            week_ago = datetime.utcnow() - timedelta(days=7)
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
             recent_sessions = await session.scalar(
                 select(func.count(ChatSession.id)).where(
                     ChatSession.created_at >= week_ago
@@ -552,7 +551,7 @@ class DatabaseService:
     async def get_chat_analytics(self, days: int = 30) -> Dict[str, Any]:
         """Get chat-specific analytics for the last N days"""
         async with AsyncSessionLocal() as session:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
             daily_messages = await session.execute(
                 select(
                     func.date(ChatMessage.timestamp).label('date'),

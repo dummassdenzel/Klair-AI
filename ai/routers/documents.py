@@ -85,6 +85,7 @@ async def set_directory(request: Request):
             groq_api_key=settings.GROQ_API_KEY,
             groq_model=settings.GROQ_MODEL,
             llm_provider=settings.LLM_PROVIDER,
+            database_service=db_service,
         )
 
         if is_resume:

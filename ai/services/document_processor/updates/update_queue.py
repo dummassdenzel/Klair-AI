@@ -42,7 +42,7 @@ class UpdateTask:
     strategy: Optional[UpdateStrategy] = None
     change_percentage: float = 0.0
     file_size_bytes: int = 0
-    enqueued_at: datetime = field(default_factory=datetime.utcnow)
+    enqueued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_queried: Optional[datetime] = None
     is_in_active_session: bool = False
     user_requested: bool = False  # Explicit user request

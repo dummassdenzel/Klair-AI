@@ -1,8 +1,13 @@
 import logging
+import re
 from typing import List, Optional
 from ..models import DocumentChunk
 
 logger = logging.getLogger(__name__)
+
+# Strips PDF layout markers added by the column-detection path in text_extractor.py.
+# These markers help build previews but are noise inside embedded chunks.
+_REGION_MARKER_RE = re.compile(r"\[Region: \w+\]\n?")
 
 # Conservative char-to-token ratio for English text.
 # Used as a fallback when no actual tokenizer is wired in.
@@ -77,6 +82,7 @@ class DocumentChunker:
 
     def create_chunks(self, text: str, file_path: str) -> List[DocumentChunk]:
         """Create overlapping token-sized chunks with semantic boundary detection."""
+        text = _REGION_MARKER_RE.sub("", text)
         # Derive character-space window sizes from token targets.
         # Over-estimated slightly so _find_chunk_boundary has room to pull back.
         char_window = self.chunk_size * _CHARS_PER_TOKEN

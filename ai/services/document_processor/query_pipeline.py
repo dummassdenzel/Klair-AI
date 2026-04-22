@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import re
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
@@ -110,7 +111,7 @@ class QueryPipelineService:
         self.embedding_service = embedding_service
         self.router = router
         self.retrieval = retrieval_service
-        self._summary_cache: Dict[int, Tuple[int, str]] = {}
+        self._summary_cache: OrderedDict = OrderedDict()  # session_id → (older_count, summary_text); LRU, max 200
 
     # ------------------------------------------------------------------
     # Public entry points
@@ -157,7 +158,7 @@ class QueryPipelineService:
         return QueryResult(
             message=text,
             sources=result["sources"],
-            response_time=round(asyncio.get_event_loop().time() - start_time, 3),
+            response_time=round(asyncio.get_running_loop().time() - start_time, 3),
             query_type=result["query_type"],
             retrieval_count=result["retrieval_count"],
             rerank_count=result["rerank_count"],
@@ -211,7 +212,7 @@ class QueryPipelineService:
             "done",
             {
                 "message": text,
-                "response_time": round(asyncio.get_event_loop().time() - start_time, 3),
+                "response_time": round(asyncio.get_running_loop().time() - start_time, 3),
                 "query_type": result["query_type"],
                 "retrieval_count": result["retrieval_count"],
                 "rerank_count": result["rerank_count"],
@@ -254,6 +255,8 @@ class QueryPipelineService:
         older_count = len(older_pairs)
 
         summary_text = ""
+        if session_id is not None and session_id in self._summary_cache:
+            self._summary_cache.move_to_end(session_id)
         cached = self._summary_cache.get(session_id) if session_id is not None else None
         if cached is not None and cached[0] == older_count:
             summary_text = cached[1]
@@ -303,6 +306,8 @@ class QueryPipelineService:
 
             if session_id is not None:
                 self._summary_cache[session_id] = (older_count, summary_text)
+                if len(self._summary_cache) > 200:
+                    self._summary_cache.popitem(last=False)
 
         history = []
         if summary_text:
@@ -359,7 +364,7 @@ class QueryPipelineService:
 
         The tool-calling path (Groq) already handles this natively.
         """
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
 
         if self.llm_service.supports_tool_calling():
             return await self._pipeline_tool_loop(question, conversation_history, start_time)

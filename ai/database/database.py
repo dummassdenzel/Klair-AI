@@ -48,14 +48,6 @@ AsyncSessionLocal = sessionmaker(
 )
 
 
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
-
-
 async def create_tables():
     """Create all tables if they don't exist (used on startup for SQLite)."""
     async with engine.begin() as conn:
