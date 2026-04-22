@@ -26,6 +26,7 @@ from ..extraction.chunker import DocumentChunker
 from ..extraction.embedding_service import EmbeddingService
 from ..extraction.file_validator import FileValidator
 from ..extraction.spreadsheet_extractor import SpreadsheetExtractor, is_spreadsheet
+from ..extraction.text_extractor import build_layout_aware_preview, extract_doc_title
 from database import DatabaseService
 
 logger = logging.getLogger(__name__)
@@ -297,12 +298,14 @@ class UpdateExecutor:
             )
             if not chunks:
                 raise ValueError(f"No data extracted from spreadsheet {task.file_path}")
+            doc_title = None  # Spreadsheet chunks start with metadata lines, not doc titles
         else:
             text = await self.text_extractor.extract_text_async(task.file_path)
             if not text or not text.strip():
                 raise ValueError(f"No text extracted from {task.file_path}")
             chunks = self.chunker.create_chunks(text, task.file_path)
-            content_preview = text[:500]
+            content_preview = build_layout_aware_preview(text, max_chars=500)
+            doc_title = extract_doc_title(text)
 
         embeddings = self.embedding_service.encode_texts([chunk.text for chunk in chunks])
         await self.vector_store.batch_insert_chunks(chunks, embeddings)
@@ -331,6 +334,7 @@ class UpdateExecutor:
             content_preview=content_preview,
             chunks_count=len(chunks),
             processing_status="indexed",
+            document_category=doc_title,
         )
         
         logger.info(f"Full re-index completed: {len(chunks)} chunks")
@@ -406,6 +410,18 @@ class UpdateExecutor:
         ]
         self.bm25_service.add_documents(bm25_documents)
 
+        if is_spreadsheet(task.file_path):
+            content_preview = all_chunks_to_add[0].text[:500] if all_chunks_to_add else ""
+            doc_title: Optional[str] = None
+        else:
+            text = await self.text_extractor.extract_text_async(task.file_path)
+            content_preview = (text or "")[:500]
+            doc_title = (
+                extract_doc_title(text)
+                if text and text.strip()
+                else None
+            )
+
         file_metadata, file_hash = self._get_file_metadata_and_hash(task.file_path)
         await self.database_service.store_document_metadata(
             file_path=task.file_path,
@@ -416,6 +432,7 @@ class UpdateExecutor:
             content_preview=content_preview,
             chunks_count=len(all_chunks_to_add),
             processing_status="indexed",
+            document_category=doc_title,
         )
         logger.info(f"Chunk update completed: {chunks_updated} chunks")
         return chunks_updated

@@ -32,6 +32,78 @@ from .corpus_summary import summarize_corpus
 logger = logging.getLogger(__name__)
 
 
+def _corpus_has_any_document_category(docs: List[Any]) -> bool:
+    return any((getattr(d, "document_category", None) or "").strip() for d in docs)
+
+
+_category_patterns: Optional[List[Tuple[Any, str]]] = None
+
+
+def _get_category_patterns() -> List[Tuple[Any, str]]:
+    """Build and cache match patterns from STANDALONE_DOC_TYPES (runs once at startup)."""
+    global _category_patterns
+    if _category_patterns is not None:
+        return _category_patterns
+    from .extraction.text_extractor import STANDALONE_DOC_TYPES
+    patterns: List[Tuple[Any, str]] = []
+    for doc_type in sorted(STANDALONE_DOC_TYPES):
+        # Normalise hyphens and spaces so BRING-IN PERMIT and BRING IN PERMIT
+        # are treated identically when building the match pattern.
+        words = re.sub(r"[-\s]+", " ", doc_type).lower().strip().split()
+        if not words:
+            continue
+        parts = [re.escape(w) for w in words[:-1]]
+        parts.append(re.escape(words[-1]) + r"s?")
+        pat = re.compile(r"\b" + r"[\s\-]+".join(parts) + r"\b", re.IGNORECASE)
+        patterns.append((pat, doc_type))
+    _category_patterns = patterns
+    return _category_patterns
+
+
+def _match_category_listing_intent(question: str) -> Optional[Tuple[frozenset, str]]:
+    """
+    Match the user's question against configured STANDALONE_DOC_TYPES and return
+    (matching_categories, human_label) or None.
+
+    Driven entirely by the taxonomy JSON — no hardcoded document type names.
+    With an empty taxonomy (the default) this always returns None, which causes
+    the listing path to show all documents rather than filtering by category.
+    """
+    if not question or not question.strip():
+        return None
+    patterns = _get_category_patterns()
+    if not patterns:
+        return None
+    q = re.sub(r"\s+", " ", question).strip().rstrip("?")
+    matched = [doc_type for pat, doc_type in patterns if pat.search(q)]
+    if not matched:
+        return None
+    return frozenset(matched), " or ".join(t.lower() for t in matched)
+
+
+def _concat_vector_chunks_text(vector_store: Any, file_path: str) -> str:
+    """Join all indexed chunks for a file in chunk_id order (full document text)."""
+    data = vector_store.get_document_chunks(file_path)
+    if not data:
+        return ""
+    texts = data.get("documents") or []
+    metas = data.get("metadatas") or []
+    if not texts:
+        return ""
+    if metas and len(metas) == len(texts):
+        pairs = list(zip(metas, texts))
+
+        def _ck(m: Any) -> int:
+            try:
+                return int((m or {}).get("chunk_id", 0) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        pairs.sort(key=lambda t: _ck(t[0]))
+        return "\n".join(p[1] for p in pairs)
+    return "\n".join(texts)
+
+
 class RetrievalService:
     """
     Owns the read side of the RAG pipeline: retrieve → build context.
@@ -92,6 +164,70 @@ class RetrievalService:
                     rerank_count=0,
                 )
 
+            intent = _match_category_listing_intent(question)
+            if intent is not None:
+                bucket, type_label = intent
+                filtered = [
+                    d
+                    for d in all_docs
+                    if (getattr(d, "document_category", None) or "").strip().upper() in bucket
+                ]
+                filtered.sort(key=lambda d: Path(d.file_path).name.lower())
+                if filtered:
+                    lines = [f"- {Path(d.file_path).name}" for d in filtered]
+                    message = (
+                        f"Documents indexed as {type_label} ({len(filtered)} total):\n\n"
+                        + "\n".join(lines)
+                    )
+                    listing_context_max = self.llm_service.get_max_listing_context_chars()
+                    per_doc_f = max(80, listing_context_max // len(filtered)) if filtered else 500
+                    sources_f: List[Dict[str, Any]] = []
+                    for doc in filtered:
+                        filename = Path(doc.file_path).name
+                        if doc.processing_status == "metadata_only":
+                            preview_f = f"[Indexing in progress...] {filename}"
+                        else:
+                            preview_f = doc.content_preview if doc.content_preview else ""
+                            if not preview_f and doc.chunks_count > 0:
+                                preview_f = f"[File indexed with {doc.chunks_count} chunk(s)]"
+                            preview_f = re.sub(
+                                r"^Page \d+:\n?", "", preview_f, flags=re.IGNORECASE
+                            ).strip()
+                            if len(preview_f) > per_doc_f:
+                                preview_f = preview_f[:per_doc_f].rstrip() + "..."
+                        sources_f.append(
+                            {
+                                "file_path": doc.file_path,
+                                "relevance_score": 1.0,
+                                "content_snippet": preview_f[:300] + "..."
+                                if len(preview_f) > 300
+                                else preview_f,
+                                "chunks_found": doc.chunks_count,
+                                "file_type": doc.file_type,
+                                "processing_status": doc.processing_status,
+                            }
+                        )
+                    return QueryResult(
+                        message=message,
+                        sources=sources_f,
+                        response_time=0.0,
+                        query_type="document_listing",
+                        retrieval_count=len(filtered),
+                        rerank_count=0,
+                    )
+                if _corpus_has_any_document_category(all_docs):
+                    return QueryResult(
+                        message=(
+                            f"No documents are indexed with type {type_label}. "
+                            "If you expected matches, confirm those files finished indexing."
+                        ),
+                        sources=[],
+                        response_time=0.0,
+                        query_type="document_listing",
+                        retrieval_count=0,
+                        rerank_count=0,
+                    )
+
             corpus_summary_text = summarize_corpus(all_docs)
 
             sources = []
@@ -106,9 +242,14 @@ class RetrievalService:
                     preview = doc.content_preview if doc.content_preview else ""
                     if not preview and doc.chunks_count > 0:
                         preview = f"[File indexed with {doc.chunks_count} chunk(s)]"
+                    # Strip "Page N:" OCR prefix so the LLM sees the actual
+                    # document content rather than the OCR service artifact.
+                    preview = re.sub(r'^Page \d+:\n?', '', preview, flags=re.IGNORECASE).strip()
                     if len(preview) > per_doc_max:
                         preview = preview[:per_doc_max].rstrip() + "..."
-                context_parts.append(f"[Document: {filename}]\n{preview}")
+                category = getattr(doc, "document_category", None) or ""
+                category_hint = f" [Type: {category}]" if category else ""
+                context_parts.append(f"[Document: {filename}]{category_hint}\n{preview}")
                 sources.append(
                     {
                         "file_path": doc.file_path,
@@ -129,17 +270,29 @@ class RetrievalService:
             response_prompt = (
                 f"You are a document assistant. {user_question_line}Folder overview:\n"
                 f"{corpus_summary_text}\n\nDocuments in this folder:\n\n{context}\n\n"
+                "CRITICAL — document type classification rules (follow in order):\n"
+                "1. If a document has a [Type: ...] label → use that label as the DEFINITIVE type.\n"
+                "2. If no [Type:] label → infer the document type from its content preview as a "
+                "whole. Look for the document's own title or prominent heading (e.g. 'DELIVERY "
+                "RECEIPT', 'BRING-IN PERMIT'), OR characteristic field patterns that identify "
+                "the type (e.g. 'D.R. #' means delivery receipt, 'BIP-' in a reference number "
+                "means bring-in permit). Classify based on what the document IS, not what it "
+                "merely mentions.\n"
+                "3. NEVER classify a document based on a keyword that appears as a column header "
+                "or value referencing another document. Example: a document labelled 'BRING-IN "
+                "PERMIT' whose table says 'Delivery Receipt: GUA04' is a Bring-In Permit — NOT "
+                "a Delivery Receipt.\n\n"
                 "Tailor your response precisely to what the user asked:\n"
                 "- If they asked how many of a specific category/type (e.g. 'how many delivery "
-                "receipts', 'count invoices'): identify EVERY document in the list above that "
-                "matches that category by reading its filename AND content preview, enumerate them "
-                "with their filenames, and state the exact count. Do NOT give a general summary.\n"
+                "receipts', 'count invoices'): identify EVERY document whose [Type:] label or "
+                "content preview indicates that category, enumerate them with their "
+                "filenames, and state the exact count. Do NOT give a general summary.\n"
                 "- If they asked what kind or type of files exist: give a short summary by file "
                 "format and document category (e.g. 'PDFs, spreadsheets, Word docs: invoices, "
-                "permits, reports…') — do NOT list every filename.\n"
+                "permits, reports\u2026') \u2014 do NOT list every filename.\n"
                 "- If they asked to list, show, or tell about all documents: list each document "
                 "with filename, brief description, file type, and status.\n"
-                "Be precise and consistent. Never say 'the context does not contain' — the full "
+                "Be precise and consistent. Never say 'the context does not contain' \u2014 the full "
                 "document list is provided above; always derive your answer from it."
             )
 
@@ -399,11 +552,6 @@ class RetrievalService:
         if with_ext:
             return with_ext.group(1)
 
-        stem = re.search(r"\b([A-Za-z][A-Za-z0-9_-]{2,})\b", question)
-        if stem:
-            token = stem.group(1)
-            if any(c in token for c in "0123456789-_"):
-                return token
         return None
 
     async def _select_relevant_files(self, question: str) -> Optional[List[str]]:

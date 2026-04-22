@@ -53,18 +53,18 @@ class DocumentProcessorOrchestrator:
 
     def __init__(
         self,
-        persist_dir: str = "./chroma_db",
-        embed_model_name: str = "BAAI/bge-small-en-v1.5",
-        max_file_size_mb: int = 50,
+                 persist_dir: str = "./chroma_db",
+                 embed_model_name: str = "BAAI/bge-small-en-v1.5",
+                 max_file_size_mb: int = 50,
         chunk_size: int = 300,       # tokens
         chunk_overlap: int = 50,     # tokens
         max_chunk_tokens: int = 512,
-        ollama_base_url: str = "http://localhost:11434",
-        ollama_model: str = "tinyllama",
-        gemini_api_key: Optional[str] = None,
-        gemini_model: str = "gemini-2.5-pro",
-        groq_api_key: Optional[str] = None,
-        groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
+                 ollama_base_url: str = "http://localhost:11434",
+                 ollama_model: str = "tinyllama",
+                 gemini_api_key: Optional[str] = None,
+                 gemini_model: str = "gemini-2.5-pro",
+                 groq_api_key: Optional[str] = None,
+                 groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
         llm_provider: str = "ollama",
     ) -> None:
         # ── OCR (optional) ────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ class DocumentProcessorOrchestrator:
             if str(ai_dir) not in sys.path:
                 sys.path.insert(0, str(ai_dir))
             from config import settings
-
+            
             ocr_service = OCRService(
                 tesseract_path=settings.TESSERACT_PATH if settings.TESSERACT_PATH else None,
                 cache_dir=settings.OCR_CACHE_DIR,
@@ -86,7 +86,7 @@ class DocumentProcessorOrchestrator:
         except (ImportError, AttributeError):
             logger.info("OCR settings not available, using defaults")
             ocr_service = OCRService()
-
+        
         # ── Primitive services ────────────────────────────────────────────────
         self.text_extractor = TextExtractor(ocr_service=ocr_service)
         self.chunker = DocumentChunker(chunk_size, chunk_overlap, max_tokens=max_chunk_tokens)
@@ -232,7 +232,7 @@ class DocumentProcessorOrchestrator:
 
     async def remove_document(self, file_path: str) -> None:
         await self.indexing.remove_document(file_path)
-
+    
     async def enqueue_update(
         self,
         file_path: str,

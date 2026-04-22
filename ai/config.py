@@ -87,6 +87,14 @@ class Settings:
     LOG_FILE: str = os.getenv("LOG_FILE", "")
     SQLALCHEMY_ECHO: bool = os.getenv("SQLALCHEMY_ECHO", "false").lower() in ("1", "true", "yes")
 
+    # When true, POST /api/debug/retrieval-inspect exposes retrieved context and RAG prompt preview.
+    # Off by default: can leak indexed document text to anyone who can reach the API.
+    RETRIEVAL_INSPECT_ENABLED: bool = os.getenv("RETRIEVAL_INSPECT_ENABLED", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
     # ── helpers ──────────────────────────────────────────────────────────
 
     def to_dict(self) -> Dict[str, Any]:

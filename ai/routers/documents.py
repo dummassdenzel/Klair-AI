@@ -42,13 +42,18 @@ async def set_directory(request: Request):
         current_dir = getattr(request.app.state, "current_directory", None)
         if current_dir:
             if os.path.normpath(os.path.abspath(current_dir)).lower() == directory_path.lower():
-                logger.info("Directory already set, skipping re-initialization")
-                return {
-                    "status": "success",
-                    "message": "Directory is already set. No re-initialization needed.",
-                    "directory": directory_path,
-                    "processing_status": "already_initialized",
-                }
+                # Only skip if the DB still has indexed docs for this directory.
+                # After /clear-index the app state may still point at the same directory,
+                # but the index is empty and we must rebuild it.
+                if await db_service.has_indexed_documents_for_directory(directory_path):
+                    logger.info("Directory already set, skipping re-initialization")
+                    return {
+                        "status": "success",
+                        "message": "Directory is already set. No re-initialization needed.",
+                        "directory": directory_path,
+                        "processing_status": "already_initialized",
+                    }
+                logger.info("Directory unchanged but index empty; re-initializing")
 
         old_monitor = getattr(request.app.state, "file_monitor", None)
         if old_monitor:
@@ -96,17 +101,6 @@ async def set_directory(request: Request):
         # inside an async context and that _load_existing_metadata reads the DB
         # *after* any clear_all_data() call has committed.
         await doc_processor.initialize()
-
-        # Invalidate any cached query results — they belong to the old index
-        app_cache = getattr(request.app.state, "query_cache", None)
-        if app_cache:
-            app_cache.clear()
-            logger.info("Query cache cleared for new directory")
-
-        # When background content indexing finishes, clear the cache again so the
-        # first post-indexing queries are not served stale "no information" answers
-        if app_cache:
-            doc_processor.set_post_index_hook(app_cache.clear)
 
         file_monitor = FileMonitorService(doc_processor)
         init_timeout = settings.INITIALIZE_DIRECTORY_TIMEOUT

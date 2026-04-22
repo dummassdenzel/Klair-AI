@@ -101,12 +101,12 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": TOOL_SEARCH_SPECIFIC_DOCUMENT,
-        "description": "Search only within the named document (e.g. BIP-12046.pdf or BIP-12046). Use when the user clearly refers to one file by name or identifier.",
-        "when_to_use": "Use when the user asks about a specific file by name: 'explain BIP-12046', 'what is in report.pdf', 'summarize that delivery note' (after resolving 'that' to the filename). Do NOT use for 'list all documents' or 'what files do we have'.",
+        "description": "Search only within the named document. Use when the user clearly refers to one file by name or identifier.",
+        "when_to_use": "Use when the user asks about a specific file by name: 'what is in report.pdf', 'explain contract.docx', 'summarize that file' (after resolving 'that' to the filename). Do NOT use for 'list all documents' or 'what files do we have'.",
         "parameters": {
             "document_name": {
                 "type": "string",
-                "description": "Document name or identifier (filename with extension, or stem like BIP-12046).",
+                "description": "Document name or identifier (filename with or without extension, e.g. 'report.pdf' or 'report').",
                 "required": True,
             },
         },

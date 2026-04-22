@@ -69,12 +69,21 @@ _LISTING_PATTERNS: list[re.Pattern] = [
         r"how many [\w\s]+ (?:do (?:we|i) have|are (?:there|in (?:our|my|the) (?:folder|files?|index))|exist)",
         # "count [category]" / "total number of [category]"
         r"^(?:count|total(?: number of)?|give me (?:a )?count of) [\w\s]+$",
+        # "what are our delivery receipts", "what are the invoices", "what are all the permits"
+        # Intent: enumerate documents by category — must route to list_documents, not search.
+        r"^what (?:are|were) (?:all )?(?:our|the|my)(?: the)? [\w ]+$",
+        # "what delivery receipts do we have", "what invoices do we have"
+        r"^what [\w ]+ do (?:we|i) have\s*$",
+        # "show me all [our/the] delivery receipts", "give me all the invoices"
+        r"^(?:show|give)(?: me)?(?: all)? (?:our|the|my|all(?: (?:our|the|my))?) [\w ]+$",
     ]
 ]
 
 
 def _normalize(text: str) -> str:
-    return text.strip().rstrip("?!.").strip().lower()
+    """Lowercase query with trailing punctuation stripped so listing regexes match."""
+    s = text.strip().rstrip("?!.,").strip().lower()
+    return s
 
 
 def _is_greeting(q: str) -> bool:

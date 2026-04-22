@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import List
 import numpy as np
 
@@ -16,24 +17,40 @@ class EmbeddingService:
     def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5"):
         self.model_name = model_name
         self.embed_model = None
+        self._init_lock = threading.Lock()
         # Don't initialize model immediately - use lazy loading
     
     def _initialize_model(self):
         """Initialize the embedding model (lazy loading)"""
         if self.embed_model is not None:
             return  # Already initialized
+        # Guard against concurrent initialization (background index + query warmup)
+        # which can trigger torch meta-tensor transfer errors.
+        with self._init_lock:
+            if self.embed_model is not None:
+                return
         
-        try:
-            # Import here to avoid startup issues
-            from sentence_transformers import SentenceTransformer
-            
-            logger.info(f"Loading embedding model: {self.model_name}")
-            self.embed_model = SentenceTransformer(self.model_name)
-            logger.info("Embedding model loaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to load embedding model: {e}")
-            raise
+            try:
+                # Import here to avoid startup issues
+                from sentence_transformers import SentenceTransformer
+                
+                logger.info(f"Loading embedding model: {self.model_name}")
+                # Force CPU to avoid device auto-detection edge cases on Windows
+                # that can surface as meta-tensor transfer errors in some torch builds.
+                self.embed_model = SentenceTransformer(self.model_name, device="cpu")
+                logger.info("Embedding model loaded successfully")
+            except Exception as e:
+                logger.error(f"Failed to load embedding model: {e}")
+                raise
     
+    # Conservative character cap before passing text to the embedding model.
+    # BGE-base max is 512 tokens; dense / garbled OCR text can produce > 512
+    # tokens from < 2 000 characters.  Capping here prevents the transformers
+    # "Token indices sequence length is longer than the specified maximum
+    # sequence length" warning and ensures the chunker's trim result is
+    # faithfully respected after the decode → re-encode round-trip.
+    _MAX_EMBED_CHARS = 1800
+
     def encode_texts(self, texts: List[str]) -> List[List[float]]:
         """Encode a list of texts to embeddings"""
         if not texts:
@@ -45,9 +62,16 @@ class EmbeddingService:
             
             if not self.embed_model:
                 raise RuntimeError("Embedding model not initialized")
+
+            # Hard-cap each text to prevent the embedding model from receiving
+            # sequences that exceed its positional-encoding window (512 tokens).
+            safe_texts = [
+                t[: self._MAX_EMBED_CHARS] if len(t) > self._MAX_EMBED_CHARS else t
+                for t in texts
+            ]
             
             # Convert to numpy array for batch processing
-            embeddings = self.embed_model.encode(texts, show_progress_bar=False)
+            embeddings = self.embed_model.encode(safe_texts, show_progress_bar=False)
             
             # Convert to list of lists
             if isinstance(embeddings, np.ndarray):

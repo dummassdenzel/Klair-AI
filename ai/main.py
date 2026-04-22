@@ -8,7 +8,6 @@ import logging
 from services.document_processor.extraction import PPTXConverter
 from config import settings
 from database import create_tables
-from query_cache import QueryCache
 
 from services.logging_config import setup_logging
 
@@ -32,7 +31,6 @@ async def lifespan(app: FastAPI):
     app.state.doc_processor = None
     app.state.file_monitor = None
     app.state.current_directory = None
-    app.state.query_cache = QueryCache(max_entries=500, ttl_seconds=3600)
 
     pptx_converter = PPTXConverter(
         libreoffice_path=settings.LIBREOFFICE_PATH or None,
@@ -85,8 +83,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from routers import chat, documents, system  # noqa: E402
+from routers import chat, debug_retrieval, documents, system  # noqa: E402
 
 app.include_router(chat.router)
 app.include_router(documents.router)
 app.include_router(system.router)
+app.include_router(debug_retrieval.router)

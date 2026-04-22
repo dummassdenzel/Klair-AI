@@ -402,6 +402,110 @@ Remove both methods. `switch_provider()` is the correct runtime API.
 
 ---
 
+## Phase 8 — Document Type Classification Reliability
+
+### 8.A — Populate `document_category` from Extracted Text During Indexing
+
+| | |
+|---|---|
+| **Status** | `[ ]` |
+| **Severity** | High |
+| **Type** | Missing metadata — LLM guesses from raw text instead of structured signal |
+| **Files** | `extraction/text_extractor.py`, `indexing_service.py`, `updates/update_executor.py`, `query_pipeline.py`, `retrieval_service.py` |
+
+**Problem:**
+The `indexed_documents` DB table already has a `document_category` column (defined in `models.py`) but it is **never populated**. Every call to `store_document_metadata()` passes `document_category=None`. The LLM must therefore guess a document's type (delivery receipt, bring-in permit, acknowledgement receipt…) from 120–200 characters of raw content preview alone. When BIP-12046 (a Bring-In Permit) contains the text `"Delivery Receipt: GUA04"` in its preview, the LLM misclassifies it as a delivery receipt.
+
+**Fix:**
+1. Add `extract_doc_title(text: str) -> Optional[str]` to `extraction/text_extractor.py` — returns the first non-empty line ≤ 80 characters that doesn't look like a metadata artifact.
+2. Call it during `_process_single_file` (indexing) and `_execute_full_reindex` (updates), passing the result as `document_category` to `store_document_metadata()`.
+3. Expose `document_category` in `run_tool_list_documents()` (tool path) and `get_document_listing()` (direct path) so the LLM sees `[Type: BRING-IN PERMIT]` next to each document in the listing context.
+
+**Expected outcome:** The listing context changes from:
+```
+- BIP-12046.pdf (pdf): BRING-IN PERMIT BIP-12046 … Delivery Receipt: GUA04 …
+```
+to:
+```
+- BIP-12046.pdf (pdf) [Type: BRING-IN PERMIT]: BRING-IN PERMIT BIP-12046 …
+```
+eliminating the misclassification.
+
+**Re-index note:** Requires a full re-index for existing documents to pick up their `document_category`.
+
+---
+
+### 8.B — Add Classifier Patterns for Category Enumeration Queries
+
+| | |
+|---|---|
+| **Status** | `[ ]` |
+| **Severity** | High |
+| **Type** | Routing error — natural category queries fall through to `document_search` |
+| **File** | `ai/services/routing/classifier.py` |
+
+**Problem:**
+`"What are our delivery receipts?"` is classified as `document_search` (the default) because the heuristic classifier has no pattern for it. For the Gemini/Ollama path this means the planner must infer tool selection; for the Groq path the agent loop decides (and often picks `search_documents` — the wrong tool). The correct route is `document_listing` → `list_documents`.
+
+**Fix:**
+Add two patterns to `_LISTING_PATTERNS`:
+- `"what are [our/the/all/my] [noun phrase]"` — e.g. "what are our delivery receipts"
+- `"what [noun phrase] do we have"` — e.g. "what delivery receipts do we have"
+
+---
+
+### 8.C — Apply Classifier Pre-filter Inside the Groq Tool Loop
+
+| | |
+|---|---|
+| **Status** | `[ ]` |
+| **Severity** | High |
+| **Type** | Routing error — Groq bypasses the classifier entirely |
+| **File** | `ai/services/document_processor/query_pipeline.py` |
+
+**Problem:**
+`_pipeline_tool_loop()` (used when `supports_tool_calling()` is True, i.e. Groq) enters the agent loop for **every** query — including document listing and category enumeration queries where `get_document_listing()` already exists as a cheaper, more reliable path. The Groq agent then decides between `list_documents` and `search_documents` on its own, frequently picking `search_documents`, which returns top-N semantic chunks (not a full document list) and produces wrong answers.
+
+**Fix:**
+At the top of `_pipeline_tool_loop`, call `self.router.resolve()` and short-circuit `DOCUMENT_LISTING` queries to `get_document_listing()` exactly as the planner path does — before any LLM call.
+
+---
+
+### 8.D — Add "Referenced vs. Declared" Instruction to Listing Prompts
+
+| | |
+|---|---|
+| **Status** | `[ ]` |
+| **Severity** | Medium |
+| **Type** | Prompt gap — LLM not taught to distinguish mentioned vs. self-declared type |
+| **Files** | `retrieval_service.py`, `query_pipeline.py` (AGENT_SYSTEM_MESSAGE) |
+
+**Problem:**
+Neither the `get_document_listing` response prompt nor the Groq `AGENT_SYSTEM_MESSAGE` tell the LLM that a document's **own declared type** (its header title) is the authoritative classifier, not the presence of a keyword in its content. A BIP that says `"Delivery Receipt: GUA04"` gets counted as a delivery receipt because nothing in the prompt contradicts this interpretation.
+
+**Fix:**
+Add to both prompts:
+> "CRITICAL — document type classification: classify a document as type X ONLY if the document's OWN title or header declares it to be X. A document that merely REFERENCES, MENTIONS, or is ASSOCIATED WITH another document type is NOT itself that type."
+
+---
+
+### 8.E — Increase Listing Preview from 120 to 200 Characters
+
+| | |
+|---|---|
+| **Status** | `[ ]` |
+| **Severity** | Medium |
+| **Type** | Insufficient context — LLM sees too little of each document to classify reliably |
+| **File** | `ai/services/document_processor/query_pipeline.py` |
+
+**Problem:**
+In `_format_tool_results_for_answer`, content previews are trimmed to 120 characters. For a document like `"BRING-IN PERMIT\nBIP-12046\n…\nDelivery Receipt: GUA04\nTotal Value: …"`, 120 chars often lands exactly where the referenced document type appears, causing the LLM to pattern-match on the wrong part of the text.
+
+**Fix:**
+Raise the cap from 120 → 200 characters.
+
+---
+
 ## Progress Tracker
 
 | Item | Description | Status | Notes |
@@ -412,10 +516,15 @@ Remove both methods. `switch_provider()` is the correct runtime API.
 | 3.1 | Disable or replace MS MARCO reranker | `[x]` | Removed entirely — reranker_service.py deleted, all call sites cleaned up |
 | 4.1 | Increase final_top_k and max_chunks_per_file | `[x]` | comprehensive_final_top_k 5→12, max_chunks_per_file 2→4 |
 | 4.2 | Tighten is_aggregation_query patterns | `[x]` | Removed 2 over-broad patterns; added 2 precise ones |
-| 5.1 | Spreadsheet tabular extraction pipeline | `[ ]` | Full overhaul — new extractor module |
-| 6.1 | Raise planner token limit + log fallback | `[ ]` | Small change |
+| 5.1 | Spreadsheet tabular extraction pipeline | `[x]` | SpreadsheetExtractor; wired into indexing, update_executor, update_worker |
+| 6.1 | Raise planner token limit + log fallback | `[x]` | PLANNER_MAX_TOKENS 400→600; fallback now logs WARNING |
 | 7.1 | Fix Gemini streaming | `[ ]` | Refactor generate_response_stream() |
 | 7.2 | Remove deprecated update_model/update_base_url | `[ ]` | Delete 2 methods |
+| 8.A | Populate document_category from extracted title | `[ ]` | extract_doc_title(); stored in DB; exposed in listing |
+| 8.B | Add category enumeration classifier patterns | `[ ]` | 'what are our [type]' → document_listing |
+| 8.C | Groq tool loop classifier pre-filter | `[ ]` | Short-circuit listing queries before agent loop |
+| 8.D | Referenced-vs-declared instruction in prompts | `[ ]` | Both listing prompts updated |
+| 8.E | Increase listing preview 120 → 200 chars | `[ ]` | _format_tool_results_for_answer |
 
 ---
 

@@ -40,7 +40,15 @@ class VectorStoreService:
                     "hnsw:space": "cosine"
                 }
             )
-            
+
+            actual_space = (self.collection.metadata or {}).get("hnsw:space")
+            if actual_space != "cosine":
+                logger.warning(
+                    "ChromaDB collection 'documents' uses distance metric %r instead of 'cosine'. "
+                    "Similarity scores will be incorrect. Delete the chroma_db directory and re-index.",
+                    actual_space,
+                )
+
             logger.info(f"ChromaDB initialized at {self.persist_dir}")
             
         except Exception as e:

@@ -1,11 +1,119 @@
+import json
 import logging
+import re as _re
 from pathlib import Path
-from typing import Optional
+from typing import FrozenSet, Optional
 import asyncio
 
 from .file_validator import BASE_SUPPORTED_EXTENSIONS, IMAGE_EXTENSIONS_OCR
 
 logger = logging.getLogger(__name__)
+
+# No built-in document types — the application is domain-agnostic by default.
+# Populate ``ai/resources/document_category_taxonomy.json`` with your domain's
+# document type names (e.g. "INVOICE", "CONTRACT", "REPORT") so that
+# extract_doc_title() and the listing classifier can recognise them.
+_DEFAULT_STANDALONE_DOC_TYPES: FrozenSet[str] = frozenset()
+
+# ``ai/services/document_processor/extraction`` → ``ai/resources``
+_TAXONOMY_JSON = Path(__file__).resolve().parents[3] / "resources" / "document_category_taxonomy.json"
+
+
+def _load_standalone_doc_types() -> FrozenSet[str]:
+    """Load standalone-line labels from taxonomy JSON. Returns empty set if not configured."""
+    if not _TAXONOMY_JSON.is_file():
+        return _DEFAULT_STANDALONE_DOC_TYPES
+    try:
+        with open(_TAXONOMY_JSON, encoding="utf-8") as f:
+            data = json.load(f)
+        raw = data.get("standalone_types")
+        if not isinstance(raw, list):
+            return _DEFAULT_STANDALONE_DOC_TYPES
+        return frozenset(str(t).strip().upper() for t in raw if str(t).strip())
+    except OSError as e:
+        logger.warning("Could not read document taxonomy at %s: %s", _TAXONOMY_JSON, e)
+        return _DEFAULT_STANDALONE_DOC_TYPES
+    except json.JSONDecodeError as e:
+        logger.warning("Invalid JSON in document taxonomy %s: %s", _TAXONOMY_JSON, e)
+        return _DEFAULT_STANDALONE_DOC_TYPES
+
+
+# Known document-type labels (standalone line). Prefer deployment JSON when present.
+STANDALONE_DOC_TYPES: FrozenSet[str] = _load_standalone_doc_types()
+
+# How far into the document to scan for a type label.
+_PRIMARY_TYPE_SCAN_CHARS = 16000
+
+
+def _normalize_title_line(line: str) -> str:
+    """Collapse internal whitespace for robust match against OCR / large headings."""
+    return _re.sub(r"\s+", " ", line.strip()).upper()
+
+
+def extract_doc_title(text: str) -> Optional[str]:
+    """
+    Return the first line of *text* that exactly matches a configured STANDALONE_DOC_TYPES
+    label (after whitespace normalization). Returns None when no match is found or when the
+    taxonomy is empty (the default — see ai/resources/document_category_taxonomy.json).
+    """
+    if not text or not STANDALONE_DOC_TYPES:
+        return None
+    for line in text[:_PRIMARY_TYPE_SCAN_CHARS].splitlines():
+        u = _normalize_title_line(line)
+        if u in STANDALONE_DOC_TYPES:
+            return u
+    return None
+
+
+def build_layout_aware_preview(text: str, max_chars: int = 500) -> str:
+    """
+    Build a stable preview from layout-marked extracted text.
+
+    When PDF extraction includes [Region: ...] markers, taking the first N chars
+    can hide the right-side panel (e.g. REFERENCES) behind long left/body text.
+    This composes a preview by taking small slices from each region in a fixed
+    order for Page 1: full → left → right.
+    """
+    if not text:
+        return ""
+    if "[Region:" not in text or "[Page 1]" not in text:
+        return (text[:max_chars] if len(text) > max_chars else text).strip()
+
+    # Extract the first page only for preview composition.
+    page1 = text.split("[Page 1]", 1)[1]
+    if "\n\n[Page " in page1:
+        page1 = page1.split("\n\n[Page ", 1)[0]
+
+    def _grab(region: str) -> str:
+        token = f"[Region: {region}]"
+        if token not in page1:
+            return ""
+        seg = page1.split(token, 1)[1]
+        seg = seg.split("[Region:", 1)[0]
+        return seg.strip()
+
+    full = _grab("full")
+    left = _grab("left")
+    right = _grab("right")
+
+    # Budget so right panel is visible when present.
+    full_budget = int(max_chars * 0.40)
+    side_budget = int(max_chars * 0.28)
+    right_budget = max_chars - (len("[Page 1]\n[Region: full]\n") + full_budget + len("\n[Region: left]\n") + side_budget + len("\n[Region: right]\n"))
+    right_budget = max(80, min(int(max_chars * 0.32), right_budget))
+
+    parts = ["[Page 1]"]
+    if full:
+        parts.extend(["[Region: full]", full[:full_budget].rstrip()])
+    if left:
+        parts.extend(["[Region: left]", left[:side_budget].rstrip()])
+    if right:
+        parts.extend(["[Region: right]", right[:right_budget].rstrip()])
+
+    composed = "\n".join(p for p in parts if p).strip()
+    if len(composed) > max_chars:
+        composed = composed[:max_chars].rstrip()
+    return composed
 
 
 class TextExtractor:
@@ -71,10 +179,130 @@ class TextExtractor:
         try:
             import fitz
             doc = fitz.open(file_path)
-            text = ""
-            for page in doc:
-                text += page.get_text()
+            text_parts = []
+            for page_idx, page in enumerate(doc, start=1):
+                # Industry-standard layout reconstruction:
+                # - Use "dict" (lines/spans with bounding boxes), not "blocks".
+                #   Blocks are often merged across columns/boxes, which is exactly
+                #   what caused DELIVER TO + REFERENCES to flatten together.
+                page_rect = page.rect
+                page_w = float(page_rect.width) if page_rect else 0.0
+                page_h = float(page_rect.height) if page_rect else 0.0
+                x_mid = page_w / 2.0 if page_w else 0.0
+
+                extracted = page.get_text("dict") or {}
+                blocks = extracted.get("blocks") or []
+
+                full_lines = []
+                left_lines = []
+                right_lines = []
+
+                def _is_full_width(x0f: float, x1f: float) -> bool:
+                    if not page_w:
+                        return False
+                    width = max(0.0, x1f - x0f)
+                    return bool(
+                        width >= 0.55 * page_w
+                        or (x0f <= 0.15 * page_w and x1f >= 0.85 * page_w)
+                    )
+
+                for b in blocks:
+                    if not isinstance(b, dict):
+                        continue
+                    lines = b.get("lines") or []
+                    for ln in lines:
+                        if not isinstance(ln, dict):
+                            continue
+                        bbox = ln.get("bbox") or None
+                        spans = ln.get("spans") or []
+                        if not bbox or len(bbox) != 4 or not spans:
+                            continue
+                        x0, y0, x1, y1 = bbox
+                        try:
+                            x0f, y0f, x1f, y1f = float(x0), float(y0), float(x1), float(y1)
+                        except (TypeError, ValueError):
+                            continue
+
+                        # Reconstruct line text by x-order spans.
+                        span_texts = []
+                        span_items = []
+                        for sp in spans:
+                            if not isinstance(sp, dict):
+                                continue
+                            t = sp.get("text") or ""
+                            sb = sp.get("bbox") or None
+                            if not t or not isinstance(t, str):
+                                continue
+                            if sb and len(sb) == 4:
+                                try:
+                                    sx0 = float(sb[0])
+                                except (TypeError, ValueError):
+                                    sx0 = x0f
+                            else:
+                                sx0 = x0f
+                            span_items.append((sx0, t))
+                        if not span_items:
+                            continue
+                        span_items.sort(key=lambda t: t[0])
+                        line_text = "".join(t[1] for t in span_items).strip()
+                        if not line_text:
+                            continue
+
+                        entry = (y0f, x0f, line_text)
+                        if _is_full_width(x0f, x1f):
+                            full_lines.append(entry)
+                            continue
+                        cx = (x0f + x1f) / 2.0
+                        if x_mid and cx < x_mid:
+                            left_lines.append(entry)
+                        else:
+                            right_lines.append(entry)
+
+                # If dict extraction produced nothing (rare), fall back to plain text.
+                if not (full_lines or left_lines or right_lines):
+                    t = page.get_text() or ""
+                    if t.strip():
+                        text_parts.append(f"[Page {page_idx}]\n{t.strip()}")
+                    continue
+
+                full_lines.sort(key=lambda t: (t[0], t[1]))
+                left_lines.sort(key=lambda t: (t[0], t[1]))
+                right_lines.sort(key=lambda t: (t[0], t[1]))
+
+                # Keep region labels, but preserve vertical reading intent:
+                # - "full" headers at the top should appear first
+                # - then left/right panels
+                # - then remaining full-width body text (e.g. long cargo description)
+                full_top = []
+                full_rest = []
+                # Heuristic: treat "top of page" full-width lines as headers/titles.
+                # This is more stable than comparing against panel y because PDF
+                # extraction sometimes reports body blocks with unexpectedly small y.
+                if not page_h:
+                    full_top = full_lines
+                else:
+                    top_cut = 0.32 * page_h
+                    for ln in full_lines:
+                        (full_top if ln[0] <= top_cut else full_rest).append(ln)
+
+                page_lines = [f"[Page {page_idx}]"]
+                if full_top:
+                    page_lines.append("[Region: full]")
+                    page_lines.append("\n".join(t[2] for t in full_top))
+                if left_lines:
+                    page_lines.append("[Region: left]")
+                    page_lines.append("\n".join(t[2] for t in left_lines))
+                if right_lines:
+                    page_lines.append("[Region: right]")
+                    page_lines.append("\n".join(t[2] for t in right_lines))
+                if full_rest:
+                    page_lines.append("[Region: full]")
+                    page_lines.append("\n".join(t[2] for t in full_rest))
+                page_text = "\n".join(page_lines).strip()
+                if page_text:
+                    text_parts.append(page_text)
             doc.close()
+            text = "\n\n".join(text_parts)
             
             # Check if PDF has extractable text
             if text.strip():
@@ -104,7 +332,11 @@ class TextExtractor:
         try:
             import docx
             doc = docx.Document(file_path)
-            return "\n".join([para.text for para in doc.paragraphs])
+            parts = [para.text for para in doc.paragraphs]
+            for table in doc.tables:
+                for row in table.rows:
+                    parts.append("\t".join(cell.text for cell in row.cells))
+            return "\n".join(parts)
         except Exception as e:
             logger.error(f"DOCX extraction failed for {file_path}: {e}")
             raise

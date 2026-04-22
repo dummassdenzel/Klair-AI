@@ -20,11 +20,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .models import ProcessingResult
-from .extraction.text_extractor import TextExtractor
+from .extraction.text_extractor import TextExtractor, build_layout_aware_preview
 from .extraction.chunker import DocumentChunker
 from .extraction.embedding_service import EmbeddingService
 from .extraction.file_validator import FileValidator
 from .extraction.spreadsheet_extractor import SpreadsheetExtractor, is_spreadsheet
+from .extraction.text_extractor import extract_doc_title
 from .storage.vector_store import VectorStoreService
 from .storage.bm25_service import BM25Service
 from .retrieval.filename_trie import FilenameTrie
@@ -557,6 +558,7 @@ class IndexingService:
                     )
                     self.files_being_processed.discard(file_path)
                     return
+                doc_title = None  # Spreadsheet chunks have metadata headers, not titles
             else:
                 text = await self.text_extractor.extract_text_async(file_path)
                 if not text or not text.strip():
@@ -574,7 +576,12 @@ class IndexingService:
                     self.files_being_processed.discard(file_path)
                     return
                 chunks = self.chunker.create_chunks(text, file_path)
-                content_preview = text[:500]
+                content_preview = build_layout_aware_preview(text, max_chars=500)
+                # Extract document's self-declared title from the first lines of text.
+                # This populates document_category so the listing context shows
+                # [Type: DELIVERY RECEIPT] / [Type: BRING-IN PERMIT] next to each file,
+                # preventing the LLM from misclassifying documents based on references.
+                doc_title = extract_doc_title(text)
             embeddings = self.embedding_service.encode_texts([chunk.text for chunk in chunks])
             await self.vector_store.batch_insert_chunks(chunks, embeddings)
             bm25_documents = [
@@ -601,6 +608,7 @@ class IndexingService:
                 content_preview=content_preview,
                 chunks_count=len(chunks),
                 processing_status="indexed",
+                document_category=doc_title,
             )
 
             self._metadata_cache.set(file_path, current_hash, file_metadata)

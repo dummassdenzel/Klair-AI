@@ -16,8 +16,14 @@ Dependencies injected via constructor:
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+
+# Strips the "Page N:" marker that the OCR service prepends to each document's
+# extracted text.  Removing it from listing previews lets the LLM see the
+# actual document content on the first line instead of a page-counter artifact.
+_OCR_PAGE_RE = re.compile(r'^Page \d+:\n?', re.IGNORECASE)
 
 from .models import QueryResult
 from .llm.llm_service import LLMService
@@ -64,17 +70,29 @@ class QueryPipelineService:
         "When the user asks what files exist or for an overview, use list_documents and/or summarize_corpus; "
         "do not use search_documents for that. When the user asks about a specific file by name, use "
         "search_specific_document with that name. "
-        "IMPORTANT — counting and category queries: when the user asks 'how many [type] do we have', "
-        "'count [category]', or anything that requires enumerating documents by category (e.g. delivery "
-        "receipts, invoices, permits), ALWAYS call list_documents first. The returned document list includes "
-        "filenames AND content previews that let you identify each document's category. Never use "
-        "search_documents or summarize_corpus for counting — search only returns top-N chunks and may "
-        "miss documents, while summarize_corpus returns only aggregate stats without individual filenames. "
+        "TOOL SELECTION RULES — read carefully:\n"
+        "• list_documents → use when the user wants to ENUMERATE or COUNT documents by category/type "
+        "(e.g. 'how many reports do we have', 'list all contracts', 'show me all invoices'). "
+        "The returned list includes [Type:] labels and content previews so you can classify and count documents. "
+        "DO NOT use search_documents or summarize_corpus for counting documents.\n"
+        "• search_documents → use when the user needs to EXTRACT SPECIFIC VALUES or DATA from inside "
+        "documents (e.g. 'what is the total amount', 'find all mentions of X', 'what does the agreement say about Y'). "
+        "For value/amount queries you MUST use search_documents with a targeted content query — "
+        "the document list only shows brief previews and does NOT contain detailed figures. "
+        "If a value query also requires knowing which documents are relevant, call list_documents FIRST "
+        "then search_documents for the actual values from each relevant document.\n"
+        "• search_specific_document → use when the user names a specific file and wants its content.\n"
+        "• summarize_corpus → use only for a general high-level overview/summary of the folder.\n"
         "When the user asks for 'related' documents or 'other files related to X', use search_documents with a "
-        "descriptive query (e.g. 'BIP-12046 related documents' or 'documents related to BIP-12046 receipt delivery'), "
-        "not just the document identifier. "
+        "descriptive query, not just the document identifier. "
         "Citation format: when citing list_documents or summarize_corpus results, use [Folder Overview] or [Document List], "
-        "not [Document: list_documents]. When citing search results that mention a specific file, use [Document: filename]."
+        "not [Document: list_documents]. When citing search results that mention a specific file, use [Document: filename]. "
+        "CRITICAL — document type classification rules (follow in order): "
+        "1. If a document has a [Type: ...] label → that IS its type. "
+        "2. If no [Type:] label → infer the document type from its content preview or title as a whole. "
+        "Classify based on what the document IS, not what it merely mentions or references. "
+        "3. NEVER classify a document based on a keyword that appears only as a column header or table value "
+        "referencing another document — check the document's own title or prominent heading first."
     )
 
     # 600 tokens gives a comfortable margin for long query strings inside the JSON
@@ -438,6 +456,7 @@ class QueryPipelineService:
                     "chunks_count": getattr(doc, "chunks_count", 0) or 0,
                     "content_preview": preview,
                     "processing_status": getattr(doc, "processing_status", "indexed"),
+                    "document_category": getattr(doc, "document_category", None) or None,
                 }
             )
         return {"documents": documents, "count": len(documents)}
@@ -691,6 +710,27 @@ class QueryPipelineService:
         """Shared pipeline for native tool-calling providers (e.g. Groq)."""
         from config import settings
 
+        # Apply the same classifier pre-filter used by the planner path.
+        # Document-listing queries are cheaper and more reliable through
+        # get_document_listing() than through the agent tool loop, because the
+        # agent often picks search_documents (which returns top-N chunks, not a
+        # full list) for category-enumeration questions like "what are our DRs?".
+        route_result = await self.router.resolve(question, conversation_history)
+        if route_result.route == Route.DOCUMENT_LISTING:
+            logger.info(
+                "Tool-loop pre-filter: document_listing → DB query (no agent call)"
+            )
+            result = await self.retrieval.get_document_listing(question=question)
+            return {
+                "action": "direct",
+                "answer": result.message,
+                "sources": result.sources,
+                "query_type": "document_listing",
+                "retrieval_count": getattr(result, "retrieval_count", 0) or 0,
+                "rerank_count": 0,
+                "start_time": start_time,
+            }
+
         max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
         messages = self._build_agent_messages(question, conversation_history)
         tools = get_openai_format_tools()
@@ -803,15 +843,20 @@ class QueryPipelineService:
             "You are a planner for a document assistant. Output ONLY valid JSON, no other text.\n\n"
             f"Available tools:\n{tools_text}\n\n"
             "Rules:\n"
-            "- If the user asks what files or documents exist, or for an overview of the folder, "
-            "use list_documents and/or summarize_corpus; do not use search_documents for that.\n"
-            "- COUNTING / CATEGORY queries ('how many [type] do we have', 'count invoices', "
-            "'list all delivery receipts', etc.): use list_documents ONLY — never summarize_corpus "
-            "for these, because summarize_corpus returns only aggregate stats without individual "
-            "filenames. The LLM needs the full file list with content previews to count by category.\n"
-            "- Use search_specific_document when the user names a specific file.\n"
-            "- Use search_documents only for factual questions about document content or 'related documents'.\n"
-            "- For greetings or small talk output empty tools.\n"
+            "- DOCUMENT ENUMERATION / COUNTING ('how many [type] do we have', 'list all delivery receipts', "
+            "'what are our delivery receipts', 'count invoices'): use list_documents ONLY — never use "
+            "summarize_corpus or search_documents for counting documents, because search returns only "
+            "top-N chunks and may miss documents.\n"
+            "- VALUE / AMOUNT EXTRACTION ('total value of delivery receipts', 'sum of all amounts', "
+            "'what is the total', 'how much is X worth'): use search_documents with a targeted content "
+            "query (e.g. 'delivery receipt total PHP pesos amount value'). The document list only shows "
+            "brief 200-char previews — financial values are in the document body and require search. "
+            "If identifying which documents to search requires knowing their category, call list_documents "
+            "first, then search_documents for the actual values.\n"
+            "- FOLDER OVERVIEW / SUMMARY: use summarize_corpus and/or list_documents.\n"
+            "- SPECIFIC FILE by name: use search_specific_document.\n"
+            "- FACTUAL QUESTIONS about content: use search_documents.\n"
+            "- GREETINGS / SMALL TALK: output empty tools.\n"
             'Output format: {"tools": [{"tool": "tool_name", "query": "..." or "document_name": "..." as needed}]}'
             ' or {"tools": []} for no tools.\n\n'
             f"{history_snippet}User: {question}\n\nJSON output:"
@@ -898,10 +943,17 @@ class QueryPipelineService:
                     name = d.get("filename") or d.get("file_path", "")
                     ftype = d.get("file_type", "")
                     preview = (d.get("content_preview") or "").strip()
-                    # Trim preview to 120 chars so the listing stays concise but informative
-                    if len(preview) > 120:
-                        preview = preview[:120].rstrip() + "…"
+                    # Strip "Page N:" OCR prefix so the LLM sees document content
+                    # rather than the OCR service's page-marker artifact.
+                    preview = _OCR_PAGE_RE.sub("", preview, count=1).strip()
+                    # 200 chars gives the LLM enough text to see both the document's own
+                    # header/title AND some content, without making the listing too long.
+                    if len(preview) > 200:
+                        preview = preview[:200].rstrip() + "…"
+                    category = (d.get("document_category") or "").strip()
                     entry = f"- {name} ({ftype})"
+                    if category:
+                        entry += f" [Type: {category}]"
                     if preview:
                         entry += f": {preview}"
                     doc_lines.append(entry)
