@@ -28,10 +28,7 @@ from .storage.bm25_service import BM25Service
 from .llm.llm_service import LLMService
 from .retrieval.hybrid_search import HybridSearchService
 from .updates.update_queue import UpdateQueue
-from .updates.update_executor import UpdateExecutor
 from .updates.update_worker import UpdateWorker
-from .updates.chunk_differ import ChunkDiffer
-from .updates.update_strategy import UpdateStrategySelector
 from .query_config import RetrievalConfig, default_retrieval_config
 from .indexing_service import IndexingService
 from .retrieval_service import RetrievalService
@@ -116,30 +113,9 @@ class DocumentProcessorOrchestrator:
         # to produce chunks from XLS/XLSX files (avoids duplicate instantiation).
         self.spreadsheet_extractor = SpreadsheetExtractor()
 
-        self.chunk_differ = ChunkDiffer(self.embedding_service)
-        self.strategy_selector = UpdateStrategySelector()
-        self.update_executor = UpdateExecutor(
-            vector_store=self.vector_store,
-            bm25_service=self.bm25_service,
-            text_extractor=self.text_extractor,
-            chunker=self.chunker,
-            embedding_service=self.embedding_service,
-            database_service=self.database_service,
-            chunk_differ=self.chunk_differ,
-            file_validator=self.file_validator,
-            spreadsheet_extractor=self.spreadsheet_extractor,
-        )
-        _update_worker = UpdateWorker(
-            update_queue=_update_queue,
-            update_executor=self.update_executor,
-            chunk_differ=self.chunk_differ,
-            strategy_selector=self.strategy_selector,
-            chunker=self.chunker,
-            text_extractor=self.text_extractor,
-            spreadsheet_extractor=self.spreadsheet_extractor,
-        )
-
         # ── Composed services ─────────────────────────────────────────────────
+        # IndexingService is created first (update_worker=None); the worker is
+        # wired in afterwards to break the circular dependency.
         self.indexing = IndexingService(
             text_extractor=self.text_extractor,
             file_validator=self.file_validator,
@@ -149,12 +125,13 @@ class DocumentProcessorOrchestrator:
             bm25_service=self.bm25_service,
             database_service=self.database_service,
             update_queue=_update_queue,
-            update_executor=self.update_executor,
-            update_worker=_update_worker,
-            chunk_differ=self.chunk_differ,
-            strategy_selector=self.strategy_selector,
             spreadsheet_extractor=self.spreadsheet_extractor,
         )
+        _update_worker = UpdateWorker(
+            update_queue=_update_queue,
+            indexing_service=self.indexing,
+        )
+        self.indexing.update_worker = _update_worker
 
         self.retrieval = RetrievalService(
             embedding_service=self.embedding_service,

@@ -16,8 +16,6 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from enum import IntEnum
 
-from .update_strategy import UpdateStrategy
-
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +37,6 @@ class UpdateTask:
     priority: int  # Higher = more important (0-1000)
     file_path: str
     update_type: str  # "created", "modified", "deleted"
-    strategy: Optional[UpdateStrategy] = None
     change_percentage: float = 0.0
     file_size_bytes: int = 0
     enqueued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -65,7 +62,6 @@ class UpdateResult:
     """Result of an update operation"""
     success: bool
     file_path: str
-    strategy: UpdateStrategy
     chunks_updated: int
     processing_time: float
     error_message: Optional[str] = None
@@ -103,7 +99,6 @@ class UpdateQueue:
         file_path: str,
         update_type: str = "modified",
         priority: Optional[int] = None,
-        strategy: Optional[UpdateStrategy] = None,
         change_percentage: float = 0.0,
         file_size_bytes: int = 0,
         last_queried: Optional[datetime] = None,
@@ -117,7 +112,6 @@ class UpdateQueue:
             file_path: Path to file to update
             update_type: Type of update ("created", "modified", "deleted")
             priority: Explicit priority (0-1000). If None, will be calculated.
-            strategy: Update strategy (optional, can be set later)
             change_percentage: Percentage of chunks that changed (0.0-1.0)
             file_size_bytes: File size in bytes
             last_queried: When file was last queried (for recency boost)
@@ -149,7 +143,6 @@ class UpdateQueue:
                 priority=priority,
                 file_path=file_path,
                 update_type=update_type,
-                strategy=strategy,
                 change_percentage=change_percentage,
                 file_size_bytes=file_size_bytes,
                 enqueued_at=datetime.now(timezone.utc),
@@ -237,7 +230,6 @@ class UpdateQueue:
         result = UpdateResult(
             success=False,
             file_path=file_path,
-            strategy=UpdateStrategy.FULL_REINDEX,  # Default
             chunks_updated=0,
             processing_time=0.0,
             error_message=error_message
@@ -344,7 +336,6 @@ class UpdateQueue:
                 "priority": task.priority,
                 "update_type": task.update_type,
                 "enqueued_at": task.enqueued_at.isoformat(),
-                "strategy": task.strategy.value if task.strategy else None
             })
         return tasks
     

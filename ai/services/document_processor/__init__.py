@@ -24,16 +24,13 @@ from .retrieval_service import RetrievalService
 from .query_pipeline import QueryPipelineService
 from .models import (
     DocumentChunk, QueryResult, FileMetadata, ProcessingResult,
-    ChunkMatch, ChunkDiffResult
 )
 from .extraction import TextExtractor, DocumentChunker, EmbeddingService, FileValidator
 from .storage import VectorStoreService, BM25Service
 from .llm import LLMService
 from .retrieval import HybridSearchService, FilenameTrie
 from .updates import (
-    ChunkDiffer, UpdateStrategy, UpdateStrategySelector, StrategySelectionResult,
-    UpdateQueue, UpdateTask, UpdateResult, UpdatePriority,
-    UpdateExecutor, Checkpoint, UpdateWorker
+    UpdateQueue, UpdateTask, UpdateResult, UpdatePriority, UpdateWorker
 )
 
 __all__ = [
@@ -43,11 +40,9 @@ __all__ = [
     "RetrievalService",
     "QueryPipelineService",
     "DocumentChunk",
-    "QueryResult", 
+    "QueryResult",
     "FileMetadata",
     "ProcessingResult",
-    "ChunkMatch",
-    "ChunkDiffResult",
     "TextExtractor",
     "DocumentChunker",
     "EmbeddingService",
@@ -56,15 +51,9 @@ __all__ = [
     "FileValidator",
     "BM25Service",
     "HybridSearchService",
-    "ChunkDiffer",
-    "UpdateStrategy",
-    "UpdateStrategySelector",
-    "StrategySelectionResult",
     "UpdateQueue",
     "UpdateTask",
     "UpdateResult",
     "UpdatePriority",
-    "UpdateExecutor",
-    "Checkpoint",
     "UpdateWorker",
 ]

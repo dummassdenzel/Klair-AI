@@ -76,7 +76,7 @@ The routing pre-filters (greeting/listing short-circuits) remain valid and shoul
 
 **Files to delete:** `update_executor.py`, `update_strategy.py`, `chunk_differ.py` (~750 lines)
 **Files to keep (but simplify):** `update_queue.py`, `update_worker.py`
-**Status:** `[ ]`
+**Status:** `[x]` Fixed — deleted `update_executor.py`, `update_strategy.py`, `chunk_differ.py`. Rewrote `UpdateWorker` to delegate directly to `IndexingService.add_document()` / `remove_document()`. Removed `UpdateStrategy` from `update_queue.py`. Simplified `IndexingService` and `orchestrator.py` constructors.
 
 This is the most over-engineered part of the entire codebase. The design promises:
 - Three strategies: `FULL_REINDEX`, `CHUNK_UPDATE`, `SMART_HYBRID`
@@ -712,7 +712,7 @@ The PDF column-detection logic prefixes extracted text with `[Region: full]`, `[
 |----|----------|----------|-------------|--------|
 | DR1 | Drop & Replace | Critical | Drop LLM layer → LiteLLM | `[ ]` |
 | DR2 | Drop & Replace | High | Drop planner path (~250 lines) | `[ ]` |
-| DR3 | Drop & Replace | High | Drop updates pipeline → simple re-index | `[ ]` |
+| DR3 | Drop & Replace | High | Drop updates pipeline → simple re-index | `[x]` Fixed |
 | DR4 | Drop & Replace | Medium | Drop `currency_totals.py` | `[x]` Fixed |
 | DR5 | Drop & Replace | Medium | Drop `Settings` class → Pydantic `BaseSettings` | `[ ]` |
 | F1 | Fix | Critical | Filename stem regex misdirects queries | `[x]` Fixed |

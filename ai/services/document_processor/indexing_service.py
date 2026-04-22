@@ -30,10 +30,7 @@ from .storage.vector_store import VectorStoreService
 from .storage.bm25_service import BM25Service
 from .retrieval.filename_trie import FilenameTrie
 from .updates.update_queue import UpdateQueue
-from .updates.update_executor import UpdateExecutor
 from .updates.update_worker import UpdateWorker
-from .updates.chunk_differ import ChunkDiffer
-from .updates.update_strategy import UpdateStrategySelector
 from database import DatabaseService
 
 
@@ -101,10 +98,7 @@ class IndexingService:
         bm25_service: BM25Service,
         database_service: DatabaseService,
         update_queue: UpdateQueue,
-        update_executor: UpdateExecutor,
-        update_worker: UpdateWorker,
-        chunk_differ: ChunkDiffer,
-        strategy_selector: UpdateStrategySelector,
+        update_worker: Optional[UpdateWorker] = None,
         spreadsheet_extractor: Optional[SpreadsheetExtractor] = None,
     ) -> None:
         self.text_extractor = text_extractor
@@ -116,10 +110,7 @@ class IndexingService:
         self.bm25_service = bm25_service
         self.database_service = database_service
         self.update_queue = update_queue
-        self.update_executor = update_executor
         self.update_worker = update_worker
-        self.chunk_differ = chunk_differ
-        self.strategy_selector = strategy_selector
 
         # Shared with RetrievalService (passed by reference)
         self.filename_trie = FilenameTrie()
@@ -156,7 +147,8 @@ class IndexingService:
         final state.
         """
         asyncio.create_task(self._load_existing_metadata())
-        asyncio.create_task(self.update_worker.start())
+        if self.update_worker is not None:
+            asyncio.create_task(self.update_worker.start())
         logger.debug("IndexingService background tasks started (metadata loader + update worker)")
 
     # ------------------------------------------------------------------
