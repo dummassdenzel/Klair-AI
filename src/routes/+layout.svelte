@@ -322,6 +322,14 @@
             refreshCount++;
             loadIndexedDocuments(); // debounced
 
+            // Fetch accurate progress from backend (not limited to 100-doc sample)
+            try {
+              const prog = await apiService.getIndexingProgress();
+              if (prog) {
+                indexingProgress.set({ indexed: prog.processed, total: prog.total });
+              }
+            } catch (_) { /* non-critical — UI falls back to document list counts */ }
+
             const currentIndexedCount = indexedDocuments.filter(
               (doc: any) => doc.processing_status === 'indexed'
             ).length;
@@ -458,6 +466,7 @@
       isLoadingDocuments={isLoadingDocuments}
       isIndexingInProgress={isIndexingInProgress}
       contentIndexingInProgress={$contentIndexingInProgress}
+      indexingProgress={$indexingProgress}
       metadataIndexed={$metadataIndexed}
       openDropdownId={openDropdownId}
       onNewChat={startNewChat}

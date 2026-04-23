@@ -126,6 +126,14 @@ class IndexingService:
         self._shutdown: bool = False
         self._post_index_hook = None
 
+        # Progress tracking for background content indexing
+        self._progress: Dict[str, Any] = {
+            "total": 0,
+            "processed": 0,
+            "failed": 0,
+            "is_active": False,
+        }
+
     # ------------------------------------------------------------------
     # Hook registration
     # ------------------------------------------------------------------
@@ -133,6 +141,10 @@ class IndexingService:
     def set_post_index_hook(self, hook) -> None:
         """Register a no-arg callable invoked once when background content indexing completes."""
         self._post_index_hook = hook
+
+    def get_indexing_progress(self) -> Dict[str, Any]:
+        """Return a snapshot of current background indexing progress."""
+        return dict(self._progress)
 
     # ------------------------------------------------------------------
     # Background task startup
@@ -215,6 +227,7 @@ class IndexingService:
 
             logger.info(f"Starting background content indexing for {len(metadata_files)} files...")
             self._shutdown = False
+            self._progress = {"total": len(metadata_files), "processed": 0, "failed": 0, "is_active": True}
             self._indexing_task = asyncio.create_task(
                 self._index_content_background(metadata_files, directory_path)
             )
@@ -371,6 +384,8 @@ class IndexingService:
                         logger.error(f"Background indexing failed: {result}")
                     else:
                         processed += 1
+                self._progress["processed"] = processed
+                self._progress["failed"] = failed
                 await asyncio.to_thread(self.bm25_service.save)
                 if (i + batch_size) % 50 == 0 or i + batch_size >= len(file_paths):
                     logger.info(
@@ -393,6 +408,7 @@ class IndexingService:
             logger.error(f"Background content indexing error: {e}")
         finally:
             self._indexing_task = None
+            self._progress["is_active"] = False
             if not self._shutdown and file_paths and processed > 0:
                 try:
                     n = await self.database_service.set_documents_indexed(file_paths)

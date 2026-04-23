@@ -123,6 +123,11 @@ export const apiService = {
     return response.data;
   },
 
+  async getIndexingProgress(): Promise<{ total: number; processed: number; failed: number; is_active: boolean }> {
+    const response = await apiClient.get('/indexing/progress');
+    return response.data.progress;
+  },
+
   // Chat Session Management
   async getChatSessions(): Promise<ChatSession[]> {
     const response = await apiClient.get('/chat-sessions');

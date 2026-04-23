@@ -11,8 +11,10 @@ The provider_adapters module is kept for per-provider token limits and
 context truncation — concerns that exist regardless of HTTP client.
 """
 
+import asyncio
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+import random
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from config import settings
 from .provider_adapters import (
@@ -51,6 +53,37 @@ class LLMService:
         self._adapter: LLMProviderAdapter = adapter or create_adapter_for_provider(self.provider, settings)
         self._token_usage: Dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
         logger.info("LLMService initialized with provider: %s", self.provider)
+
+    # ── Retry helper ─────────────────────────────────────────────────────────
+
+    async def _with_retry(self, coro_factory: Callable, label: str = "") -> Any:
+        """
+        Execute `coro_factory()` and retry up to 3 times on 429 rate-limit errors
+        using exponential backoff (1 s → 2 s → 4 s + up to 0.5 s jitter).
+        All other exceptions propagate immediately.
+        """
+        delays = [1.0, 2.0, 4.0]
+        for attempt in range(len(delays) + 1):
+            try:
+                return await coro_factory()
+            except Exception as exc:
+                s = str(exc).lower()
+                is_rate_limit = (
+                    "ratelimiterror" in type(exc).__name__.lower()
+                    or "429" in s
+                    or "rate limit" in s
+                    or "too many requests" in s
+                )
+                if not is_rate_limit or attempt >= len(delays):
+                    raise
+                delay = delays[attempt] + random.uniform(0, 0.5)
+                logger.warning(
+                    "LLM rate limited (429)%s — retrying in %.1fs (attempt %d/3)",
+                    f" [{label}]" if label else "",
+                    delay,
+                    attempt + 1,
+                )
+                await asyncio.sleep(delay)
 
     # ── Provider helpers ──────────────────────────────────────────────────────
 
@@ -189,13 +222,16 @@ class LLMService:
             else self._adapter.get_max_output_tokens(prompt_type)
         )
         try:
-            response = await litellm.acompletion(
-                model=self._litellm_model(),
-                messages=[{"role": "user", "content": prompt}],
-                api_key=self._api_key(),
-                temperature=0.1,
-                max_tokens=out_tokens,
-                **self._extra_kwargs(),
+            response = await self._with_retry(
+                lambda: litellm.acompletion(
+                    model=self._litellm_model(),
+                    messages=[{"role": "user", "content": prompt}],
+                    api_key=self._api_key(),
+                    temperature=0.1,
+                    max_tokens=out_tokens,
+                    **self._extra_kwargs(),
+                ),
+                label="generate_simple",
             )
             self._record_usage(response, label=f"generate_simple_{self.provider}")
             return (response.choices[0].message.content or "").strip() or "I couldn't generate a response."
@@ -211,13 +247,16 @@ class LLMService:
         messages = self._build_messages(query, context, conversation_history or [])
         max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
         try:
-            response = await litellm.acompletion(
-                model=self._litellm_model(),
-                messages=messages,
-                api_key=self._api_key(),
-                temperature=getattr(settings, "LLM_TEMPERATURE", 0.1),
-                max_tokens=max_tokens,
-                **self._extra_kwargs(),
+            response = await self._with_retry(
+                lambda: litellm.acompletion(
+                    model=self._litellm_model(),
+                    messages=messages,
+                    api_key=self._api_key(),
+                    temperature=getattr(settings, "LLM_TEMPERATURE", 0.1),
+                    max_tokens=max_tokens,
+                    **self._extra_kwargs(),
+                ),
+                label="generate_response",
             )
             self._record_usage(response, label=f"generate_response_{self.provider}")
             return (response.choices[0].message.content or "").strip() or "I couldn't generate a response."
@@ -233,14 +272,17 @@ class LLMService:
         messages = self._build_messages(query, context, conversation_history or [])
         max_tokens = getattr(settings, "LLM_MAX_RESPONSE_TOKENS", 8192)
         try:
-            stream = await litellm.acompletion(
-                model=self._litellm_model(),
-                messages=messages,
-                api_key=self._api_key(),
-                temperature=getattr(settings, "LLM_TEMPERATURE", 0.1),
-                max_tokens=max_tokens,
-                stream=True,
-                **self._extra_kwargs(),
+            stream = await self._with_retry(
+                lambda: litellm.acompletion(
+                    model=self._litellm_model(),
+                    messages=messages,
+                    api_key=self._api_key(),
+                    temperature=getattr(settings, "LLM_TEMPERATURE", 0.1),
+                    max_tokens=max_tokens,
+                    stream=True,
+                    **self._extra_kwargs(),
+                ),
+                label="generate_response_stream",
             )
             async for chunk in stream:
                 delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
@@ -258,15 +300,18 @@ class LLMService:
     ) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
         import litellm
         try:
-            response = await litellm.acompletion(
-                model=self._litellm_model(),
-                messages=messages,
-                api_key=self._api_key(),
-                tools=tools,
-                tool_choice="auto",
-                temperature=0.1,
-                max_tokens=max_tokens,
-                **self._extra_kwargs(),
+            response = await self._with_retry(
+                lambda: litellm.acompletion(
+                    model=self._litellm_model(),
+                    messages=messages,
+                    api_key=self._api_key(),
+                    tools=tools,
+                    tool_choice="auto",
+                    temperature=0.1,
+                    max_tokens=max_tokens,
+                    **self._extra_kwargs(),
+                ),
+                label="chat_with_tools",
             )
             self._record_usage(response, label=f"chat_with_tools_{self.provider}")
             msg = response.choices[0].message if response.choices else None
@@ -306,13 +351,16 @@ class LLMService:
         max_tokens: int = 4096,
     ) -> Optional[str]:
         import litellm
-        response = await litellm.acompletion(
-            model=self._litellm_model(),
-            messages=messages,
-            api_key=self._api_key(),
-            temperature=0.1,
-            max_tokens=max_tokens,
-            **self._extra_kwargs(),
+        response = await self._with_retry(
+            lambda: litellm.acompletion(
+                model=self._litellm_model(),
+                messages=messages,
+                api_key=self._api_key(),
+                temperature=0.1,
+                max_tokens=max_tokens,
+                **self._extra_kwargs(),
+            ),
+            label="chat_no_tools",
         )
         self._record_usage(response, label=f"_chat_no_tools_{self.provider}")
         msg = response.choices[0].message if response.choices else None
@@ -325,14 +373,17 @@ class LLMService:
     ) -> AsyncIterator[str]:
         import litellm
         try:
-            stream = await litellm.acompletion(
-                model=self._litellm_model(),
-                messages=messages,
-                api_key=self._api_key(),
-                temperature=0.1,
-                max_tokens=max_tokens,
-                stream=True,
-                **self._extra_kwargs(),
+            stream = await self._with_retry(
+                lambda: litellm.acompletion(
+                    model=self._litellm_model(),
+                    messages=messages,
+                    api_key=self._api_key(),
+                    temperature=0.1,
+                    max_tokens=max_tokens,
+                    stream=True,
+                    **self._extra_kwargs(),
+                ),
+                label="chat_messages_stream",
             )
             async for chunk in stream:
                 delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""

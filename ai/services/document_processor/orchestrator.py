@@ -324,6 +324,10 @@ class DocumentProcessorOrchestrator:
         except Exception:
             return {"prompt": 0, "completion": 0, "total": 0}
 
+    def get_indexing_progress(self) -> Dict:
+        """Return background content-indexing progress: total, processed, failed, is_active."""
+        return self.indexing.get_indexing_progress()
+
     async def cleanup(self) -> None:
         """Release all resources."""
         try:

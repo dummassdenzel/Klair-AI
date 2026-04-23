@@ -174,6 +174,20 @@ async def reload_embedding_model(request: dict, state=Depends(require_app_state)
 # Document queries
 # ---------------------------------------------------------------------------
 
+@router.get("/indexing/progress")
+async def get_indexing_progress(request: Request):
+    """Return real-time background content-indexing progress."""
+    doc_processor = getattr(request.app.state, "doc_processor", None)
+    if doc_processor is None:
+        return {"status": "success", "progress": {"total": 0, "processed": 0, "failed": 0, "is_active": False}}
+    try:
+        progress = doc_processor.get_indexing_progress()
+        return {"status": "success", "progress": progress}
+    except Exception as e:
+        logger.error(f"Failed to get indexing progress: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/documents/stats")
 async def get_document_stats():
     try:
