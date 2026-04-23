@@ -19,12 +19,20 @@ TOOL_LIST_DOCUMENTS = "list_documents"
 TOOL_SEARCH_DOCUMENTS = "search_documents"
 TOOL_SEARCH_SPECIFIC_DOCUMENT = "search_specific_document"
 TOOL_SUMMARIZE_CORPUS = "summarize_corpus"
+TOOL_PROPOSE_DOCUMENT_EDIT = "propose_document_edit"
+TOOL_RENAME_FILE = "rename_file"
+TOOL_DELETE_FILE = "delete_file"
+TOOL_MOVE_FILE = "move_file"
 
 VALID_TOOL_NAMES = frozenset({
     TOOL_LIST_DOCUMENTS,
     TOOL_SEARCH_DOCUMENTS,
     TOOL_SEARCH_SPECIFIC_DOCUMENT,
     TOOL_SUMMARIZE_CORPUS,
+    TOOL_PROPOSE_DOCUMENT_EDIT,
+    TOOL_RENAME_FILE,
+    TOOL_DELETE_FILE,
+    TOOL_MOVE_FILE,
 })
 
 # ---------------------------------------------------------------------------
@@ -119,6 +127,83 @@ TOOL_DEFINITIONS = [
         "parameters": {},
         "returns": "SummarizeCorpusResult",
     },
+    {
+        "name": TOOL_RENAME_FILE,
+        "description": "Rename a file in the indexed folder.",
+        "when_to_use": "Use when the user asks to rename a file. Requires the current filename and the desired new filename.",
+        "parameters": {
+            "document_name": {
+                "type": "string",
+                "description": "Current filename (e.g. 'old_name.docx').",
+                "required": True,
+            },
+            "new_name": {
+                "type": "string",
+                "description": "New filename including extension (e.g. 'new_name.docx'). Must not contain path separators.",
+                "required": True,
+            },
+        },
+        "returns": "FileOpResult",
+    },
+    {
+        "name": TOOL_DELETE_FILE,
+        "description": "Permanently delete a file from the indexed folder. This cannot be undone.",
+        "when_to_use": "Use ONLY when the user explicitly confirms they want to permanently delete a file. Always confirm with the user before calling this tool.",
+        "parameters": {
+            "document_name": {
+                "type": "string",
+                "description": "Filename to delete (e.g. 'old_report.pdf').",
+                "required": True,
+            },
+        },
+        "returns": "FileOpResult",
+    },
+    {
+        "name": TOOL_MOVE_FILE,
+        "description": "Move a file to a different folder within the indexed directory.",
+        "when_to_use": "Use when the user asks to move a file to another folder. Use list_documents first to identify the exact destination folder path.",
+        "parameters": {
+            "document_name": {
+                "type": "string",
+                "description": "Filename to move (e.g. 'report.pdf').",
+                "required": True,
+            },
+            "destination_folder": {
+                "type": "string",
+                "description": "Name or partial path of the destination folder (e.g. 'Reports' or 'Archive/2025'). Use list_documents to find exact folder names.",
+                "required": True,
+            },
+        },
+        "returns": "FileOpResult",
+    },
+    {
+        "name": TOOL_PROPOSE_DOCUMENT_EDIT,
+        "description": (
+            "Propose an edit to a .txt or .docx file. Reads the file, generates a structured "
+            "find/replace diff, and presents it to the user for review before anything is written. "
+            "The user must confirm before any change is applied."
+        ),
+        "when_to_use": (
+            "Use when the user asks to modify, update, edit, change, fix, or rewrite content "
+            "in a specific file. Only works with .txt and .docx files."
+        ),
+        "parameters": {
+            "document_name": {
+                "type": "string",
+                "description": "Name of the file to edit (e.g. 'contract.docx', 'notes.txt').",
+                "required": True,
+            },
+            "instruction": {
+                "type": "string",
+                "description": (
+                    "Clear, specific description of what to change. "
+                    "Example: 'change all occurrences of Net 30 to Net 15'."
+                ),
+                "required": True,
+            },
+        },
+        "returns": "EditProposalResult",
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -132,15 +217,23 @@ TOOL_CALL_ITEM_SCHEMA = {
         "tool": {
             "type": "string",
             "enum": list(VALID_TOOL_NAMES),
-            "description": "One of: list_documents, search_documents, search_specific_document, summarize_corpus",
+            "description": "One of: list_documents, search_documents, search_specific_document, summarize_corpus, propose_document_edit, rename_file, delete_file, move_file",
         },
         "query": {
             "type": "string",
-            "description": "Required when tool is search_documents. The rewritten search query.",
+            "description": "Required when tool is search_documents.",
         },
         "document_name": {
             "type": "string",
-            "description": "Required when tool is search_specific_document. The document name or identifier (e.g. BIP-12046.pdf).",
+            "description": "Required for search_specific_document, propose_document_edit, rename_file, delete_file, move_file.",
+        },
+        "new_name": {
+            "type": "string",
+            "description": "Required when tool is rename_file. The new filename including extension.",
+        },
+        "destination_folder": {
+            "type": "string",
+            "description": "Required when tool is move_file. Name or partial path of the destination folder.",
         },
     },
     "required": ["tool"],
@@ -229,6 +322,10 @@ def validate_tool_call(
         doc_name = document_name or name
         if not doc_name or not str(doc_name).strip():
             return False, "search_specific_document requires a non-empty 'document_name'"
+    if tool == TOOL_PROPOSE_DOCUMENT_EDIT:
+        doc_name = document_name or name
+        if not doc_name or not str(doc_name).strip():
+            return False, "propose_document_edit requires a non-empty 'document_name'"
     return True, ""
 
 

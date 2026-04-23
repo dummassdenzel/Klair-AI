@@ -85,9 +85,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from routers import chat, debug_retrieval, documents, system  # noqa: E402
+from routers import chat, debug_retrieval, documents, edit, file_ops, system  # noqa: E402
 
 app.include_router(chat.router)
 app.include_router(documents.router)
+app.include_router(edit.router)
+app.include_router(file_ops.router)
 app.include_router(system.router)
 app.include_router(debug_retrieval.router)

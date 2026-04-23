@@ -151,6 +151,10 @@ async def chat_stream(chat_request: ChatRequest, request: Request, state=Depends
                         sources[:] = payload.get("sources", [])
                         query_type = payload.get("query_type", "document_search")
                         yield _format_sse("meta", {"sources": sources, "session_id": chat_session.id})
+                    elif event_type == "edit_proposal":
+                        yield _format_sse("edit_proposal", payload)
+                    elif event_type == "file_op_proposal":
+                        yield _format_sse("file_op_proposal", payload)
                     elif event_type == "token":
                         yield _format_sse("token", {"delta": payload})
                     elif event_type == "done":

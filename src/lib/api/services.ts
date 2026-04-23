@@ -41,6 +41,8 @@ export const apiService = {
       onToken?: (delta: string) => void;
       onDone?: (message: string, responseTime: number) => void;
       onError?: (detail: string) => void;
+      onEditProposal?: (proposal: import('./types').EditProposal) => void;
+      onFileOpProposal?: (proposal: import('./types').FileOpProposal) => void;
     }
   ): Promise<void> {
     const baseURL = apiClient.defaults.baseURL ?? '';
@@ -76,6 +78,10 @@ export const apiService = {
             const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
             if (event === 'meta') {
               callbacks.onMeta?.((data.sources as ChatResponse['sources']) ?? [], (data.session_id as number) ?? 0);
+            } else if (event === 'edit_proposal') {
+              callbacks.onEditProposal?.(data as unknown as import('./types').EditProposal);
+            } else if (event === 'file_op_proposal') {
+              callbacks.onFileOpProposal?.(data as unknown as import('./types').FileOpProposal);
             } else if (event === 'token') {
               callbacks.onToken?.((data.delta as string) ?? '');
             } else if (event === 'done') {
@@ -126,6 +132,16 @@ export const apiService = {
   async getIndexingProgress(): Promise<{ total: number; processed: number; failed: number; is_active: boolean }> {
     const response = await apiClient.get('/indexing/progress');
     return response.data.progress;
+  },
+
+  async applyEditProposal(proposalId: string): Promise<{ status: string; message: string; applied_changes: number; backup_path: string }> {
+    const response = await apiClient.post('/documents/edit/apply', { proposal_id: proposalId });
+    return response.data;
+  },
+
+  async discardEditProposal(proposalId: string): Promise<{ status: string }> {
+    const response = await apiClient.post('/documents/edit/discard', { proposal_id: proposalId });
+    return response.data;
   },
 
   // Chat Session Management
@@ -200,6 +216,27 @@ export const apiService = {
       console.error('Failed to create SSE stream:', error);
       return null;
     }
+  },
+
+  // File operations
+  async renameFile(filePath: string, newName: string): Promise<{ status: string; new_path: string }> {
+    const response = await apiClient.post('/files/rename', { file_path: filePath, new_name: newName });
+    return response.data;
+  },
+
+  async deleteFile(filePath: string): Promise<{ status: string }> {
+    const response = await apiClient.post('/files/delete', { file_path: filePath });
+    return response.data;
+  },
+
+  async moveFile(filePath: string, destinationDir: string): Promise<{ status: string; new_path: string }> {
+    const response = await apiClient.post('/files/move', { file_path: filePath, destination_dir: destinationDir });
+    return response.data;
+  },
+
+  async getFolders(): Promise<{ root: string; tree: import('./types').FolderNode }> {
+    const response = await apiClient.get('/files/folders');
+    return response.data;
   },
 
   // Configuration

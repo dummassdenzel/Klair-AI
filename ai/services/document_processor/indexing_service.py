@@ -494,6 +494,11 @@ class IndexingService:
             use_queue: If True, use update queue (incremental updates).
                        If False, process directly (initial indexing).
         """
+        is_valid, reason = self.file_validator.validate_file(file_path)
+        if not is_valid:
+            logger.debug(f"Skipping {file_path}: {reason}")
+            return
+
         if use_queue:
             current_hash = await asyncio.to_thread(self.file_validator.calculate_file_hash, file_path)
             stored_hash, _ = await self._get_cached_or_db_hash_metadata(file_path)
@@ -633,9 +638,10 @@ class IndexingService:
             self.files_being_processed.discard(file_path)
 
     async def remove_document(self, file_path: str) -> None:
-        """Remove document and clean up tracking."""
+        """Remove document from vector store, database, trie, and metadata cache."""
         try:
             await self.vector_store.remove_document_chunks(file_path)
+            await self.database_service.delete_document_by_path(file_path)
             filename = Path(file_path).name
             self.filename_trie.remove(filename, file_path)
             self._metadata_cache.remove(file_path)

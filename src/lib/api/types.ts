@@ -83,6 +83,19 @@ export interface ChatRequest {
     message_count: number;
   }
   
+  export interface EditChange {
+    find: string;
+    replace: string;
+  }
+
+  export interface EditProposal {
+    proposal_id: string;
+    document_name: string;
+    file_type: string;
+    changes: EditChange[];
+    summary: string;
+  }
+
   export interface ChatMessage {
     id: number;
     session_id: number;
@@ -91,6 +104,25 @@ export interface ChatRequest {
     sources: DocumentSource[];
     response_time: number;
     timestamp: string;
+    edit_proposal?: EditProposal | null;
+    file_op_proposals?: FileOpProposal[];
+  }
+
+  export interface FileOpProposal {
+    id: string;
+    type: 'rename' | 'delete' | 'move';
+    file_path: string;
+    document_name: string;
+    new_name?: string;
+    destination_folder?: string;
+    destination_path?: string;
+  }
+
+  // File operations
+  export interface FolderNode {
+    name: string;
+    path: string;
+    children: FolderNode[];
   }
 
   // LLM Configuration

@@ -304,6 +304,7 @@ async def get_document_file(request: Request, document_id: int, state=Depends(re
             headers={
                 "X-Document-Id": str(document_id), "X-File-Type": file_type,
                 "X-File-Size": str(document.file_size) if document.file_size else "0",
+                "Cache-Control": "no-store",
             },
         )
     except HTTPException:
@@ -358,6 +359,7 @@ async def get_document_preview(
                 "X-Document-Id": str(document_id), "X-Original-File": path_obj.name,
                 "X-Preview-Format": "pdf",
                 "X-Cache-Used": "true" if use_cache and pptx_converter.get_cached_pdf(document.file_path) else "false",
+                "Cache-Control": "no-store",
             },
         )
     except HTTPException:

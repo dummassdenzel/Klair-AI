@@ -33,6 +33,7 @@ from .query_config import RetrievalConfig, default_retrieval_config
 from .indexing_service import IndexingService
 from .retrieval_service import RetrievalService
 from .query_pipeline import QueryPipelineService
+from .edit_service import EditService
 from database import DatabaseService
 from ..routing import Router, QueryClassifier
 
@@ -145,12 +146,16 @@ class DocumentProcessorOrchestrator:
             database_service=self.database_service,
         )
 
+        self.edit_service = EditService()
+
         _router = Router(QueryClassifier(self.llm_service))
         self.pipeline = QueryPipelineService(
             llm_service=self.llm_service,
             embedding_service=self.embedding_service,
             router=_router,
             retrieval_service=self.retrieval,
+            edit_service=self.edit_service,
+            file_ops=self,
         )
 
         logger.info(
@@ -204,6 +209,7 @@ class DocumentProcessorOrchestrator:
         self, directory_path: str, resume_mode: bool = False
     ) -> None:
         await self.indexing.initialize_from_directory(directory_path, resume_mode)
+        self.edit_service.current_directory = directory_path
 
     async def add_document(
         self, file_path: str, force_reindex: bool = False, use_queue: bool = True
@@ -327,6 +333,76 @@ class DocumentProcessorOrchestrator:
     def get_indexing_progress(self) -> Dict:
         """Return background content-indexing progress: total, processed, failed, is_active."""
         return self.indexing.get_indexing_progress()
+
+    def get_edit_proposal(self, proposal_id: str):
+        """Look up a pending edit proposal by ID."""
+        return self.edit_service.get_proposal(proposal_id)
+
+    def apply_edit_proposal(self, proposal_id: str) -> Dict:
+        """Validate and apply a confirmed edit proposal. Returns result dict."""
+        proposal = self.edit_service.get_proposal(proposal_id)
+        if proposal is None:
+            raise ValueError(f"Proposal '{proposal_id}' not found or expired")
+        result = self.edit_service.apply_proposal(proposal)
+        result["file_path"] = proposal.file_path  # include so the router can trigger re-index
+        self.edit_service.remove_proposal(proposal_id)
+        return result
+
+    async def rename_file(self, file_path: str, new_name: str) -> str:
+        """Rename a file and re-index it. Returns the new absolute path."""
+        import shutil as _shutil
+        from pathlib import Path as _Path
+        src = _Path(file_path).resolve()
+        abs_dir = _Path(self.current_directory).resolve()
+        if abs_dir not in src.parents and src != abs_dir:
+            raise ValueError("File is outside the indexed directory")
+        if not src.exists():
+            raise ValueError(f"File not found: {file_path}")
+        new_name = new_name.strip()
+        if not new_name or "/" in new_name or "\\" in new_name:
+            raise ValueError("Invalid filename")
+        dst = src.parent / new_name
+        if dst.exists():
+            raise ValueError(f"'{new_name}' already exists in this folder")
+        src.rename(dst)
+        await self.remove_document(str(src))
+        await self.add_document(str(dst), use_queue=False)
+        return str(dst)
+
+    async def delete_file(self, file_path: str) -> None:
+        """Delete a file from disk and remove it from the index."""
+        from pathlib import Path as _Path
+        src = _Path(file_path).resolve()
+        abs_dir = _Path(self.current_directory).resolve()
+        if abs_dir not in src.parents and src != abs_dir:
+            raise ValueError("File is outside the indexed directory")
+        if not src.exists():
+            raise ValueError(f"File not found: {file_path}")
+        await self.remove_document(str(src))
+        src.unlink()
+
+    async def move_file(self, file_path: str, destination_dir: str) -> str:
+        """Move a file to destination_dir and re-index it. Returns the new absolute path."""
+        import shutil as _shutil
+        from pathlib import Path as _Path
+        src = _Path(file_path).resolve()
+        abs_dir = _Path(self.current_directory).resolve()
+        if abs_dir not in src.parents and src != abs_dir:
+            raise ValueError("File is outside the indexed directory")
+        if not src.exists():
+            raise ValueError(f"File not found: {file_path}")
+        dst_dir = _Path(destination_dir).resolve()
+        if abs_dir != dst_dir and abs_dir not in dst_dir.parents:
+            raise ValueError("Destination is outside the indexed directory")
+        if not dst_dir.is_dir():
+            raise ValueError(f"Destination folder not found: {destination_dir}")
+        dst = dst_dir / src.name
+        if dst.exists():
+            raise ValueError(f"'{src.name}' already exists in the destination folder")
+        _shutil.move(str(src), str(dst))
+        await self.remove_document(str(src))
+        await self.add_document(str(dst), use_queue=False)
+        return str(dst)
 
     async def cleanup(self) -> None:
         """Release all resources."""

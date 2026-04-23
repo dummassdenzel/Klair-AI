@@ -652,6 +652,18 @@ class DatabaseService:
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
+    async def delete_document_by_path(self, file_path: str) -> None:
+        """Delete a single IndexedDocument record by file path."""
+        async with AsyncSessionLocal() as session:
+            try:
+                await session.execute(
+                    delete(IndexedDocument).where(IndexedDocument.file_path == file_path)
+                )
+                await session.commit()
+            except Exception as e:
+                await session.rollback()
+                logger.warning("Failed to delete DB record for %s: %s", file_path, e)
+
     async def delete_all_indexed_documents(self) -> None:
         """Delete all IndexedDocument records."""
         async with AsyncSessionLocal() as session:

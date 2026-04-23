@@ -14,6 +14,8 @@
   import type { ChatMessage } from "$lib/api/types";
   import MarkdownRenderer from "$lib/components/MarkdownRenderer.svelte";
   import FileTypeIcon from "$lib/components/FileTypeIcon.svelte";
+  import EditProposalCard from "$lib/components/EditProposalCard.svelte";
+  import FileOpProposalCard from "$lib/components/FileOpProposalCard.svelte";
   import { getFileTypeConfig } from "$lib/utils/fileTypes";
   import { messageToConversationTitle } from "$lib/utils/chatTitle";
   import { formatCalendarDate } from "$lib/utils/dateFormat";
@@ -170,6 +172,18 @@
               msg.id === userMessage.id ? { ...msg, sources } : msg,
             );
             setTimeout(() => scrollLastAiResponseToTop(true), 50);
+          },
+          onEditProposal(proposal) {
+            messages = messages.map((msg) =>
+              msg.id === userMessage.id ? { ...msg, edit_proposal: proposal } : msg,
+            );
+          },
+          onFileOpProposal(proposal) {
+            messages = messages.map((msg) =>
+              msg.id === userMessage.id
+                ? { ...msg, file_op_proposals: [...(msg.file_op_proposals ?? []), proposal] }
+                : msg,
+            );
           },
           onToken(delta) {
             messages = messages.map((msg) =>
@@ -365,6 +379,32 @@
               >
                 <MarkdownRenderer content={message.ai_response} className="text-sm leading-relaxed" />
               </div>
+
+              <!-- Edit Proposal Card -->
+              {#if message.edit_proposal}
+                <EditProposalCard
+                  proposal={message.edit_proposal}
+                  onApplied={() => {
+                    messages = messages.map((m) =>
+                      m.id === message.id ? { ...m, edit_proposal: null } : m
+                    );
+                  }}
+                  onDiscarded={() => {
+                    messages = messages.map((m) =>
+                      m.id === message.id ? { ...m, edit_proposal: null } : m
+                    );
+                  }}
+                />
+              {/if}
+
+              <!-- File Operation Proposal Cards (rename / delete / move) -->
+              {#each message.file_op_proposals ?? [] as prop (prop.id)}
+                <FileOpProposalCard
+                  proposal={prop}
+                  onConfirmed={() => {}}
+                  onDiscarded={() => {}}
+                />
+              {/each}
 
               <!-- Message Metadata -->
               

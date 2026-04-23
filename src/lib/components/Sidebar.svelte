@@ -1,11 +1,13 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import type { ChatSession, IndexedDocument } from '$lib/api/types';
   import { updateQueueStatus, systemStatus } from '$lib/stores/api';
   import DocumentTreeNav from '$lib/components/DocumentTreeNav.svelte';
+  import FolderPickerModal from '$lib/components/FolderPickerModal.svelte';
   import type { DocumentTreeNode } from '$lib/api/types';
   import { formatCalendarDate } from '$lib/utils/dateFormat';
+  import { apiService } from '$lib/api/services';
 
   let {
     currentRoute = '/',
@@ -25,7 +27,9 @@
     onLoadSession = () => {},
     onDeleteSession = () => {},
     onToggleDropdown = () => {},
-    onDocumentClick = () => {}
+    onDocumentClick = () => {},
+    onRefreshDocuments = () => {},
+    collapsed = false,
   } = $props<{
     currentRoute?: string;
     chatHistory?: ChatSession[];
@@ -45,10 +49,27 @@
     onDeleteSession?: (sessionId: number) => void;
     onToggleDropdown?: (sessionId: number, event: MouseEvent) => void;
     onDocumentClick?: (document: IndexedDocument) => void;
+    onRefreshDocuments?: () => void;
+    collapsed?: boolean;
   }>();
 
   let sidebarView = $state<'menu' | 'chat' | 'documents'>('menu');
   let isSidebarHovered = $state(false);
+
+  // Save the active view when the document panel opens, restore it when it closes
+  let _savedView: 'menu' | 'chat' | 'documents' | null = null;
+  $effect(() => {
+    if (collapsed) {
+      _savedView = untrack(() => sidebarView);
+      isSidebarHovered = false;
+      sidebarView = 'menu';
+    } else if (_savedView !== null) {
+      sidebarView = _savedView;
+      _savedView = null;
+    }
+  });
+
+  let isExpanded = $derived(isSidebarHovered || sidebarView !== 'menu');
 
   // Filtering and sorting state
   let searchQuery = $state('');
@@ -56,6 +77,89 @@
   let sortBy = $state<'name' | 'type' | 'size' | 'date' | 'chunks'>('name');
   let sortOrder = $state<'asc' | 'desc'>('asc');
   let showFilterDropdown = $state(false);
+
+  // File operation modals
+  type FileOpModal =
+    | { type: 'rename'; doc: IndexedDocument; value: string }
+    | { type: 'delete'; doc: IndexedDocument }
+    | { type: 'move';   doc: IndexedDocument }
+    | null;
+
+  let fileOpModal = $state<FileOpModal>(null);
+  let fileOpError = $state('');
+  let fileOpLoading = $state(false);
+
+  function openFileAction(action: 'rename' | 'delete' | 'move', doc: IndexedDocument) {
+    fileOpError = '';
+    if (action === 'rename') {
+      const name = doc.file_path.replace(/\\/g, '/').split('/').pop() ?? '';
+      fileOpModal = { type: 'rename', doc, value: name };
+    } else if (action === 'delete') {
+      fileOpModal = { type: 'delete', doc };
+    } else {
+      fileOpModal = { type: 'move', doc };
+    }
+  }
+
+  async function commitRename() {
+    if (fileOpModal?.type !== 'rename') return;
+    const { doc, value } = fileOpModal;
+    if (!value.trim()) return;
+    fileOpLoading = true;
+    fileOpError = '';
+    try {
+      const result = await apiService.renameFile(doc.file_path, value.trim());
+      fileOpModal = null;
+      window.dispatchEvent(new CustomEvent('fileModified', {
+        detail: { oldPath: doc.file_path, newPath: result.new_path ?? '' }
+      }));
+      onRefreshDocuments();
+    } catch (err: any) {
+      fileOpError = err?.response?.data?.detail ?? err?.message ?? 'Rename failed';
+    } finally {
+      fileOpLoading = false;
+    }
+  }
+
+  async function commitDelete() {
+    if (fileOpModal?.type !== 'delete') return;
+    const { doc } = fileOpModal;
+    fileOpLoading = true;
+    fileOpError = '';
+    try {
+      await apiService.deleteFile(doc.file_path);
+      fileOpModal = null;
+      window.dispatchEvent(new CustomEvent('fileDeleted', { detail: { filePath: doc.file_path } }));
+      onRefreshDocuments();
+    } catch (err: any) {
+      fileOpError = err?.response?.data?.detail ?? err?.message ?? 'Delete failed';
+    } finally {
+      fileOpLoading = false;
+    }
+  }
+
+  async function commitMove(destinationDir: string) {
+    if (fileOpModal?.type !== 'move') return;
+    const { doc } = fileOpModal;
+    fileOpLoading = true;
+    fileOpError = '';
+    try {
+      const result = await apiService.moveFile(doc.file_path, destinationDir);
+      fileOpModal = null;
+      window.dispatchEvent(new CustomEvent('fileModified', {
+        detail: { oldPath: doc.file_path, newPath: result.new_path ?? '' }
+      }));
+      onRefreshDocuments();
+    } catch (err: any) {
+      fileOpError = err?.response?.data?.detail ?? err?.message ?? 'Move failed';
+      fileOpLoading = false;
+    }
+  }
+
+  function handleRenameKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') commitRename();
+    if (e.key === 'Escape') fileOpModal = null;
+  }
 
   function handleChatClick() {
     sidebarView = 'chat';
@@ -219,13 +323,10 @@
 
 <!-- Left Sidebar -->
 <div 
-  class="bg-[#F7F7F7] dark:bg-gray-900 border-r border-gray-100 dark:border-gray-800 flex flex-col overflow-hidden overflow-x-hidden flex-shrink-0 transition-all duration-300 {(isSidebarHovered || sidebarView !== 'menu') ? 'w-80' : 'w-20'}"
-  onmouseenter={() => isSidebarHovered = true}
+  class="bg-[#F7F7F7] dark:bg-gray-900 border-r border-gray-100 dark:border-gray-800 flex flex-col overflow-hidden overflow-x-hidden flex-shrink-0 transition-all duration-300 {isExpanded ? 'w-80' : 'w-20'}"
+  onmouseenter={() => { isSidebarHovered = true; }}
   onmouseleave={() => {
-    // Only collapse if we're in menu view
-    if (sidebarView === 'menu') {
-      isSidebarHovered = false;
-    }
+    if (sidebarView === 'menu') isSidebarHovered = false;
   }}
   role="navigation"
   aria-label="Sidebar navigation"
@@ -235,16 +336,16 @@
   <div class="flex justify-center items-center gap-3 pt-10 pb-6 px-4">
     <div class="flex items-center overflow-hidden">
       <img src="/klair.ai-sm.png" class="w-10 h-10 flex-shrink-0" alt="klair.ai logo" />
-      <span class="font-bold text-xl text-gray-700 dark:text-gray-100 whitespace-nowrap transition-opacity duration-300 {(isSidebarHovered || sidebarView !== 'menu') ? 'opacity-100' : 'opacity-0 w-0'}">klair.ai</span>
+      <span class="font-bold text-xl text-gray-700 dark:text-gray-100 whitespace-nowrap transition-opacity duration-300 {isExpanded ? 'opacity-100' : 'opacity-0 w-0'}">klair.ai</span>
     </div>
   </div>
 
   {#if sidebarView === 'menu'}
     <!-- Menu View -->
-    <div class="flex-1 overflow-y-auto overflow-x-hidden pb-6 transition-all duration-300 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'}">
+    <div class="flex-1 overflow-y-auto overflow-x-hidden pb-6 transition-all duration-300 {isExpanded ? 'px-6' : 'px-3'}">
       <div class="space-y-2">
         <!-- Workspace folder (moved from chat top-right) -->
-        {#if (isSidebarHovered || sidebarView !== 'menu')}
+        {#if isExpanded}
           <div class="mb-2">
             <p class="text-[0.65rem] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide px-0.5">
               Workspace
@@ -298,10 +399,10 @@
         <!-- New Chat Button -->
         <button
           onclick={onNewChat}
-          class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-[#443C68] text-white rounded-xl hover:bg-[#3A3457] transition-all duration-300 flex items-center justify-center border border-[#443C68] shadow-sm mb-4 h-[48px]"
+          class="w-full py-3 {isExpanded ? 'px-6' : 'px-3'} bg-[#443C68] text-white rounded-xl hover:bg-[#3A3457] transition-all duration-300 flex items-center justify-center border border-[#443C68] shadow-sm mb-4 h-[48px]"
           title="New Chat"
         >
-          {#if (isSidebarHovered || sidebarView !== 'menu')}
+          {#if isExpanded}
             <svg class="w-5 h-5 mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
             </svg>
@@ -318,10 +419,10 @@
         <!-- Chat Button -->
         <button
           onclick={handleChatClick}
-          class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white dark:bg-gray-950 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-900 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 dark:border-gray-800 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
+          class="w-full py-3 {isExpanded ? 'px-6' : 'px-3'} bg-white dark:bg-gray-950 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-900 transition-all duration-300 flex items-center {isExpanded ? 'justify-between' : 'justify-center'} border border-gray-200 dark:border-gray-800 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
           title="Chat"
         >
-          {#if (isSidebarHovered || sidebarView !== 'menu')}
+          {#if isExpanded}
             <div class="flex items-center gap-3">
               <svg class="w-5 h-5 text-[#443C68] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
@@ -341,10 +442,10 @@
         <!-- Indexed Documents Button -->
         <button
           onclick={handleDocumentsClick}
-          class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white dark:bg-gray-950 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-900 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 dark:border-gray-800 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
+          class="w-full py-3 {isExpanded ? 'px-6' : 'px-3'} bg-white dark:bg-gray-950 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-900 transition-all duration-300 flex items-center {isExpanded ? 'justify-between' : 'justify-center'} border border-gray-200 dark:border-gray-800 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
           title="Indexed Documents"
         >
-          {#if (isSidebarHovered || sidebarView !== 'menu')}
+          {#if isExpanded}
             <div class="flex items-center gap-3">
               <svg class="w-5 h-5 text-[#443C68] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -389,10 +490,10 @@
         <!-- Settings Button -->
         <button
           onclick={() => goto('/settings')}
-          class="w-full py-3 {(isSidebarHovered || sidebarView !== 'menu') ? 'px-6' : 'px-3'} bg-white dark:bg-gray-950 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-900 transition-all duration-300 flex items-center {(isSidebarHovered || sidebarView !== 'menu') ? 'justify-between' : 'justify-center'} border border-gray-200 dark:border-gray-800 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
+          class="w-full py-3 {isExpanded ? 'px-6' : 'px-3'} bg-white dark:bg-gray-950 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-900 transition-all duration-300 flex items-center {isExpanded ? 'justify-between' : 'justify-center'} border border-gray-200 dark:border-gray-800 hover:border-[#443C68]/30 shadow-sm group h-[48px]"
           title="Settings"
         >
-          {#if (isSidebarHovered || sidebarView !== 'menu')}
+          {#if isExpanded}
             <div class="flex items-center gap-3">
               <svg class="w-5 h-5 text-[#443C68] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" />
@@ -795,6 +896,7 @@
               expandedPathKeys={expandedPathKeys}
               onToggleFolder={toggleFolder}
               onDocumentClick={onDocumentClick}
+              onFileAction={openFileAction}
             />
           </div>
           {/if}
@@ -803,4 +905,79 @@
     </div>
   {/if}
 </div>
+
+<!-- ── File operation modals ── -->
+
+{#if fileOpModal?.type === 'rename'}
+  {@const modal = fileOpModal}
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" role="dialog" aria-modal="true">
+    <div class="bg-white dark:bg-gray-900 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 w-[380px] p-5 flex flex-col gap-4">
+      <h2 class="text-sm font-semibold text-[#37352F] dark:text-gray-100">Rename file</h2>
+      <input
+        type="text"
+        bind:value={modal.value}
+        onkeydown={handleRenameKeydown}
+        class="w-full rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-[#37352F] dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#443C68]/40"
+        autofocus
+      />
+      {#if fileOpError}
+        <p class="text-xs text-red-500">{fileOpError}</p>
+      {/if}
+      <div class="flex justify-end gap-2">
+        <button onclick={() => fileOpModal = null} class="px-4 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">Cancel</button>
+        <button
+          onclick={commitRename}
+          disabled={fileOpLoading || !modal.value.trim()}
+          class="px-4 py-1.5 text-sm rounded-lg bg-[#443C68] text-white hover:bg-[#3A3457] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {fileOpLoading ? 'Renaming…' : 'Rename'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if fileOpModal?.type === 'delete'}
+  {@const modal = fileOpModal}
+  {@const fileName = modal.doc.file_path.replace(/\\/g, '/').split('/').pop() ?? modal.doc.file_path}
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" role="dialog" aria-modal="true">
+    <div class="bg-white dark:bg-gray-900 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 w-[380px] p-5 flex flex-col gap-4">
+      <div class="flex items-start gap-3">
+        <div class="flex-shrink-0 w-9 h-9 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+          <svg class="w-4 h-4 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="text-sm font-semibold text-[#37352F] dark:text-gray-100">Delete file</h2>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            <span class="font-medium text-[#37352F] dark:text-gray-200">{fileName}</span> will be permanently deleted. This cannot be undone.
+          </p>
+        </div>
+      </div>
+      {#if fileOpError}
+        <p class="text-xs text-red-500">{fileOpError}</p>
+      {/if}
+      <div class="flex justify-end gap-2">
+        <button onclick={() => fileOpModal = null} class="px-4 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">Cancel</button>
+        <button
+          onclick={commitDelete}
+          disabled={fileOpLoading}
+          class="px-4 py-1.5 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {fileOpLoading ? 'Deleting…' : 'Delete'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if fileOpModal?.type === 'move'}
+  {@const modal = fileOpModal}
+  <FolderPickerModal
+    excludePath={modal.doc.file_path.replace(/\\/g, '/').split('/').slice(0, -1).join('/')}
+    onConfirm={commitMove}
+    onCancel={() => fileOpModal = null}
+  />
+{/if}
 

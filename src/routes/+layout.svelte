@@ -1,6 +1,17 @@
 <script lang="ts">
   import '../app.css';
   import { onMount, onDestroy } from 'svelte';
+  import { cubicOut } from 'svelte/easing';
+
+  // Width-based transition so the chat area reflows smoothly alongside the panel
+  function slideWidth(node: HTMLElement, { duration = 240, easing = cubicOut }: { duration?: number; easing?: (t: number) => number } = {}) {
+    const w = node.getBoundingClientRect().width || 480;
+    return {
+      duration,
+      easing,
+      css: (t: number) => `width: ${w * t}px; min-width: 0; overflow: hidden;`,
+    };
+  }
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -240,6 +251,23 @@
     }, delay);
   }
 
+  /**
+   * Immediate document list refresh for explicit user-triggered file operations
+   * (rename, delete, move). Cancels any pending debounced load so the result
+   * appears right away instead of being blocked by the 2.5s SSE debounce.
+   */
+  function forceRefreshDocuments() {
+    if (documentLoadScheduled) {
+      clearTimeout(documentLoadScheduled);
+      documentLoadScheduled = null;
+    }
+    if (isLoadingDocuments) {
+      loadRequestedWhileLoading = true;
+      return;
+    }
+    loadIndexedDocumentsCore();
+  }
+
   async function handleDirectorySelect(event: CustomEvent<{ directoryPath: string }>) {
     const directoryPath = event.detail.directoryPath;
     if (!directoryPath.trim()) return;
@@ -409,6 +437,8 @@
     openDropdownId = openDropdownId === sessionId ? null : sessionId;
   }
 
+  let documentReloadKey = $state(0);
+
   function handleDocumentClick(document: any) {
     selectedDocument = document;
   }
@@ -423,8 +453,42 @@
       wantsToChangeFolder = true;
     };
     window.addEventListener('openDirectoryModalFromLayout', handleRequestChangeFolder);
+
+    const handleEditApplied = () => {
+      forceRefreshDocuments();
+      documentReloadKey += 1;
+    };
+    window.addEventListener('editApplied', handleEditApplied);
+
+    const handleFileDeleted = (e: Event) => {
+      const detail = (e as CustomEvent<{ filePath: string }>).detail;
+      if (selectedDocument && selectedDocument.file_path === detail.filePath) {
+        selectedDocument = null;
+      }
+      forceRefreshDocuments();
+    };
+    window.addEventListener('fileDeleted', handleFileDeleted);
+
+    const handleFileModified = (e: Event) => {
+      const detail = (e as CustomEvent<{ oldPath: string; newPath: string }>).detail;
+      // Update the document viewer if the modified file is currently open
+      if (selectedDocument && selectedDocument.file_path === detail.oldPath) {
+        if (detail.newPath) {
+          selectedDocument = { ...selectedDocument, file_path: detail.newPath };
+          documentReloadKey += 1;
+        } else {
+          selectedDocument = null;
+        }
+      }
+      forceRefreshDocuments();
+    };
+    window.addEventListener('fileModified', handleFileModified);
+
     return () => {
       window.removeEventListener('openDirectoryModalFromLayout', handleRequestChangeFolder);
+      window.removeEventListener('editApplied', handleEditApplied);
+      window.removeEventListener('fileDeleted', handleFileDeleted);
+      window.removeEventListener('fileModified', handleFileModified);
     };
   });
 
@@ -480,59 +544,74 @@
       onDeleteSession={handleDeleteSession}
       onToggleDropdown={handleToggleDropdown}
       onDocumentClick={handleDocumentClick}
+      onRefreshDocuments={forceRefreshDocuments}
+      collapsed={!!selectedDocument}
     />
 
-    <!-- Main Content Area (x-hidden: decorative fixed layers may extend past the edge without a horizontal scrollbar) -->
-    <div class="flex-1 flex flex-col bg-white dark:bg-gray-950 overflow-y-auto overflow-x-hidden relative">
-      {#if showDirectoryPicker}
-        <DirectorySelection
-          isSetting={isSettingDirectory}
-          allowCancel={$systemStatus?.directory_set ?? false}
-          on:select={handleDirectorySelect}
-          on:cancel={() => {
-            wantsToChangeFolder = false;
-          }}
-        />
-      {:else if selectedDocument}
-        <!-- Document Viewer Overlay -->
-        <div class="absolute inset-0 z-50 bg-white dark:bg-gray-950 flex flex-col">
-          <!-- Document Viewer Header -->
-          <div class="flex-shrink-0 bg-white dark:bg-gray-950 border-b border-gray-200 dark:border-gray-800 px-6 py-4 flex items-center justify-between">
-            <div class="flex items-center gap-3">
-              <div class="flex-shrink-0">
-                <FileTypeIcon fileType={selectedDocument.file_type} class="w-6 h-6 flex-shrink-0" />
-              </div>
-              <div>
-                <h2 class="text-lg font-semibold text-[#37352F] dark:text-gray-100 truncate max-w-2xl">
-                  {selectedDocument.file_path?.split('\\').pop() || selectedDocument.file_path?.split('/').pop() || 'Unknown'}
-                </h2>
-                <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  <span>{getFileTypeConfig(selectedDocument.file_type).label}</span>
-                  {#if selectedDocument.file_size}
-                    <span> • {(selectedDocument.file_size / 1024).toFixed(1)} KB</span>
-                  {/if}
-                </div>
+    <!-- Main Content Area -->
+    <div class="flex-1 flex overflow-hidden relative">
+
+      <!-- Document panel — sits immediately right of the sidebar -->
+      {#if selectedDocument}
+        <div
+          transition:slideWidth={{ duration: 240, easing: cubicOut }}
+          class="flex flex-col bg-white dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800 overflow-hidden flex-shrink-0"
+          style="width: 480px; min-width: 320px; max-width: 50vw;"
+        >
+          <!-- Panel header -->
+          <div class="flex-shrink-0 bg-white dark:bg-gray-950 border-b border-gray-200 dark:border-gray-800 px-4 py-3 flex items-center gap-3">
+            <div class="flex-shrink-0">
+              <FileTypeIcon fileType={selectedDocument.file_type} class="w-5 h-5 flex-shrink-0" />
+            </div>
+            <div class="flex-1 min-w-0">
+              <h2 class="text-sm font-semibold text-[#37352F] dark:text-gray-100 truncate">
+                {selectedDocument.file_path?.split('\\').pop() || selectedDocument.file_path?.split('/').pop() || 'Unknown'}
+              </h2>
+              <div class="text-xs text-gray-400 dark:text-gray-500 mt-0.5 flex items-center gap-1.5">
+                <span>{getFileTypeConfig(selectedDocument.file_type).label}</span>
+                {#if selectedDocument.file_size}
+                  <span>·</span>
+                  <span>{(selectedDocument.file_size / 1024).toFixed(1)} KB</span>
+                {/if}
               </div>
             </div>
             <button
               onclick={handleCloseDocumentViewer}
-              class="flex items-center justify-center w-10 h-10 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 hover:text-[#443C68] dark:hover:text-white"
-              aria-label="Close document viewer"
+              class="flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-gray-500 dark:text-gray-400"
+              aria-label="Close document panel"
             >
-              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
           </div>
 
-          <!-- Document Viewer Content -->
+          <!-- Panel content -->
           <div class="flex-1 overflow-hidden">
-            <DocumentViewer document={selectedDocument as any} />
+            {#key documentReloadKey}
+              <DocumentViewer document={selectedDocument as any} />
+            {/key}
           </div>
         </div>
-      {:else}
-        {@render children()}
       {/if}
+
+      <!-- Chat / route content — always rendered, fills remaining space -->
+      <div class="flex-1 flex flex-col bg-white dark:bg-gray-950 overflow-y-auto overflow-x-hidden min-w-0">
+        {#if showDirectoryPicker}
+          <DirectorySelection
+            isSetting={isSettingDirectory}
+            allowCancel={$systemStatus?.directory_set ?? false}
+            on:select={handleDirectorySelect}
+            on:cancel={() => {
+              wantsToChangeFolder = false;
+            }}
+          />
+        {:else}
+          {@render children()}
+        {/if}
+      </div>
+
     </div>
   </div>
 </div>
+

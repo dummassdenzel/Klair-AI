@@ -1,9 +1,16 @@
 import hashlib
 import logging
 import os
+import re
 from typing import Tuple, Dict, Optional
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Filenames to always ignore regardless of extension
+_IGNORED_FILENAME_PATTERNS = [
+    re.compile(r"^~\$"),                          # Word/Excel lock files (~$filename.docx)
+    re.compile(r"\.\d{8}_\d{6}\.bak\.", re.I),   # Edit-service backup files (*.20260423_102045.bak.docx)
+]
 
 
 logger = logging.getLogger(__name__)
@@ -36,10 +43,16 @@ class FileValidator:
             
             if not path_obj.exists():
                 return False, "File does not exist"
-            
+
             if not path_obj.is_file():
                 return False, "Path is not a file"
-            
+
+            # Reject lock files and our own backups before any extension check
+            filename = path_obj.name
+            for pattern in _IGNORED_FILENAME_PATTERNS:
+                if pattern.search(filename):
+                    return False, f"Ignored file pattern: {filename}"
+
             if path_obj.suffix.lower() not in self.supported_extensions:
                 return False, f"Unsupported file type: {path_obj.suffix}"
             
