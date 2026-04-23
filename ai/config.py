@@ -1,99 +1,112 @@
 """Unified configuration — single source of truth for the entire application."""
 
-import os
-from dotenv import load_dotenv
 from typing import List, Dict, Any
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
 
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
-class Settings:
     # Database (SQLite — zero setup for desktop use)
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./klair.db")
+    DATABASE_URL: str = "sqlite+aiosqlite:///./klair.db"
 
     # ChromaDB / embeddings
-    CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR") or os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
+    # CHROMA_PERSIST_DIRECTORY is accepted as a legacy alias.
+    CHROMA_PERSIST_DIR: str = Field(
+        default="./chroma_db",
+        validation_alias=AliasChoices("CHROMA_PERSIST_DIR", "CHROMA_PERSIST_DIRECTORY"),
+    )
     # bge-base-en-v1.5 (109M params, 768-dim) replaces the former bge-small-en-v1.5 (33M, 384-dim).
     # Both models share the same 512-token context window and identical Python API, so chunking
     # config and call sites are unchanged. The upgrade improves domain vocabulary coverage and
-    # cosine-similarity spread, which feeds directly into RRF fusion and reranker quality.
+    # cosine-similarity spread, which feeds directly into RRF fusion quality.
     # After changing this value you MUST delete the ChromaDB directory and BM25 index, then
     # re-index all documents (see docs/AI_QUALITY_AUDIT.md — Phase 2 Re-indexing Note).
-    EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL_NAME") or os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+    # EMBEDDING_MODEL is accepted as a legacy alias.
+    EMBED_MODEL_NAME: str = Field(
+        default="BAAI/bge-base-en-v1.5",
+        validation_alias=AliasChoices("EMBED_MODEL_NAME", "EMBEDDING_MODEL"),
+    )
 
     # Chunking — values are in TOKENS, not characters.
     # Both bge-base and bge-small share a 512-token context window; keep CHUNK_SIZE <= MAX_CHUNK_TOKENS.
     # Rule of thumb: 1 token ≈ 4 English characters.
-    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "300"))          # tokens per chunk
-    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "50"))     # overlap in tokens
-    MAX_CHUNK_TOKENS: int = int(os.getenv("MAX_CHUNK_TOKENS", "512"))  # hard cap = embedding model max
+    CHUNK_SIZE: int = 300           # tokens per chunk
+    CHUNK_OVERLAP: int = 50         # overlap in tokens
+    MAX_CHUNK_TOKENS: int = 512     # hard cap = embedding model max
 
     # File processing
-    MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-    BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "10"))
-    SUPPORTED_EXTENSIONS: List[str] = os.getenv("SUPPORTED_EXTENSIONS", ".pdf,.docx,.txt,.xlsx,.xls,.pptx").split(",")
+    MAX_FILE_SIZE_MB: int = 50
+    BATCH_SIZE: int = 10
+    # Stored as a comma-separated string so env-var parsing stays simple.
+    # Use get_supported_extensions() for the list form.
+    SUPPORTED_EXTENSIONS: str = ".pdf,.docx,.txt,.xlsx,.xls,.pptx"
+
+    def get_supported_extensions(self) -> List[str]:
+        return [e.strip() for e in self.SUPPORTED_EXTENSIONS.split(",") if e.strip()]
 
     # Context Compression
     # Off by default: compression calls the LLM once *per retrieved chunk* (in parallel),
     # adding significant latency on Ollama and wasting API tokens on Groq/Gemini for
     # most queries. Enable it only for deployments where context regularly exceeds the
     # LLM's context window and a fast provider is in use.
-    CONTEXT_COMPRESSION_ENABLED: bool = os.getenv("CONTEXT_COMPRESSION_ENABLED", "false").lower() in ("1", "true", "yes")
+    CONTEXT_COMPRESSION_ENABLED: bool = False
     # Minimum total retrieved-context size (chars) before compression is even attempted.
     # At the default of 8 000 chars ≈ 2 000 tokens — well above chunk noise but below
     # typical 4 k-token Ollama windows. Raise this for large-context cloud models.
-    CONTEXT_COMPRESSION_MIN_CHARS: int = int(os.getenv("CONTEXT_COMPRESSION_MIN_CHARS", "8000"))
+    CONTEXT_COMPRESSION_MIN_CHARS: int = 8000
 
     # LLM (set LLM_PROVIDER to switch: ollama | gemini | groq)
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")
-    LLM_MAX_RESPONSE_TOKENS: int = int(os.getenv("LLM_MAX_RESPONSE_TOKENS", "8192"))
+    LLM_PROVIDER: str = "ollama"
+    LLM_MAX_RESPONSE_TOKENS: int = 8192
     # RAG generation temperature (0.0 = fully deterministic, 1.0 = fully creative).
     # Default 0.1: low temperature keeps factual document answers consistent and reproducible.
     # Planner / classifier calls always use 0.1 regardless of this setting.
-    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
+    LLM_TEMPERATURE: float = 0.1
     # Ollama (local)
-    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "tinyllama")
-    OLLAMA_TIMEOUT: int = int(os.getenv("OLLAMA_TIMEOUT", "120"))
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "tinyllama"
+    OLLAMA_TIMEOUT: int = 120
     # Gemini (Google)
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-pro"
     # Groq — defaults tuned for 30k TPM tier
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-    GROQ_MAX_CONTEXT_CHARS: int = int(os.getenv("GROQ_MAX_CONTEXT_CHARS", "50000"))
-    GROQ_MAX_SIMPLE_PROMPT_CHARS: int = int(os.getenv("GROQ_MAX_SIMPLE_PROMPT_CHARS", "15000"))
-    GROQ_MAX_LISTING_CONTEXT_CHARS: int = int(os.getenv("GROQ_MAX_LISTING_CONTEXT_CHARS", "25000"))
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    GROQ_MAX_CONTEXT_CHARS: int = 50000
+    GROQ_MAX_SIMPLE_PROMPT_CHARS: int = 15000
+    GROQ_MAX_LISTING_CONTEXT_CHARS: int = 25000
 
     # PPTX Preview
-    LIBREOFFICE_PATH: str = os.getenv("LIBREOFFICE_PATH", "")
-    PPTX_CACHE_DIR: str = os.getenv("PPTX_CACHE_DIR", "./pptx_cache")
-    PPTX_CACHE_ENABLED: bool = os.getenv("PPTX_CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
-    PPTX_CONVERSION_TIMEOUT: int = int(os.getenv("PPTX_CONVERSION_TIMEOUT", "60"))
+    LIBREOFFICE_PATH: str = ""
+    PPTX_CACHE_DIR: str = "./pptx_cache"
+    PPTX_CACHE_ENABLED: bool = True
+    PPTX_CONVERSION_TIMEOUT: int = 60
 
     # OCR
-    TESSERACT_PATH: str = os.getenv("TESSERACT_PATH", "")
-    OCR_CACHE_DIR: str = os.getenv("OCR_CACHE_DIR", "./ocr_cache")
-    OCR_CACHE_ENABLED: bool = os.getenv("OCR_CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
-    OCR_LANGUAGES: str = os.getenv("OCR_LANGUAGES", "eng")
-    OCR_TIMEOUT: int = int(os.getenv("OCR_TIMEOUT", "300"))
+    TESSERACT_PATH: str = ""
+    OCR_CACHE_DIR: str = "./ocr_cache"
+    OCR_CACHE_ENABLED: bool = True
+    OCR_LANGUAGES: str = "eng"
+    OCR_TIMEOUT: int = 300
 
     # Directory initialization timeout (seconds)
-    INITIALIZE_DIRECTORY_TIMEOUT: int = int(os.getenv("INITIALIZE_DIRECTORY_TIMEOUT", "600"))
+    INITIALIZE_DIRECTORY_TIMEOUT: int = 600
 
     # Logging
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-    LOG_FORMAT: str = os.getenv("LOG_FORMAT", "human")
-    LOG_FILE: str = os.getenv("LOG_FILE", "")
-    SQLALCHEMY_ECHO: bool = os.getenv("SQLALCHEMY_ECHO", "false").lower() in ("1", "true", "yes")
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "human"
+    LOG_FILE: str = ""
+    SQLALCHEMY_ECHO: bool = False
 
     # When true, POST /api/debug/retrieval-inspect exposes retrieved context and RAG prompt preview.
     # Off by default: can leak indexed document text to anyone who can reach the API.
-    RETRIEVAL_INSPECT_ENABLED: bool = os.getenv("RETRIEVAL_INSPECT_ENABLED", "false").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    RETRIEVAL_INSPECT_ENABLED: bool = False
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -109,7 +122,7 @@ class Settings:
             "ollama_base_url": self.OLLAMA_BASE_URL,
             "ollama_model": self.OLLAMA_MODEL,
             "batch_size": self.BATCH_SIZE,
-            "supported_extensions": self.SUPPORTED_EXTENSIONS,
+            "supported_extensions": self.get_supported_extensions(),
         }
 
     _UPDATABLE = {

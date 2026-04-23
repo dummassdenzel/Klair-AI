@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from services.document_processor.extraction import PPTXConverter
+from services.document_processor.extraction.embedding_service import EmbeddingService
 from config import settings
 from database import create_tables
 
@@ -32,6 +33,9 @@ async def lifespan(app: FastAPI):
     app.state.file_monitor = None
     app.state.current_directory = None
 
+    embedding_service = EmbeddingService(model_name=settings.EMBED_MODEL_NAME)
+    app.state.embedding_service = embedding_service
+
     pptx_converter = PPTXConverter(
         libreoffice_path=settings.LIBREOFFICE_PATH or None,
         cache_dir=settings.PPTX_CACHE_DIR,
@@ -42,7 +46,7 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("PPTX preview disabled: LibreOffice not found")
 
-    _prewarming_task = asyncio.create_task(_prewarm_services())
+    _prewarming_task = asyncio.create_task(_prewarm_services(embedding_service))
 
     yield
 
@@ -57,12 +61,10 @@ async def lifespan(app: FastAPI):
         _prewarming_task.cancel()
 
 
-async def _prewarm_services():
+async def _prewarm_services(embedding_service: EmbeddingService):
     """Load the embedding model into memory so the first real query is fast."""
     try:
-        from services.document_processor.extraction.embedding_service import EmbeddingService
-        svc = EmbeddingService(model_name=settings.EMBED_MODEL_NAME)
-        await asyncio.to_thread(svc.encode_texts, ["warm-up"])
+        await asyncio.to_thread(embedding_service.encode_texts, ["warm-up"])
         logger.info("Embedding model warmed up")
     except Exception as e:
         logger.warning(f"Embedding warm-up failed (non-fatal): {e}")

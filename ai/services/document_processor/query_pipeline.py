@@ -2,10 +2,11 @@
 QueryPipelineService — owns the entire query execution pipeline.
 
 Responsibilities:
-- Route queries: tool-calling loop (Groq), two-step planner (Ollama/Gemini), legacy
-  classifier fallback.
+- Route all queries through the unified agent tool loop (_pipeline_tool_loop).
+  Cheap routes (greeting, listing) are short-circuited by the classifier pre-filter
+  before any LLM call; document-search queries go through the full agent loop.
 - Expose the tool layer (list_documents, search_documents, search_specific_document,
-  summarize_corpus) used by both the tool-calling and planner paths.
+  summarize_corpus).
 - Build conversation history with lazy LLM-based summarization.
 - Expose query() and query_stream() as the final public entry points.
 
@@ -40,7 +41,6 @@ from .tools.contract import (
     TOOL_SEARCH_SPECIFIC_DOCUMENT,
     TOOL_SUMMARIZE_CORPUS,
     get_openai_format_tools,
-    get_tools_for_planner,
     validate_tool_call,
     validate_tool_calls,
 )
@@ -95,10 +95,6 @@ class QueryPipelineService:
         "3. NEVER classify a document based on a keyword that appears only as a column header or table value "
         "referencing another document — check the document's own title or prominent heading first."
     )
-
-    # 600 tokens gives a comfortable margin for long query strings inside the JSON
-    # payload without risk of truncation on verbose aggregation queries.
-    PLANNER_MAX_TOKENS = 600
 
     def __init__(
         self,
@@ -352,59 +348,9 @@ class QueryPipelineService:
         rerank_count    int
         start_time      float
 
-        Classifier pre-filter (planner path only)
-        -----------------------------------------
-        The QueryClassifier is pure heuristic (regex + word matching — zero LLM
-        calls). For non-search routes we short-circuit before the planner, saving
-        one full LLM round-trip:
-
-          GREETING / GENERAL   → _generate_direct_response()  (1 call instead of 2)
-          DOCUMENT_LISTING     → get_document_listing()        (0 LLM calls)
-          DOCUMENT_SEARCH      → planner as before             (2 calls, unchanged)
-
-        The tool-calling path (Groq) already handles this natively.
         """
         start_time = asyncio.get_running_loop().time()
-
-        if self.llm_service.supports_tool_calling():
-            return await self._pipeline_tool_loop(question, conversation_history, start_time)
-
-        route_result = await self.router.resolve(question, conversation_history)
-
-        if route_result.route in (Route.GREETING, Route.GENERAL):
-            logger.info(
-                "Pre-filter short-circuit: %s → direct response (no planner call)",
-                route_result.query_type,
-            )
-            response_text = await self._generate_direct_response(question, route_result.query_type)
-            return {
-                "action": "direct",
-                "answer": response_text,
-                "sources": [],
-                "query_type": route_result.query_type,
-                "retrieval_count": 0,
-                "rerank_count": 0,
-                "start_time": start_time,
-            }
-
-        if route_result.route == Route.DOCUMENT_LISTING:
-            logger.info("Pre-filter short-circuit: document_listing → DB query (no planner call)")
-            result = await self.retrieval.get_document_listing(question=question)
-            return {
-                "action": "direct",
-                "answer": result.message,
-                "sources": result.sources,
-                "query_type": route_result.query_type,
-                "retrieval_count": getattr(result, "retrieval_count", 0) or 0,
-                "rerank_count": 0,
-                "start_time": start_time,
-            }
-
-        try:
-            return await self._pipeline_planner(question, conversation_history, start_time)
-        except Exception as e:
-            logger.warning("Planner path failed: %s; falling back to legacy classifier", e)
-        return await self._pipeline_legacy(question, conversation_history, start_time)
+        return await self._pipeline_tool_loop(question, conversation_history, start_time)
 
     # ------------------------------------------------------------------
     # Direct response (greetings / general)
@@ -712,19 +658,17 @@ class QueryPipelineService:
         conversation_history: List[Dict[str, Any]],
         start_time: float,
     ) -> Dict[str, Any]:
-        """Shared pipeline for native tool-calling providers (e.g. Groq)."""
+        """Unified agent pipeline — the only query path after DR2."""
         from config import settings
 
-        # Apply the same classifier pre-filter used by the planner path.
-        # Document-listing queries are cheaper and more reliable through
-        # get_document_listing() than through the agent tool loop, because the
-        # agent often picks search_documents (which returns top-N chunks, not a
-        # full list) for category-enumeration questions like "what are our DRs?".
+        # Classifier pre-filter: resolve route once, handle cheap cases first.
+        # Document-listing queries are cheaper via DB than via tool loop (agent
+        # tends to pick search_documents for count/list questions, getting top-N
+        # chunks instead of the full inventory).
         route_result = await self.router.resolve(question, conversation_history)
+
         if route_result.route == Route.DOCUMENT_LISTING:
-            logger.info(
-                "Tool-loop pre-filter: document_listing → DB query (no agent call)"
-            )
+            logger.info("Pre-filter: document_listing → DB query (no agent call)")
             result = await self.retrieval.get_document_listing(question=question)
             return {
                 "action": "direct",
@@ -732,6 +676,22 @@ class QueryPipelineService:
                 "sources": result.sources,
                 "query_type": "document_listing",
                 "retrieval_count": getattr(result, "retrieval_count", 0) or 0,
+                "rerank_count": 0,
+                "start_time": start_time,
+            }
+
+        if route_result.route in (Route.GREETING, Route.GENERAL):
+            logger.info(
+                "Pre-filter: %s → direct response (no tool calls)",
+                route_result.query_type,
+            )
+            response_text = await self._generate_direct_response(question, route_result.query_type)
+            return {
+                "action": "direct",
+                "answer": response_text,
+                "sources": [],
+                "query_type": route_result.query_type,
+                "retrieval_count": 0,
                 "rerank_count": 0,
                 "start_time": start_time,
             }
@@ -811,282 +771,3 @@ class QueryPipelineService:
             "start_time": start_time,
         }
 
-    # ------------------------------------------------------------------
-    # Two-step planner fallback (Ollama, Gemini)
-    # ------------------------------------------------------------------
-
-    def _build_planner_prompt(
-        self,
-        question: str,
-        conversation_history: List[Dict[str, Any]],
-    ) -> str:
-        """Build prompt for planner LLM: output JSON only with tool choice(s)."""
-        tools_desc = []
-        for t in get_tools_for_planner():
-            name = t.get("name", "")
-            desc = t.get("description", "")
-            when = t.get("when_to_use", "")
-            line = f"- {name}: {desc} {when}".strip()
-            if name == TOOL_SEARCH_DOCUMENTS:
-                line += ' Include "query" with the search text.'
-            if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
-                line += ' Include "document_name" with the file name or identifier.'
-            tools_desc.append(line)
-        tools_text = "\n".join(tools_desc)
-        history_snippet = ""
-        if conversation_history:
-            recent = conversation_history[-4:]
-            parts = []
-            for h in recent:
-                role = h.get("role", "user")
-                content = (h.get("content") or "")[:200].strip()
-                if content:
-                    parts.append(f"{role}: {content}")
-            if parts:
-                history_snippet = "Recent conversation:\n" + "\n".join(parts) + "\n\n"
-        return (
-            "You are a planner for a document assistant. Output ONLY valid JSON, no other text.\n\n"
-            f"Available tools:\n{tools_text}\n\n"
-            "Rules:\n"
-            "- DOCUMENT ENUMERATION / COUNTING ('how many [type] do we have', 'list all delivery receipts', "
-            "'what are our delivery receipts', 'count invoices'): use list_documents ONLY — never use "
-            "summarize_corpus or search_documents for counting documents, because search returns only "
-            "top-N chunks and may miss documents.\n"
-            "- VALUE / AMOUNT EXTRACTION ('total value of delivery receipts', 'sum of all amounts', "
-            "'what is the total', 'how much is X worth'): use search_documents with a targeted content "
-            "query (e.g. 'delivery receipt total PHP pesos amount value'). The document list only shows "
-            "brief 200-char previews — financial values are in the document body and require search. "
-            "If identifying which documents to search requires knowing their category, call list_documents "
-            "first, then search_documents for the actual values.\n"
-            "- FOLDER OVERVIEW / SUMMARY: use summarize_corpus and/or list_documents.\n"
-            "- SPECIFIC FILE by name: use search_specific_document.\n"
-            "- FACTUAL QUESTIONS about content: use search_documents.\n"
-            "- GREETINGS / SMALL TALK: output empty tools.\n"
-            'Output format: {"tools": [{"tool": "tool_name", "query": "..." or "document_name": "..." as needed}]}'
-            ' or {"tools": []} for no tools.\n\n'
-            f"{history_snippet}User: {question}\n\nJSON output:"
-        )
-
-    def _parse_planner_output(self, response: str) -> Optional[List[Dict[str, Any]]]:
-        """Parse planner LLM response into list of tool calls. Returns None on parse failure."""
-        if not response or not response.strip():
-            return None
-        import re
-
-        text = response.strip()
-        if "```" in text:
-            m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
-            if m:
-                text = m.group(1)
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            logger.warning("Planner output not valid JSON: %s", text[:200])
-            return None
-        if not isinstance(data, dict):
-            return None
-        tools = data.get("tools")
-        if tools is None or not isinstance(tools, list):
-            return None
-        out: List[Dict[str, Any]] = []
-        for item in tools:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("tool")
-            if name not in (
-                TOOL_LIST_DOCUMENTS,
-                TOOL_SEARCH_DOCUMENTS,
-                TOOL_SEARCH_SPECIFIC_DOCUMENT,
-                TOOL_SUMMARIZE_CORPUS,
-            ):
-                continue
-            call: Dict[str, Any] = {"tool": name}
-            if name == TOOL_SEARCH_DOCUMENTS:
-                call["query"] = item.get("query") or ""
-            if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
-                call["document_name"] = item.get("document_name") or item.get("name") or ""
-            out.append(call)
-        return out
-
-    async def _get_safe_tool_calls_from_classifier(
-        self,
-        question: str,
-        conversation_history: Optional[List[Dict[str, Any]]] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        Safe default: when planner output is invalid, use classifier to choose a safe
-        tool set. Prevents blindly executing a mismatched tool.
-        """
-        try:
-            route_result = await self.router.resolve(question, conversation_history or [])
-        except Exception as e:
-            logger.warning("Router failed for safe default: %s; using no tools", e)
-            return []
-        route = route_result.route
-        if route in (Route.GREETING, Route.GENERAL):
-            return []
-        if route == Route.DOCUMENT_LISTING:
-            return [{"tool": TOOL_LIST_DOCUMENTS}, {"tool": TOOL_SUMMARIZE_CORPUS}]
-        return [{"tool": TOOL_SEARCH_DOCUMENTS, "query": question}]
-
-    def _format_tool_results_for_answer(self, tool_results: List[Dict[str, Any]]) -> str:
-        """Format tool results as a single context string for the answer LLM."""
-        if not tool_results:
-            return "No document tools were used. Answer the user directly based on general knowledge."
-        parts = []
-        for tr in tool_results:
-            tool_name = tr.get("tool", "")
-            result = tr.get("result") or {}
-            if result.get("tool_error"):
-                parts.append(f"[{tool_name}]: Error - {result.get('message', 'unknown')}")
-                continue
-            if tool_name == TOOL_LIST_DOCUMENTS:
-                docs = result.get("documents") or []
-                count = result.get("count", 0)
-                doc_lines = []
-                for d in docs:
-                    name = d.get("filename") or d.get("file_path", "")
-                    ftype = d.get("file_type", "")
-                    preview = (d.get("content_preview") or "").strip()
-                    # Strip "Page N:" OCR prefix so the LLM sees document content
-                    # rather than the OCR service's page-marker artifact.
-                    preview = _OCR_PAGE_RE.sub("", preview, count=1).strip()
-                    # 200 chars gives the LLM enough text to see both the document's own
-                    # header/title AND some content, without making the listing too long.
-                    if len(preview) > 200:
-                        preview = preview[:200].rstrip() + "…"
-                    category = (d.get("document_category") or "").strip()
-                    entry = f"- {name} ({ftype})"
-                    if category:
-                        entry += f" [Type: {category}]"
-                    if preview:
-                        entry += f": {preview}"
-                    doc_lines.append(entry)
-                lines = [f"Document list ({count} items):"] + doc_lines
-                parts.append("\n".join(lines))
-            elif tool_name == TOOL_SUMMARIZE_CORPUS:
-                parts.append(f"[Folder overview]\n{result.get('summary', '')}")
-            elif tool_name in (TOOL_SEARCH_DOCUMENTS, TOOL_SEARCH_SPECIFIC_DOCUMENT):
-                parts.append(result.get("context", ""))
-            else:
-                parts.append(json.dumps(result, default=str)[:2000])
-        return CONTEXT_CHUNK_SEP.join(parts)
-
-    async def _pipeline_planner(
-        self,
-        question: str,
-        conversation_history: List[Dict[str, Any]],
-        start_time: float,
-    ) -> Dict[str, Any]:
-        """Two-step planner path (Ollama, Gemini)."""
-        from .llm.provider_adapters import PROMPT_TYPE_CLASSIFICATION
-
-        prompt = self._build_planner_prompt(question, conversation_history)
-        planner_response = await self.llm_service.generate_simple(
-            prompt,
-            prompt_type=PROMPT_TYPE_CLASSIFICATION,
-            max_completion_tokens=self.PLANNER_MAX_TOKENS,
-        )
-        tool_calls = self._parse_planner_output(planner_response)
-
-        if tool_calls is None or (tool_calls and not validate_tool_calls(tool_calls)[0]):
-            if tool_calls:
-                logger.warning(
-                    "Planner output failed tool-call validation; falling back to classifier default"
-                )
-            else:
-                logger.warning(
-                    "Planner output invalid JSON or empty (response: %s…); "
-                    "falling back to classifier default",
-                    planner_response[:120] if planner_response else "<empty>",
-                )
-            tool_calls = await self._get_safe_tool_calls_from_classifier(
-                question, conversation_history
-            )
-
-        if tool_calls:
-            results_by_index = await self._execute_tool_calls(tool_calls)
-            tool_results = [
-                {"tool": tool_calls[i].get("tool"), "result": results_by_index[i]}
-                for i in range(len(tool_calls))
-            ]
-            context = self._format_tool_results_for_answer(tool_results)
-            sources = self._collect_sources_from_tool_results(tool_results)
-        else:
-            context = self._format_tool_results_for_answer([])
-            sources = []
-
-        return {
-            "action": "rag_context",
-            "context": context,
-            "sources": sources,
-            "query_type": "planner",
-            "retrieval_count": len(sources),
-            "rerank_count": 0,
-            "start_time": start_time,
-        }
-
-    async def _pipeline_legacy(
-        self,
-        question: str,
-        conversation_history: List[Dict[str, Any]],
-        start_time: float,
-    ) -> Dict[str, Any]:
-        """Legacy fallback: classifier-based routing. Only reached when the planner path raises."""
-        route_task = asyncio.create_task(
-            self.router.resolve(question, conversation_history)
-        )
-        embed_task = asyncio.to_thread(
-            self.embedding_service.encode_query, question
-        )
-        route_result = await route_task
-        query_embedding = await embed_task
-        query_type = route_result.query_type
-
-        if route_result.route in (Route.GREETING, Route.GENERAL):
-            response_text = await self._generate_direct_response(question, query_type)
-            return {
-                "action": "direct",
-                "answer": response_text,
-                "sources": [],
-                "query_type": query_type,
-                "retrieval_count": 0,
-                "rerank_count": 0,
-                "start_time": start_time,
-            }
-
-        if route_result.route == Route.DOCUMENT_LISTING:
-            result = await self.retrieval.get_document_listing(question=question)
-            return {
-                "action": "direct",
-                "answer": result.message,
-                "sources": result.sources,
-                "query_type": query_type,
-                "retrieval_count": getattr(result, "retrieval_count", 0) or 0,
-                "rerank_count": 0,
-                "start_time": start_time,
-            }
-
-        rag = await self.retrieval.retrieve_and_build_context(
-            question, query_type, query_embedding
-        )
-        if rag is None:
-            return {
-                "action": "direct",
-                "answer": "I don't have information about that in the current documents.",
-                "sources": [],
-                "query_type": query_type,
-                "retrieval_count": 0,
-                "rerank_count": 0,
-                "start_time": start_time,
-            }
-
-        return {
-            "action": "rag_context",
-            "context": rag["context"],
-            "sources": rag["sources"],
-            "query_type": query_type,
-            "retrieval_count": rag["retrieval_count"],
-            "rerank_count": rag["rerank_count"],
-            "start_time": start_time,
-        }

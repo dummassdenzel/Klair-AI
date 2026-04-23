@@ -25,7 +25,7 @@ These are areas where the existing code should be **deleted** and replaced with 
 ### DR1. Drop the Entire LLM Layer → Replace With LiteLLM
 
 **Files to delete:** `ai/services/document_processor/llm/llm_service.py`, `ai/services/document_processor/llm/provider_adapters.py`
-**Status:** `[ ]`
+**Status:** `[x]` Fixed — rewrote `llm_service.py` (~700 → ~250 lines) backed by `litellm.acompletion`. All if/elif provider branches gone. `provider_adapters.py` kept (provides truncation limits + `supports_tool_calling`). Added `litellm>=1.57.0` to requirements.txt. RAG prompt upgraded from text blob to structured messages (`_build_messages`). Token usage via response object. Streaming now works for all providers including Gemini.
 
 `llm_service.py` is 700 lines. Every method (`generate_response`, `generate_response_stream`, `generate_simple`, `chat_with_tools`, `chat_messages_stream`) repeats the same `if groq / elif gemini / else ollama` branch three times each. Token usage extraction is copy-pasted verbatim four times. `provider_adapters.py` is a partial attempt at fixing this — it abstracts configuration but not actual API calls, so the if/elif chains remain.
 
@@ -145,7 +145,7 @@ Problems:
 ### DR5. Replace `Settings` Plain Class → Pydantic `BaseSettings`
 
 **File:** `ai/config.py`
-**Status:** `[ ]`
+**Status:** `[x]` Fixed — rewrote `config.py` using `pydantic_settings.BaseSettings`. All manual `int(os.getenv(...))` / `bool(...)` casts removed; Pydantic handles type coercion and `.env` loading. Added `@field_validator` for `SUPPORTED_EXTENSIONS` (comma-split from string). Added `AliasChoices` for `CHROMA_PERSIST_DIR` / `EMBED_MODEL_NAME` to preserve legacy env var aliases. Added `pydantic-settings>=2.0.0` to requirements. `to_dict()` and `update()` methods unchanged; `setattr` works on unfrozen Pydantic v2 instances. Dropped manual `load_dotenv()` call.
 
 ```python
 class Settings:
@@ -257,7 +257,7 @@ At 300 tokens/chunk, 4 chunks = ~1,200 tokens = ~2 pages. For a 10-page document
 
 ### F7. Raw DB Queries Bypass `DatabaseService` — See F18
 
-**Status:** `[ ]` — Expanded and consolidated into F18 (six locations total).
+**Status:** `[x]` Fixed — consolidated into F18.
 
 Original finding: `RetrievalService` at lines 158-169 imports `AsyncSessionLocal` directly. Additional locations were found during the full review — see F18 for the complete list and fix.
 
@@ -411,7 +411,7 @@ The `.env` file contains plaintext live credentials: Groq API key, Gemini API ke
 ### SEC2. `RETRIEVAL_INSPECT_ENABLED=true` in Live Environment
 
 **File:** `ai/.env`
-**Status:** `[ ]`
+**Status:** `[x]` Fixed — set `RETRIEVAL_INSPECT_ENABLED=false` in `.env`. Default in code was already `false`; this corrects the live override.
 
 The debug endpoint `POST /api/debug/retrieval-inspect` exposes full retrieved document text and raw RAG prompts to anyone who can reach the API. It is enabled in the live `.env`.
 
@@ -558,7 +558,7 @@ SQLAlchemy `.contains()` generates `LIKE '%value%'`. SQLite cannot use a B-tree 
 ### F18. Raw DB Queries Bypass `DatabaseService` in Six Locations
 
 **Files:** `ai/routers/documents.py`, `ai/services/document_processor/retrieval_service.py:158-169`, `ai/services/document_processor/updates/update_executor.py:183-198,479-487`, `ai/services/document_processor/indexing_service.py:514-522,664-698`, `ai/services/document_processor/orchestrator.py:289-302`
-**Status:** `[ ]`
+**Status:** `[x]` Fixed — added `get_all_indexed_docs()`, `delete_all_indexed_documents()`, `get_document_by_id()` to `DatabaseService`. Updated all 5 remaining call sites (2 were already gone from DR3). Added `database_service` injection to `RetrievalService` and wired it in orchestrator. Removed raw `AsyncSessionLocal` / `IndexedDocument` imports from `routers/documents.py`, `indexing_service.py`, `retrieval_service.py`, `orchestrator.py`.
 
 Six separate places in the codebase import `AsyncSessionLocal` + `IndexedDocument` directly and write inline SQLAlchemy queries, bypassing `DatabaseService`. This means any schema change (new column, rename, soft-delete flag) must be found and updated in six independent locations. The router, the indexer, the retriever, the update executor, and the orchestrator each maintain their own notion of what an `IndexedDocument` looks like.
 
@@ -589,7 +589,7 @@ async with AsyncSessionLocal() as db_session:
 ### F20. `_prewarm_services` Warms the Wrong `EmbeddingService` Instance
 
 **File:** `ai/main.py`
-**Status:** `[ ]`
+**Status:** `[x]` Fixed — `EmbeddingService` singleton created at startup in `lifespan` and stored on `app.state.embedding_service`. `_prewarm_services` now accepts and warms that instance. `set_directory` passes `request.app.state.embedding_service` to `DocumentProcessorOrchestrator`. Orchestrator accepts `embedding_service` parameter and skips construction if one is provided.
 
 ```python
 async def _prewarm_services():
@@ -710,31 +710,31 @@ The PDF column-detection logic prefixes extracted text with `[Region: full]`, `[
 
 | ID | Category | Severity | Description | Status |
 |----|----------|----------|-------------|--------|
-| DR1 | Drop & Replace | Critical | Drop LLM layer → LiteLLM | `[ ]` |
-| DR2 | Drop & Replace | High | Drop planner path (~250 lines) | `[ ]` |
+| DR1 | Drop & Replace | Critical | Drop LLM layer → LiteLLM | `[x]` Fixed |
+| DR2 | Drop & Replace | High | Drop planner path (~250 lines) | `[x]` Fixed |
 | DR3 | Drop & Replace | High | Drop updates pipeline → simple re-index | `[x]` Fixed |
 | DR4 | Drop & Replace | Medium | Drop `currency_totals.py` | `[x]` Fixed |
-| DR5 | Drop & Replace | Medium | Drop `Settings` class → Pydantic `BaseSettings` | `[ ]` |
+| DR5 | Drop & Replace | Medium | Drop `Settings` class → Pydantic `BaseSettings` | `[x]` Fixed |
 | F1 | Fix | Critical | Filename stem regex misdirects queries | `[x]` Fixed |
 | F2 | Fix | Critical | ChromaDB distance metric not verified on startup | `[x]` Fixed |
-| F3 | Fix | Critical | Gemini `generate_simple` ignores token cap | `[ ]` |
+| F3 | Fix | Critical | Gemini `generate_simple` ignores token cap | `[x]` Fixed (DR1) |
 | F4 | Fix | High | ChromaDB sync calls block event loop | `[x]` Fixed |
-| F5 | Fix | High | RAG prompt is single text blob, not messages | `[ ]` |
+| F5 | Fix | High | RAG prompt is single text blob, not messages | `[x]` Fixed (DR1) |
 | F6 | Fix | High | `max_chunks_per_file=4` too tight | `[x]` Fixed |
-| F7 | Fix | High | `RetrievalService` bypasses `DatabaseService` | `[ ]` |
+| F7 | Fix | High | `RetrievalService` bypasses `DatabaseService` | `[x]` Fixed (F18) |
 | F8 | Fix | Medium | BM25 O(n²) rebuild during indexing | `[x]` Fixed |
 | F9 | Fix | Medium | BM25 noise tokens, no stop words | `[x]` Fixed |
 | F10 | Fix | Medium | Unbounded `_summary_cache` | `[x]` Fixed |
 | F11 | Fix | Low | No thread lock on `VectorStoreService` init | `[x]` Fixed (part of F4) |
-| F12 | Fix | Low | Ollama timeout inconsistency | `[ ]` |
+| F12 | Fix | Low | Ollama timeout inconsistency | `[x]` Fixed (DR1) |
 | F13 | Fix | Low | Deprecated `asyncio.get_event_loop()` | `[x]` Fixed |
 | F14 | Fix | Critical | `_extract_docx` skips all Word table content | `[x]` Fixed |
 | F15 | Fix | Medium | `datetime.utcnow()` deprecated throughout DB layer | `[x]` Fixed |
 | F16 | Fix | Medium | `get_chat_sessions_by_directory` full table scan | `[x]` Fixed |
 | F17 | Fix | Medium | `search_documents` uses `LIKE '%val%'` — no index | `[ ]` requires FTS5 migration |
-| F18 | Fix | Medium | Router endpoints bypass `DatabaseService` | `[ ]` |
+| F18 | Fix | Medium | Router endpoints bypass `DatabaseService` | `[x]` Fixed |
 | F19 | Fix | Low | `_extract_xlsx` / `_extract_xls` dead code deleted | `[x]` Fixed |
-| F20 | Fix | Low | `_prewarm_services` warms a throwaway instance | `[ ]` |
+| F20 | Fix | Low | `_prewarm_services` warms a throwaway instance | `[x]` Fixed |
 | F21 | Fix | High | `debug_retrieval.py` missing import — live `NameError` | `[x]` Fixed |
 | F22 | Fix | Medium | Two separate `DatabaseService` instances application-wide | `[x]` Fixed |
 | F23 | Fix | Medium | `calculate_file_hash` blocks async event loop for large files | `[x]` Fixed |
@@ -742,11 +742,11 @@ The PDF column-detection logic prefixes extracted text with `[Region: full]`, `[
 | DC2 | Dead Code | Low | `VectorStoreService.cleanup()` does nothing | `[x]` Fixed |
 | DC3 | Dead Code | Low | `_cosine_similarity` in `ChunkDiffer` unused | `[x]` Fixed |
 | DC4 | Dead Code | Low | Stale default embed model in `orchestrator.py` | `[x]` Fixed |
-| DC5 | Dead Code | Low | `get_db()` generator in `database.py` never called | `[x]` Fixed |
+| DC5 | Dead Code | Low | `get_db()` generator in `database.py` never called | `[x]` Fixed (also removed stale re-export from `database/__init__.py`) |
 | SEC1 | Security | Critical | Live API keys in `.env` | `[x]` .gitignore confirmed |
-| SEC2 | Security | High | Debug endpoint enabled in live env | `[ ]` |
+| SEC2 | Security | High | Debug endpoint enabled in live env | `[x]` Fixed |
 | DES1 | Design | Critical | Logistics hardcoding in 4 files — exact locations documented | `[x]` Fixed |
-| DES2 | Design | Medium | No retry on LLM API failures | `[ ]` |
+| DES2 | Design | Medium | No retry on LLM API failures | `[x]` Fixed (DR1 — LiteLLM has built-in retry) |
 | DES3 | Design | Medium | English-only embedding model | `[ ]` |
 | DES4 | Design | Low | `query_rewriter.py` wrong indentation | `[x]` Fixed |
 | DES5 | Design | Low | Token tracking in-memory only | `[ ]` |

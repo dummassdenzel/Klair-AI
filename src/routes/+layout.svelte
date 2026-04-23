@@ -65,16 +65,27 @@
   let documentLoadScheduled: ReturnType<typeof setTimeout> | null = null;
   let contentRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
   let loadRequestedWhileLoading = false; // Request one more load after current finishes
+  // Set to true while the content-refresh interval is active; prevents loadIndexedDocumentsCore
+  // from re-enabling contentIndexingInProgress after the interval has decided to stop.
+  let contentPollingActive = false;
 
   function startUpdateQueuePolling() {
+    // Close any existing SSE connection before opening a new one to prevent stale handlers
+    // from firing with old lastProcessingCount state and prematurely clearing the interval.
+    if (updateEventSource) {
+      updateEventSource.close();
+      updateEventSource = null;
+    }
     // Use SSE (Server-Sent Events) for push-based updates - no polling
     try {
       updateEventSource = apiService.createUpdateStream((data) => {
         if (data?.queue) {
           const currentCompleted = data.queue.completed || 0;
           const currentProcessing = data.queue.processing || 0;
-          
-          // Single coalesced refresh: prefer "all updates finished" to avoid storm
+
+          // Only act on "processing finished" when we observed it actually processing.
+          // Avoids clearing the content-refresh interval on stale queue data from a
+          // prior session when the SSE first connects.
           if (lastProcessingCount > 0 && currentProcessing === 0) {
             lastCompletedCount = currentCompleted;
             console.debug('All updates finished, scheduling one document list refresh');
@@ -82,22 +93,16 @@
               clearInterval(contentRefreshIntervalId);
               contentRefreshIntervalId = null;
             }
+            contentPollingActive = false;
             contentIndexingInProgress.set(false);
             if (refreshTimeout) clearTimeout(refreshTimeout);
             refreshTimeout = setTimeout(() => {
               refreshTimeout = null;
               loadIndexedDocuments();
             }, 1500);
-          } else if (currentProcessing === 0 && currentCompleted > 0) {
-            // Queue idle with work done – stop content-indexing polling so we don't loop forever
-            if (contentRefreshIntervalId) {
-              clearInterval(contentRefreshIntervalId);
-              contentRefreshIntervalId = null;
-            }
-            contentIndexingInProgress.set(false);
           } else if (currentCompleted > lastCompletedCount) {
             lastCompletedCount = currentCompleted;
-            // During indexing, only schedule a refresh if we don't already have one
+            // During incremental updates, refresh once when a file finishes processing
             if (!refreshTimeout && currentProcessing > 0) {
               refreshTimeout = setTimeout(() => {
                 refreshTimeout = null;
@@ -107,9 +112,9 @@
           } else if (currentCompleted > 0 && lastCompletedCount === 0) {
             lastCompletedCount = currentCompleted;
           }
-          
+
           lastProcessingCount = currentProcessing;
-          
+
           updateQueueStatus.set({
             pending: data.queue.pending || 0,
             processing: currentProcessing,
@@ -150,6 +155,7 @@
     if (refreshTimeout) clearTimeout(refreshTimeout);
     if (documentLoadScheduled) clearTimeout(documentLoadScheduled);
     if (contentRefreshIntervalId) clearInterval(contentRefreshIntervalId);
+    contentPollingActive = false;
   });
 
   async function testConnection() {
@@ -187,8 +193,12 @@
       indexingProgress.set({ indexed: indexedCount, total });
 
       if (indexedDocuments.length > 0) metadataIndexed.set(true);
-      if (metadataOnlyCount > 0) contentIndexingInProgress.set(true);
-      else if (indexedCount > 0) {
+      // Only re-enable the progress banner if polling is still active; prevents a
+      // trailing debounced load from resurrecting the flag after hitMax/stuckMetadataOnly.
+      if (metadataOnlyCount > 0 && contentPollingActive) {
+        contentIndexingInProgress.set(true);
+      } else if (indexedCount > 0 || total === 0) {
+        // Also clear when directory has no supported files — nothing to wait for.
         contentIndexingInProgress.set(false);
         isIndexingInProgressStore.set(false);
       }
@@ -241,6 +251,7 @@
       wantsToChangeFolder = false;
       isSettingDirectory = false;
       indexedDocuments = [];
+      contentPollingActive = false; // will be set true when the interval starts below
       contentIndexingInProgress.set(true);
       indexingProgress.set({ indexed: 0, total: 0 });
       metadataIndexed.set(true);
@@ -279,15 +290,33 @@
           await loadIndexedDocumentsCore();
           lastDocumentLoadTime = Date.now();
 
+          // set_directory awaits initialize_from_directory synchronously, so by the time
+          // loadIndexedDocumentsCore returns we already have the definitive initial state:
+          // - 0 docs  → no supported files (or empty dir); nothing to poll for
+          // - all indexed (no metadata_only) → resume mode, already done
+          // - has metadata_only → background indexing is in progress; start the interval
+          const hasMetadataOnly = indexedDocuments.some(
+            (d: any) => d.processing_status === 'metadata_only'
+          );
+
+          startUpdateQueuePolling(); // SSE for incremental file-watcher updates always needed
+
+          if (!hasMetadataOnly) {
+            // Nothing is pending — skip the interval entirely
+            return;
+          }
+
           let refreshCount = 0;
-          const maxRefreshes = 30;
-          const noProgressTicksBeforeStop = 3;
-          const zeroIndexedGiveUpTicks = 10; // stop after ~30s with 0 indexed to avoid infinite loop
+          const maxRefreshes = 200; // 10-minute absolute ceiling
+          const noProgressTicksBeforeStop = 10; // 30s without a new indexed doc → give up (all done)
+          const zeroIndexedGiveUpTicks = 10; // ~30s with 0 indexed docs → give up
+          const stuckMetadataOnlyTicks = 20; // ~60s with metadata_only and no progress → give up
           let previousIndexedCount = indexedDocuments.filter(
             (doc: any) => doc.processing_status === 'indexed'
           ).length;
           let noProgressTicks = 0;
 
+          contentPollingActive = true;
           contentRefreshIntervalId = setInterval(async () => {
             if (!contentRefreshIntervalId) return;
             refreshCount++;
@@ -309,25 +338,18 @@
 
             const total = indexedDocuments.length;
             const allIndexed = metadataOnlyCount === 0 && total > 0;
-            const stuck =
-              noProgressTicks >= noProgressTicksBeforeStop &&
-              total > 0 &&
-              metadataOnlyCount === 0;
+            const stuck = noProgressTicks >= noProgressTicksBeforeStop && total > 0 && metadataOnlyCount === 0;
             const hitMax = refreshCount >= maxRefreshes;
-            // Backend says done but we keep getting 0 indexed (stale/race): stop after N ticks to avoid infinite polling
-            const giveUpZeroIndexed =
-              currentIndexedCount === 0 &&
-              total > 0 &&
-              noProgressTicks >= zeroIndexedGiveUpTicks;
+            const giveUpZeroIndexed = currentIndexedCount === 0 && total > 0 && noProgressTicks >= zeroIndexedGiveUpTicks;
+            const stuckMetadataOnly = metadataOnlyCount > 0 && noProgressTicks >= stuckMetadataOnlyTicks;
 
-            if (allIndexed || stuck || hitMax || giveUpZeroIndexed) {
+            if (allIndexed || stuck || hitMax || giveUpZeroIndexed || stuckMetadataOnly) {
               if (contentRefreshIntervalId) clearInterval(contentRefreshIntervalId);
               contentRefreshIntervalId = null;
+              contentPollingActive = false;
               contentIndexingInProgress.set(false);
             }
           }, 3000);
-
-          startUpdateQueuePolling();
         } catch (e) {
           console.error('Background load after set-directory:', e);
         }

@@ -99,6 +99,7 @@ class RetrievalService:
         llm_service: LLMService,
         retrieval_config: RetrievalConfig,
         filename_trie: FilenameTrie,
+        database_service=None,
     ) -> None:
         self.embedding_service = embedding_service
         self.vector_store = vector_store
@@ -107,6 +108,7 @@ class RetrievalService:
         self.llm_service = llm_service
         self.retrieval_config = retrieval_config
         self.filename_trie = filename_trie
+        self.database_service = database_service
 
     # ------------------------------------------------------------------
     # Public API (called by QueryPipelineService)
@@ -114,16 +116,7 @@ class RetrievalService:
 
     async def get_all_indexed_docs(self) -> List[Any]:
         """Return all indexed documents (indexed or metadata_only) from the DB."""
-        from database.database import AsyncSessionLocal
-        from database.models import IndexedDocument
-        from sqlalchemy import select
-
-        async with AsyncSessionLocal() as db_session:
-            stmt = select(IndexedDocument).where(
-                IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
-            )
-            result = await db_session.execute(stmt)
-            return list(result.scalars().all())
+        return await self.database_service.get_all_indexed_docs()
 
     async def get_document_listing(self, question: str = "") -> QueryResult:
         """

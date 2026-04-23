@@ -141,6 +141,9 @@ class GeminiAdapter(LLMProviderAdapter):
             return 200
         return 8192
 
+    def supports_tool_calling(self) -> bool:
+        return True
+
 
 def create_adapter_for_provider(provider: str, settings: Optional[object] = None) -> LLMProviderAdapter:
     """Factory: returns the adapter for the given provider. Reads config from settings if present."""

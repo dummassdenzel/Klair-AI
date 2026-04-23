@@ -64,6 +64,7 @@ class DocumentProcessorOrchestrator:
                  groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
         llm_provider: str = "ollama",
         database_service: Optional["DatabaseService"] = None,
+        embedding_service: Optional["EmbeddingService"] = None,
     ) -> None:
         # ── OCR (optional) ────────────────────────────────────────────────────
         try:
@@ -88,7 +89,7 @@ class DocumentProcessorOrchestrator:
         # ── Primitive services ────────────────────────────────────────────────
         self.text_extractor = TextExtractor(ocr_service=ocr_service)
         self.chunker = DocumentChunker(chunk_size, chunk_overlap, max_tokens=max_chunk_tokens)
-        self.embedding_service = EmbeddingService(embed_model_name)
+        self.embedding_service = embedding_service if embedding_service is not None else EmbeddingService(embed_model_name)
         self.vector_store = VectorStoreService(persist_dir)
         self.llm_service = LLMService(
             ollama_base_url=ollama_base_url,
@@ -141,6 +142,7 @@ class DocumentProcessorOrchestrator:
             llm_service=self.llm_service,
             retrieval_config=self.retrieval_config,
             filename_trie=self.indexing.filename_trie,  # shared reference
+            database_service=self.database_service,
         )
 
         _router = Router(QueryClassifier(self.llm_service))
@@ -263,19 +265,8 @@ class DocumentProcessorOrchestrator:
         self.pipeline.router.clear_cache()
 
         try:
-            from database.database import AsyncSessionLocal
-            from database.models import IndexedDocument
-            from sqlalchemy import delete
-
-            async with AsyncSessionLocal() as session:
-                try:
-                    stmt = delete(IndexedDocument)
-                    await session.execute(stmt)
-                    await session.commit()
-                    logger.info("Database document index records cleared")
-                except Exception:
-                    await session.rollback()
-                    raise
+            await self.database_service.delete_all_indexed_documents()
+            logger.info("Database document index records cleared")
         except Exception as e:
             logger.warning(f"Failed to clear database records: {e}")
 

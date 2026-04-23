@@ -4,10 +4,15 @@ Database service layer for document processor integration
 
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func, and_, or_, desc
+from sqlalchemy import select, update, delete, func, and_, or_, desc
 from sqlalchemy.sql.expression import literal
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
+
+
+def _naive(dt: datetime) -> datetime:
+    """Strip timezone info so the value is safe for TIMESTAMP WITHOUT TIME ZONE columns."""
+    return dt.replace(tzinfo=None) if dt is not None and dt.tzinfo is not None else dt
 
 from .models import ChatSession, ChatMessage, IndexedDocument, DocumentChatUsage
 from .database import AsyncSessionLocal
@@ -83,10 +88,10 @@ class DatabaseService:
                 values = dict(
                     file_hash=file_hash,
                     file_size=file_size,
-                    last_modified=last_modified,
+                    last_modified=_naive(last_modified),
                     content_preview=content_preview,
                     chunks_count=chunks_count,
-                    last_processed=datetime.now(timezone.utc),
+                    last_processed=datetime.utcnow(),
                     processing_status=processing_status,
                 )
                 if document_category is not None:
@@ -104,7 +109,7 @@ class DatabaseService:
                     file_hash=file_hash,
                     file_type=file_type,
                     file_size=file_size,
-                    last_modified=last_modified,
+                    last_modified=_naive(last_modified),
                     content_preview=content_preview,
                     chunks_count=chunks_count,
                     processing_status=processing_status,
@@ -147,7 +152,7 @@ class DatabaseService:
                 stmt = (
                     update(IndexedDocument)
                     .where(IndexedDocument.file_path.in_(file_paths))
-                    .values(processing_status="indexed", last_processed=datetime.now(timezone.utc))
+                    .values(processing_status="indexed", last_processed=datetime.utcnow())
                 )
                 result = await session.execute(stmt)
                 await session.commit()
@@ -179,7 +184,7 @@ class DatabaseService:
                 existing_usage = result.scalar_one_or_none()
                 if existing_usage:
                     existing_usage.usage_count += 1
-                    existing_usage.last_used = datetime.now(timezone.utc)
+                    existing_usage.last_used = datetime.utcnow()
                     await session.commit()
                     await session.refresh(existing_usage)
                     return existing_usage
@@ -213,7 +218,7 @@ class DatabaseService:
                         file_hash="",
                         file_type=src.get("file_type", "unknown"),
                         file_size=0,
-                        last_modified=datetime.now(timezone.utc),
+                        last_modified=datetime.utcnow(),
                         content_preview=(src.get("content_snippet") or "")[:500],
                         chunks_count=src.get("chunks_found", 0),
                     )
@@ -319,7 +324,7 @@ class DatabaseService:
             try:
                 stmt = update(ChatSession).where(
                     ChatSession.id == session_id
-                ).values(title=new_title, updated_at=datetime.now(timezone.utc))
+                ).values(title=new_title, updated_at=datetime.utcnow())
                 result = await session.execute(stmt)
                 await session.commit()
                 return result.rowcount > 0
@@ -637,3 +642,29 @@ class DatabaseService:
             result = await session.execute(stmt)
             docs = result.scalars().all()
             return {doc.file_path: doc for doc in docs}
+
+    async def get_all_indexed_docs(self) -> List[IndexedDocument]:
+        """Return all documents with processing_status in ('indexed', 'metadata_only')."""
+        async with AsyncSessionLocal() as session:
+            stmt = select(IndexedDocument).where(
+                IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
+            )
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+    async def delete_all_indexed_documents(self) -> None:
+        """Delete all IndexedDocument records."""
+        async with AsyncSessionLocal() as session:
+            try:
+                await session.execute(delete(IndexedDocument))
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    async def get_document_by_id(self, document_id: int) -> Optional[IndexedDocument]:
+        """Get a single document by its primary key."""
+        async with AsyncSessionLocal() as session:
+            stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()

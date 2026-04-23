@@ -10,10 +10,6 @@ import os
 from pathlib import Path
 from datetime import datetime, timezone
 
-from sqlalchemy import select
-
-from database import AsyncSessionLocal
-from database.models import IndexedDocument
 from dependencies import db_service, require_app_state, validate_file_under_directory
 from services.document_processor import DocumentProcessorOrchestrator
 from services.file_monitor import FileMonitorService
@@ -86,6 +82,7 @@ async def set_directory(request: Request):
             groq_model=settings.GROQ_MODEL,
             llm_provider=settings.LLM_PROVIDER,
             database_service=db_service,
+            embedding_service=getattr(request.app.state, "embedding_service", None),
         )
 
         if is_resume:
@@ -217,10 +214,7 @@ async def autocomplete_filenames(q: str = "", limit: int = 10, state=Depends(req
 @router.get("/documents/{document_id}")
 async def get_document_metadata(document_id: int):
     try:
-        async with AsyncSessionLocal() as db_session:
-            stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
-            result = await db_session.execute(stmt)
-            document = result.scalar_one_or_none()
+        document = await db_service.get_document_by_id(document_id)
         if not document:
             raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
         return {
@@ -248,10 +242,7 @@ async def get_document_metadata(document_id: int):
 async def get_document_file(request: Request, document_id: int, state=Depends(require_app_state)):
     """Serve a document file by its database ID."""
     try:
-        async with AsyncSessionLocal() as db_session:
-            stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
-            result = await db_session.execute(stmt)
-            document = result.scalar_one_or_none()
+        document = await db_service.get_document_by_id(document_id)
         if not document:
             raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
 
@@ -320,10 +311,7 @@ async def get_document_preview(
         raise HTTPException(status_code=503, detail="PPTX preview service not available.")
 
     try:
-        async with AsyncSessionLocal() as db_session:
-            stmt = select(IndexedDocument).where(IndexedDocument.id == document_id)
-            result = await db_session.execute(stmt)
-            document = result.scalar_one_or_none()
+        document = await db_service.get_document_by_id(document_id)
         if not document:
             raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
 
@@ -437,7 +425,6 @@ async def get_update_status(file_path: str, state=Depends(require_app_state)):
             active_file = {
                 "file_path": task.file_path, "priority": task.priority,
                 "update_type": task.update_type,
-                "strategy": task.strategy.value if task.strategy else None,
                 "enqueued_at": task.enqueued_at.isoformat(),
             }
         completed_result = None

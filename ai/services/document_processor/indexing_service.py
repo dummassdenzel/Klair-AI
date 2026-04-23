@@ -503,25 +503,17 @@ class IndexingService:
                 self.files_being_processed.discard(file_path)
                 return
 
-            from database.database import AsyncSessionLocal
-            from database.models import IndexedDocument
-            from sqlalchemy import select
-
-            async with AsyncSessionLocal() as db_session:
-                stmt = select(IndexedDocument).where(IndexedDocument.file_path == file_path)
-                result = await db_session.execute(stmt)
-                existing_doc = result.scalar_one_or_none()
-
-                if (
-                    existing_doc
-                    and existing_doc.processing_status == "indexed"
-                    and existing_doc.file_hash == current_hash
-                ):
-                    if not force_reindex:
-                        logger.debug(f"File {file_path} already fully indexed, skipping")
-                    self._metadata_cache.set(file_path, current_hash, file_metadata)
-                    self.files_being_processed.discard(file_path)
-                    return
+            existing_doc = await self.database_service.get_document_by_path(file_path)
+            if (
+                existing_doc
+                and existing_doc.processing_status == "indexed"
+                and existing_doc.file_hash == current_hash
+            ):
+                if not force_reindex:
+                    logger.debug(f"File {file_path} already fully indexed, skipping")
+                self._metadata_cache.set(file_path, current_hash, file_metadata)
+                self.files_being_processed.discard(file_path)
+                return
 
             if stored_hash and stored_hash != current_hash:
                 logger.info(f"File {file_path} changed, removing old chunks")
@@ -656,29 +648,20 @@ class IndexingService:
     async def _load_existing_metadata(self) -> None:
         """Load existing documents: rebuild trie for all, fill LRU cache up to max_size."""
         try:
-            from database.database import AsyncSessionLocal
-            from database.models import IndexedDocument
-            from sqlalchemy import select
+            docs = await self.database_service.get_all_indexed_docs()
 
-            async with AsyncSessionLocal() as db_session:
-                stmt = select(IndexedDocument).where(
-                    IndexedDocument.processing_status.in_(["indexed", "metadata_only"])
-                )
-                result = await db_session.execute(stmt)
-                docs = result.scalars().all()
-
-                for doc in docs:
-                    filename = Path(doc.file_path).name
-                    self.filename_trie.add(filename, doc.file_path)
-                    if len(self._metadata_cache) < self._metadata_cache.max_size:
-                        meta = {
-                            "file_type": doc.file_type,
-                            "size_bytes": doc.file_size,
-                            "modified_at": doc.last_modified,
-                            "chunks": doc.chunks_count,
-                            "processing_status": doc.processing_status,
-                        }
-                        self._metadata_cache.set(doc.file_path, doc.file_hash or "", meta)
+            for doc in docs:
+                filename = Path(doc.file_path).name
+                self.filename_trie.add(filename, doc.file_path)
+                if len(self._metadata_cache) < self._metadata_cache.max_size:
+                    meta = {
+                        "file_type": doc.file_type,
+                        "size_bytes": doc.file_size,
+                        "modified_at": doc.last_modified,
+                        "chunks": doc.chunks_count,
+                        "processing_status": doc.processing_status,
+                    }
+                    self._metadata_cache.set(doc.file_path, doc.file_hash or "", meta)
 
             indexed_count = sum(1 for d in docs if d.processing_status == "indexed")
             metadata_only_count = sum(1 for d in docs if d.processing_status == "metadata_only")
