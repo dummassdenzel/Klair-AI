@@ -52,6 +52,13 @@ _GENERAL_PATTERNS: list[re.Pattern] = [
     ]
 ]
 
+# If a query also asks for values/totals, it needs search_documents — route to agent instead.
+_VALUE_SEEKING_RE = re.compile(
+    r"\b(?:total(?: value| amount| cost| price)?|sum|how much|grand total|amount due|"
+    r"overall (?:value|amount|cost)|add(?:ed)? up|tally|breakdown of (?:costs?|amounts?|values?))\b",
+    re.IGNORECASE,
+)
+
 _LISTING_PATTERNS: list[re.Pattern] = [
     re.compile(p, re.IGNORECASE) for p in [
         r"^(?:list|show|display|give me|get)(?: me)? (?:all|every|the) (?:documents?|files?|indexed)\s*$",
@@ -104,6 +111,8 @@ def _is_general(q: str) -> bool:
 
 
 def _is_document_listing(q: str) -> bool:
+    if _VALUE_SEEKING_RE.search(q):
+        return False
     return any(p.search(q) for p in _LISTING_PATTERNS)
 
 

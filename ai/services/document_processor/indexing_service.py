@@ -581,7 +581,7 @@ class IndexingService:
                     self.files_being_processed.discard(file_path)
                     return
                 chunks = self.chunker.create_chunks(text, file_path)
-                content_preview = build_layout_aware_preview(text, max_chars=500)
+                content_preview = build_layout_aware_preview(text, max_chars=1500)
                 # Extract document's self-declared title from the first lines of text.
                 # This populates document_category so the listing context shows
                 # [Type: DELIVERY RECEIPT] / [Type: BRING-IN PERMIT] next to each file,
