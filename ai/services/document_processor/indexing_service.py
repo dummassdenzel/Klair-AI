@@ -280,10 +280,10 @@ class IndexingService:
 
             if resume_mode and fp_str in existing_docs:
                 existing = existing_docs[fp_str]
-                if existing.get("processing_status") == "indexed":
+                if existing.processing_status == "indexed":
                     try:
                         disk_mtime = file_path.stat().st_mtime
-                        db_mtime = existing.get("last_modified")
+                        db_mtime = existing.last_modified
                         if db_mtime is not None:
                             if hasattr(db_mtime, "timestamp"):
                                 db_ts = db_mtime.timestamp()
@@ -292,15 +292,15 @@ class IndexingService:
                             if abs(disk_mtime - db_ts) < 2.0:
                                 self.filename_trie.add(filename, fp_str)
                                 meta = {
-                                    "file_type": existing.get("file_type", ""),
-                                    "size_bytes": existing.get("file_size", 0),
+                                    "file_type": existing.file_type or "",
+                                    "size_bytes": existing.file_size or 0,
                                     "modified_at": db_mtime,
-                                    "chunks": existing.get("chunks_count", 0),
+                                    "chunks": existing.chunks_count or 0,
                                     "processing_status": "indexed",
                                 }
                                 if len(self._metadata_cache) < self._metadata_cache.max_size:
                                     self._metadata_cache.set(
-                                        fp_str, existing.get("file_hash", ""), meta
+                                        fp_str, existing.file_hash or "", meta
                                     )
                                 continue
                     except Exception:
