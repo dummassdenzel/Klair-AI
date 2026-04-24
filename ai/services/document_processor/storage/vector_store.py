@@ -77,6 +77,8 @@ class VectorStoreService:
                     "processed_at": datetime.now(timezone.utc).isoformat(),
                     "text_length": len(chunk.text),
                 }
+                if chunk.page_number is not None:
+                    metadata["page_number"] = chunk.page_number
                 ids.append(chunk_id)
                 documents.append(chunk.text)
                 metadatas.append(metadata)

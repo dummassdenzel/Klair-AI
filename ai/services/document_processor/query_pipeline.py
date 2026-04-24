@@ -27,6 +27,13 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 # actual document content on the first line instead of a page-counter artifact.
 _OCR_PAGE_RE = re.compile(r'^Page \d+:\n?', re.IGNORECASE)
 
+# Strip tool-name citations that some LLMs emit verbatim, e.g. "[search_documents]"
+_TOOL_CITATION_RE = re.compile(
+    r'\s*\[(search_documents|list_documents|search_specific_document'
+    r'|summarize_corpus|propose_document_edit)\]',
+    re.IGNORECASE,
+)
+
 from .models import QueryResult
 from .llm.llm_service import LLMService
 from .extraction.embedding_service import EmbeddingService
@@ -41,9 +48,6 @@ from .tools.contract import (
     TOOL_SEARCH_SPECIFIC_DOCUMENT,
     TOOL_SUMMARIZE_CORPUS,
     TOOL_PROPOSE_DOCUMENT_EDIT,
-    TOOL_RENAME_FILE,
-    TOOL_DELETE_FILE,
-    TOOL_MOVE_FILE,
     get_openai_format_tools,
     validate_tool_call,
     validate_tool_calls,
@@ -55,7 +59,8 @@ from .retrieval_service import RetrievalService
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_CALLS_PER_QUERY = 4
-TOOL_EXECUTION_TIMEOUT_SECONDS = 10
+TOOL_EXECUTION_TIMEOUT_SECONDS = 30
+LLM_TOOL_CALL_TIMEOUT_SECONDS = 60
 
 
 class QueryPipelineService:
@@ -92,9 +97,6 @@ class QueryPipelineService:
         "content in a specific file. Only .txt and .docx files are supported. "
         "Pass the exact filename and a clear instruction describing what to change. "
         "The user will review and confirm before anything is written.\n"
-        "• rename_file → use when the user asks to rename a file. Call directly — a confirmation card appears in the UI automatically before anything is changed.\n"
-        "• delete_file → use when the user explicitly asks to DELETE a file. Call directly — a confirmation card will appear so the user can confirm or cancel before deletion.\n"
-        "• move_file → use when the user asks to move a file to another folder. Pass the destination folder name as destination_folder (e.g. 'Reports' or 'Archive/2025'). Call directly — a confirmation card will appear.\n"
         "When the user asks for 'related' documents or 'other files related to X', use search_documents with a "
         "descriptive query, not just the document identifier. "
         "Citation format: when citing list_documents or summarize_corpus results, use [Folder Overview] or [Document List], "
@@ -104,7 +106,10 @@ class QueryPipelineService:
         "2. If no [Type:] label → infer the document type from its content preview or title as a whole. "
         "Classify based on what the document IS, not what it merely mentions or references. "
         "3. NEVER classify a document based on a keyword that appears only as a column header or table value "
-        "referencing another document — check the document's own title or prominent heading first."
+        "referencing another document — check the document's own title or prominent heading first. "
+        "IMPORTANT — NEVER write tool names in brackets in your response. Do not write "
+        "[search_documents], [list_documents], [search_specific_document], [summarize_corpus], "
+        "or [propose_document_edit] anywhere in your answer."
     )
 
     def __init__(
@@ -113,7 +118,6 @@ class QueryPipelineService:
         embedding_service: EmbeddingService,
         router: Router,
         retrieval_service: RetrievalService,
-        file_ops: Optional[Any] = None,
         edit_service: Optional[Any] = None,
     ) -> None:
         self.llm_service = llm_service
@@ -121,8 +125,8 @@ class QueryPipelineService:
         self.router = router
         self.retrieval = retrieval_service
         self.edit_service = edit_service
-        self.file_ops = file_ops
         self._summary_cache: OrderedDict = OrderedDict()  # session_id → (older_count, summary_text); LRU, max 200
+        self._suggestions_cache: Dict[str, List[str]] = {}  # directory → suggestions
 
     # ------------------------------------------------------------------
     # Public entry points
@@ -166,6 +170,7 @@ class QueryPipelineService:
                 question, result["context"], conversation_history=history
             )
 
+        text = _TOOL_CITATION_RE.sub("", text).strip()
         return QueryResult(
             message=text,
             sources=result["sources"],
@@ -200,10 +205,7 @@ class QueryPipelineService:
         for proposal in result.get("edit_proposals", []):
             yield ("edit_proposal", proposal)
 
-        # Emit file operation proposals (rename/delete/move confirmations)
-        for proposal in result.get("file_op_proposals", []):
-            yield ("file_op_proposal", proposal)
-
+        text = ""
         try:
             if action == "direct":
                 text = result["answer"]
@@ -227,8 +229,9 @@ class QueryPipelineService:
         except Exception as e:
             logger.error(f"Query stream generation failed: {e}")
             yield ("error", {"detail": str(e)})
-            return
+            # Fall through — always emit done so the frontend has a terminal event.
 
+        text = _TOOL_CITATION_RE.sub("", text).strip()
         yield (
             "done",
             {
@@ -345,6 +348,71 @@ class QueryPipelineService:
                 history.append({"role": "assistant", "content": ai_msg})
 
         return history
+
+    # ------------------------------------------------------------------
+    # Suggested queries
+    # ------------------------------------------------------------------
+
+    async def generate_suggestions(self, directory: str = "") -> List[str]:
+        """Return 4 context-aware suggested questions based on the indexed documents."""
+        cache_key = directory or "_default"
+        if cache_key in self._suggestions_cache:
+            return self._suggestions_cache[cache_key]
+
+        try:
+            return await asyncio.wait_for(
+                self._do_generate_suggestions(cache_key), timeout=20.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Suggestion generation timed out")
+            return []
+        except Exception as e:
+            logger.warning("Suggestion generation failed: %s", e)
+            return []
+
+    async def _do_generate_suggestions(self, cache_key: str) -> List[str]:
+        docs_result = await self.run_tool_list_documents()
+        if not docs_result or not docs_result.get("documents"):
+            return []
+
+        docs = docs_result["documents"][:15]
+        doc_lines: List[str] = []
+        for doc in docs:
+            name = doc.get("filename", "")
+            ftype = (doc.get("file_type") or "").upper()
+            preview = _OCR_PAGE_RE.sub("", doc.get("content_preview") or "")[:80].strip()
+            doc_lines.append(f"- {name} ({ftype}){': ' + preview if preview else ''}")
+
+        doc_summary = "\n".join(doc_lines)
+        count = docs_result.get("count", len(docs))
+
+        prompt = (
+            f"A user has indexed a folder with {count} document(s):\n\n"
+            f"{doc_summary}\n\n"
+            "Generate exactly 4 short, natural questions the user would genuinely want to ask.\n"
+            "Rules:\n"
+            "- Mix: one overview, one specific content, one cross-document comparison, one detail/value question\n"
+            "- Write as the user would type them — casual and natural\n"
+            "- Each question must be under 12 words and end with a question mark\n"
+            "- Return ONLY 4 lines, no numbering, bullets, or extra text\n\n"
+            "Questions:"
+        )
+
+        response = await self.llm_service.generate_simple(
+            prompt, prompt_type="short_direct", max_completion_tokens=150
+        )
+        lines = [
+            l.strip().lstrip("•-–—*123456789. ").strip('"').strip("'")
+            for l in (response or "").split("\n")
+            if l.strip()
+        ]
+        suggestions = [l for l in lines if len(l) > 8 and "?" in l][:4]
+        if suggestions:
+            self._suggestions_cache[cache_key] = suggestions
+        return suggestions
+
+    def invalidate_suggestions_cache(self, directory: str = "") -> None:
+        self._suggestions_cache.pop(directory or "_default", None)
 
     # ------------------------------------------------------------------
     # Shared pipeline
@@ -556,96 +624,6 @@ class QueryPipelineService:
 
         return {"proposal": proposal.to_client_dict(), "summary": proposal.summary}
 
-    def _resolve_file_path(self, document_name: str) -> Optional[str]:
-        """Resolve a document name to a full file path via the filename trie."""
-        trie = getattr(self.retrieval, "filename_trie", None)
-        if trie is not None:
-            matches = trie.search(document_name.strip(), max_results=1)
-            if matches:
-                return matches[0]
-        return None
-
-    async def run_tool_rename_file(self, document_name: str, new_name: str) -> Dict[str, Any]:
-        """Tool: rename_file. Returns a proposal for the user to confirm in the UI."""
-        if not document_name or not new_name:
-            return {"tool_error": True, "message": "document_name and new_name are required.", "retryable": False}
-        file_path = self._resolve_file_path(document_name)
-        if not file_path:
-            return {
-                "tool_error": True,
-                "message": f"Could not find a file matching '{document_name}' in the indexed folder.",
-                "retryable": False,
-            }
-        import uuid as _uuid
-        return {
-            "file_op_proposal": {
-                "id": _uuid.uuid4().hex,
-                "type": "rename",
-                "file_path": file_path,
-                "document_name": Path(file_path).name,
-                "new_name": new_name.strip(),
-            }
-        }
-
-    async def run_tool_delete_file(self, document_name: str) -> Dict[str, Any]:
-        """Tool: delete_file. Returns a proposal for the user to confirm in the UI."""
-        if not document_name:
-            return {"tool_error": True, "message": "document_name is required.", "retryable": False}
-        file_path = self._resolve_file_path(document_name)
-        if not file_path:
-            return {
-                "tool_error": True,
-                "message": f"Could not find a file matching '{document_name}' in the indexed folder.",
-                "retryable": False,
-            }
-        import uuid as _uuid
-        return {
-            "file_op_proposal": {
-                "id": _uuid.uuid4().hex,
-                "type": "delete",
-                "file_path": file_path,
-                "document_name": Path(file_path).name,
-            }
-        }
-
-    async def run_tool_move_file(self, document_name: str, destination_folder: str) -> Dict[str, Any]:
-        """Tool: move_file. Returns a proposal for the user to confirm in the UI."""
-        if not document_name or not destination_folder:
-            return {"tool_error": True, "message": "document_name and destination_folder are required.", "retryable": False}
-        file_path = self._resolve_file_path(document_name)
-        if not file_path:
-            return {
-                "tool_error": True,
-                "message": f"Could not find a file matching '{document_name}' in the indexed folder.",
-                "retryable": False,
-            }
-        current_dir = getattr(self.file_ops, "current_directory", None) if self.file_ops else None
-        destination_path = destination_folder
-        if current_dir:
-            abs_dir = Path(current_dir).resolve()
-            dst = Path(destination_folder)
-            if not dst.is_absolute():
-                dst = abs_dir / destination_folder
-            dst = dst.resolve()
-            if not dst.is_dir():
-                return {
-                    "tool_error": True,
-                    "message": f"Destination folder '{destination_folder}' not found.",
-                    "retryable": False,
-                }
-            destination_path = str(dst)
-        import uuid as _uuid
-        return {
-            "file_op_proposal": {
-                "id": _uuid.uuid4().hex,
-                "type": "move",
-                "file_path": file_path,
-                "document_name": Path(file_path).name,
-                "destination_folder": destination_folder,
-                "destination_path": destination_path,
-            }
-        }
-
     async def run_tool(
         self,
         tool: str,
@@ -654,8 +632,6 @@ class QueryPipelineService:
         name: Optional[str] = None,
         document_name: Optional[str] = None,
         instruction: Optional[str] = None,
-        new_name: Optional[str] = None,
-        destination_folder: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Single entry point for tool execution. Validates, then dispatches."""
         doc_name = document_name or name
@@ -674,12 +650,6 @@ class QueryPipelineService:
                 return await self.run_tool_summarize_corpus()
             if tool == TOOL_PROPOSE_DOCUMENT_EDIT:
                 return await self.run_tool_propose_document_edit(doc_name or "", instruction or "")
-            if tool == TOOL_RENAME_FILE:
-                return await self.run_tool_rename_file(doc_name or "", new_name or "")
-            if tool == TOOL_DELETE_FILE:
-                return await self.run_tool_delete_file(doc_name or "")
-            if tool == TOOL_MOVE_FILE:
-                return await self.run_tool_move_file(doc_name or "", destination_folder or "")
         except Exception as e:
             logger.error("Tool execution failed for %s: %s", tool, e)
             return None
@@ -706,8 +676,6 @@ class QueryPipelineService:
                 name=call.get("name"),
                 document_name=call.get("document_name"),
                 instruction=call.get("instruction"),
-                new_name=call.get("new_name"),
-                destination_folder=call.get("destination_folder"),
             )
             if result is not None:
                 results.append({"tool": tool, "result": result})
@@ -764,29 +732,21 @@ class QueryPipelineService:
                 TOOL_SEARCH_SPECIFIC_DOCUMENT,
                 TOOL_SUMMARIZE_CORPUS,
                 TOOL_PROPOSE_DOCUMENT_EDIT,
-                TOOL_RENAME_FILE,
-                TOOL_DELETE_FILE,
-                TOOL_MOVE_FILE,
             ):
                 continue
             args_str = fn.get("arguments") or "{}"
             try:
                 args = json.loads(args_str) if isinstance(args_str, str) else (args_str or {})
             except (json.JSONDecodeError, TypeError) as e:
-                logger.debug("Tool arguments parse failed for %s: %s", name, e)
-                args = {}
+                logger.warning("Skipping tool %s — malformed arguments JSON: %s", name, e)
+                continue
             call: Dict[str, Any] = {"tool": name}
             if name == TOOL_SEARCH_DOCUMENTS:
                 call["query"] = args.get("query") or ""
-            if name in (TOOL_SEARCH_SPECIFIC_DOCUMENT, TOOL_PROPOSE_DOCUMENT_EDIT,
-                        TOOL_RENAME_FILE, TOOL_DELETE_FILE, TOOL_MOVE_FILE):
+            if name in (TOOL_SEARCH_SPECIFIC_DOCUMENT, TOOL_PROPOSE_DOCUMENT_EDIT):
                 call["document_name"] = args.get("document_name") or args.get("name") or ""
             if name == TOOL_PROPOSE_DOCUMENT_EDIT:
                 call["instruction"] = args.get("instruction") or ""
-            if name == TOOL_RENAME_FILE:
-                call["new_name"] = args.get("new_name") or ""
-            if name == TOOL_MOVE_FILE:
-                call["destination_folder"] = args.get("destination_folder") or ""
             if name == TOOL_SEARCH_SPECIFIC_DOCUMENT:
                 logger.info("Agent tool decision: %s(%s)", name, call.get("document_name", ""))
             elif name == TOOL_SEARCH_DOCUMENTS:
@@ -824,8 +784,6 @@ class QueryPipelineService:
                         query=call.get("query"),
                         document_name=call.get("document_name"),
                         instruction=call.get("instruction"),
-                        new_name=call.get("new_name"),
-                        destination_folder=call.get("destination_folder"),
                     ),
                     timeout=TOOL_EXECUTION_TIMEOUT_SECONDS,
                 )
@@ -896,9 +854,25 @@ class QueryPipelineService:
         messages = self._build_agent_messages(question, conversation_history)
         tools = get_openai_format_tools()
 
-        content, raw_tool_calls = await self.llm_service.chat_with_tools(
-            messages, tools, max_tokens=max_tokens
-        )
+        try:
+            content, raw_tool_calls = await asyncio.wait_for(
+                self.llm_service.chat_with_tools(messages, tools, max_tokens=max_tokens),
+                timeout=LLM_TOOL_CALL_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "chat_with_tools timed out after %ss — provider may be unresponsive",
+                LLM_TOOL_CALL_TIMEOUT_SECONDS,
+            )
+            return {
+                "action": "direct",
+                "answer": "The AI service is taking too long to respond. Please try again.",
+                "sources": [],
+                "query_type": "error",
+                "retrieval_count": 0,
+                "rerank_count": 0,
+                "start_time": start_time,
+            }
 
         if raw_tool_calls and len(raw_tool_calls) > MAX_TOOL_CALLS_PER_QUERY:
             raw_tool_calls = raw_tool_calls[:MAX_TOOL_CALLS_PER_QUERY]
@@ -932,13 +906,10 @@ class QueryPipelineService:
                 "start_time": start_time,
             }
 
-        # Separate terminal calls (edit proposals, file ops) from read calls.
-        # Terminal calls don't need a second LLM round-trip — execute and return directly.
-        FILE_OP_TOOLS = {TOOL_RENAME_FILE, TOOL_DELETE_FILE, TOOL_MOVE_FILE}
+        # Separate edit proposals from read calls.
+        # Edit proposals don't need a second LLM round-trip — execute and return directly.
         edit_calls = [c for c in our_calls if c.get("tool") == TOOL_PROPOSE_DOCUMENT_EDIT]
-        file_op_calls = [c for c in our_calls if c.get("tool") in FILE_OP_TOOLS]
-        read_calls = [c for c in our_calls if c.get("tool") not in
-                      {TOOL_PROPOSE_DOCUMENT_EDIT} | FILE_OP_TOOLS]
+        read_calls = [c for c in our_calls if c.get("tool") != TOOL_PROPOSE_DOCUMENT_EDIT]
 
         edit_proposals: List[Dict[str, Any]] = []
         if edit_calls:
@@ -948,7 +919,6 @@ class QueryPipelineService:
                 if proposal_data:
                     edit_proposals.append(proposal_data)
                 elif res and res.get("tool_error"):
-                    # Surface the error as part of the answer text
                     direct_answer = res.get("message", direct_answer)
 
         if edit_proposals:
@@ -962,28 +932,6 @@ class QueryPipelineService:
                 "edit_proposals": edit_proposals,
                 "start_time": start_time,
             }
-
-        # File operations return proposals for user confirmation in the UI.
-        if file_op_calls:
-            file_op_results = await self._execute_tool_calls(file_op_calls)
-            file_op_proposals: List[Dict[str, Any]] = []
-            for res in file_op_results:
-                prop = (res or {}).get("file_op_proposal")
-                if prop:
-                    file_op_proposals.append(prop)
-                elif res and res.get("tool_error"):
-                    direct_answer = res.get("message", direct_answer)
-            if file_op_proposals:
-                return {
-                    "action": "direct",
-                    "answer": content or "Please review and confirm the proposed file operation(s).",
-                    "sources": [],
-                    "query_type": "file_operation",
-                    "retrieval_count": 0,
-                    "rerank_count": 0,
-                    "file_op_proposals": file_op_proposals,
-                    "start_time": start_time,
-                }
 
         if not read_calls:
             return {
@@ -1019,44 +967,6 @@ class QueryPipelineService:
                     "content": self._format_tool_result_content(tool_name, result_payload),
                 }
             )
-
-        # Second round: when list_documents was called, the model may now want to call
-        # file op tools based on what it sees. Run one more chat_with_tools to capture that.
-        did_list_documents = any(c.get("tool") == TOOL_LIST_DOCUMENTS for c in read_calls)
-        if did_list_documents:
-            content2, raw_tool_calls2 = await self.llm_service.chat_with_tools(
-                messages, tools, max_tokens=max_tokens
-            )
-            if raw_tool_calls2:
-                our_calls2 = self._parse_groq_tool_calls(raw_tool_calls2)
-                file_op_calls2 = [c for c in our_calls2 if c.get("tool") in FILE_OP_TOOLS]
-                if file_op_calls2:
-                    file_op_results2 = await self._execute_tool_calls(file_op_calls2)
-                    file_op_proposals2 = [
-                        r.get("file_op_proposal") for r in file_op_results2
-                        if r and r.get("file_op_proposal")
-                    ]
-                    if file_op_proposals2:
-                        return {
-                            "action": "direct",
-                            "answer": content2 or "Please review and confirm the proposed file operation(s).",
-                            "sources": sources,
-                            "query_type": "file_operation",
-                            "retrieval_count": len(sources),
-                            "rerank_count": 0,
-                            "file_op_proposals": file_op_proposals2,
-                            "start_time": start_time,
-                        }
-            # Second round had no file ops: return the text directly (avoids raw JSON output)
-            return {
-                "action": "direct",
-                "answer": content2 or "I've looked at your documents. Let me know if you need anything else.",
-                "sources": sources,
-                "query_type": "agent",
-                "retrieval_count": len(sources),
-                "rerank_count": 0,
-                "start_time": start_time,
-            }
 
         return {
             "action": "chat_messages",

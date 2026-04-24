@@ -15,8 +15,7 @@
   import MarkdownRenderer from "$lib/components/MarkdownRenderer.svelte";
   import FileTypeIcon from "$lib/components/FileTypeIcon.svelte";
   import EditProposalCard from "$lib/components/EditProposalCard.svelte";
-  import FileOpProposalCard from "$lib/components/FileOpProposalCard.svelte";
-  import { getFileTypeConfig } from "$lib/utils/fileTypes";
+import { getFileTypeConfig } from "$lib/utils/fileTypes";
   import { messageToConversationTitle } from "$lib/utils/chatTitle";
   import { formatCalendarDate } from "$lib/utils/dateFormat";
   import { theme } from "$lib/stores/theme";
@@ -33,6 +32,38 @@
   let shouldAutoScroll = true;
   /** Coalesce per-token scrolls to one rAF per frame */
   let streamScrollRaf: number | null = null;
+
+  let suggestions: string[] = [];
+  let loadingSuggestions = false;
+  let suggestionsFetchedFor = ""; // tracks which directory suggestions were fetched for
+
+  async function fetchSuggestions() {
+    if (loadingSuggestions) return;
+    loadingSuggestions = true;
+    try {
+      const result = await apiService.getSuggestions();
+      suggestions = result;
+      if (!result.length) suggestionsFetchedFor = ""; // allow retry next cycle
+    } catch {
+      suggestions = [];
+      suggestionsFetchedFor = ""; // allow retry
+    } finally {
+      loadingSuggestions = false;
+    }
+  }
+
+  // Wait until content indexing is done before fetching — avoids racing the
+  // indexing pipeline and triggering a second fetch that clears existing results.
+  $: if (
+    $metadataIndexed &&
+    !$contentIndexingInProgress &&
+    !loadingSuggestions &&
+    $systemStatus?.current_directory &&
+    $systemStatus.current_directory !== suggestionsFetchedFor
+  ) {
+    suggestionsFetchedFor = $systemStatus.current_directory;
+    fetchSuggestions();
+  }
 
   function getScrollTopToAlignElementTop(container: HTMLElement, el: HTMLElement): number {
     const elRect = el.getBoundingClientRect();
@@ -128,7 +159,10 @@
   }
 
   async function handleSendMessage(event: CustomEvent<{ message: string }>) {
-    const { message } = event.detail;
+    await sendMessage(event.detail.message);
+  }
+
+  async function sendMessage(message: string) {
     if (!message.trim()) return;
 
     // Allow queries once metadata is indexed (even if content is still indexing)
@@ -176,13 +210,6 @@
           onEditProposal(proposal) {
             messages = messages.map((msg) =>
               msg.id === userMessage.id ? { ...msg, edit_proposal: proposal } : msg,
-            );
-          },
-          onFileOpProposal(proposal) {
-            messages = messages.map((msg) =>
-              msg.id === userMessage.id
-                ? { ...msg, file_op_proposals: [...(msg.file_op_proposals ?? []), proposal] }
-                : msg,
             );
           },
           onToken(delta) {
@@ -318,16 +345,39 @@
     onscroll={handleScroll}
   >
     {#if messages.length === 0}
-      <div class="text-center text-gray-500 dark:text-gray-400 mt-16">
-        <!-- <div class="flex items-center justify-center mx-auto mb-6">
-          <img src="/klair.ai-sm.png" class="w-20 h-20" alt="User avatar" />
-        </div> -->
-        <h3 class="text-4xl font-bold tracking-tight text-[#37352F] dark:text-gray-100 mb-3">
+      <div class="flex flex-col items-center mt-16 px-4">
+        <h3 class="text-4xl font-bold tracking-tight text-[#37352F] dark:text-gray-100 mb-3 text-center">
           Welcome to Klair AI!
         </h3>
-        <p class="text-gray-600 dark:text-gray-400 text-xs">
+        <p class="text-gray-600 dark:text-gray-400 text-xs mb-8 text-center">
           Start a conversation by asking questions about your documents.
         </p>
+
+        {#if $metadataIndexed}
+          {#if loadingSuggestions}
+            <!-- Skeleton chips while generating -->
+            <div class="flex flex-wrap justify-center gap-3 max-w-xl">
+              {#each [1, 2, 3, 4] as _}
+                <div class="h-9 w-48 rounded-full bg-gray-100 dark:bg-gray-800 animate-pulse"></div>
+              {/each}
+            </div>
+          {:else if suggestions.length > 0}
+            <div class="flex flex-wrap justify-center gap-3 max-w-2xl">
+              {#each suggestions as suggestion}
+                <button
+                  type="button"
+                  onclick={() => sendMessage(suggestion)}
+                  class="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-[#443C68]/25 dark:border-[#8B7FC4]/30 bg-white dark:bg-gray-900 text-sm text-[#37352F] dark:text-gray-200 hover:border-[#443C68] dark:hover:border-[#8B7FC4] hover:bg-[#443C68]/5 dark:hover:bg-[#443C68]/15 transition-all shadow-sm hover:shadow-md"
+                >
+                  <svg class="w-3.5 h-3.5 text-[#443C68] dark:text-[#8B7FC4] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-3 3v-3z" />
+                  </svg>
+                  <span>{suggestion}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {/if}
       </div>
     {:else}
       {#each messages as message, i}
@@ -396,15 +446,6 @@
                   }}
                 />
               {/if}
-
-              <!-- File Operation Proposal Cards (rename / delete / move) -->
-              {#each message.file_op_proposals ?? [] as prop (prop.id)}
-                <FileOpProposalCard
-                  proposal={prop}
-                  onConfirmed={() => {}}
-                  onDiscarded={() => {}}
-                />
-              {/each}
 
               <!-- Message Metadata -->
               
@@ -477,8 +518,13 @@
                     <!-- Expanded: Vertical cards with full details -->
                     <div class="space-y-3">
                       {#each displayedSources as source}
-                        <div
-                          class="flex items-start gap-3 p-3 bg-white dark:bg-gray-950 rounded-lg border border-gray-100 dark:border-gray-800"
+                        <button
+                          type="button"
+                          class="w-full text-left flex items-start gap-3 p-3 bg-white dark:bg-gray-950 rounded-lg border border-gray-100 dark:border-gray-800 hover:border-[#443C68]/40 dark:hover:border-[#8B7FC4]/40 hover:bg-[#443C68]/5 transition-colors cursor-pointer"
+                          title="Open {source.file_path?.split('\\').pop()}{source.page_number ? ` · p.${source.page_number}` : ''} in document viewer"
+                          onclick={() => window.dispatchEvent(new CustomEvent('openDocumentViewer', {
+                            detail: { filePath: source.file_path, searchText: source.content_snippet ?? '', pageNumber: source.page_number ?? null }
+                          }))}
                         >
                           <div
                             class="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0"
@@ -502,16 +548,20 @@
                               {source.content_snippet || "No content preview"}
                             </div>
                           </div>
-                        </div>
+                        </button>
                       {/each}
                     </div>
                   {:else}
                     <!-- Collapsed or ≤3 sources: Horizontal chips (minimal space) -->
                     <div class="flex flex-wrap gap-2">
                       {#each displayedSources as source}
-                        <div
-                          class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-gray-950 rounded-full border border-gray-200 dark:border-gray-700 text-[0.625rem] text-gray-700 dark:text-gray-200 hover:border-[#443C68] dark:hover:border-[#8B7FC4] transition-colors cursor-default"
-                          title="{source.file_path?.split('\\').pop()} - {(source.relevance_score * 100).toFixed(1)}% relevance"
+                        <button
+                          type="button"
+                          class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-gray-950 rounded-full border border-gray-200 dark:border-gray-700 text-[0.625rem] text-gray-700 dark:text-gray-200 hover:border-[#443C68] dark:hover:border-[#8B7FC4] hover:bg-[#443C68]/5 transition-colors cursor-pointer"
+                          title="Open {source.file_path?.split('\\').pop()}{source.page_number ? ` · p.${source.page_number}` : ''} — {(source.relevance_score * 100).toFixed(1)}% relevance"
+                          onclick={() => window.dispatchEvent(new CustomEvent('openDocumentViewer', {
+                            detail: { filePath: source.file_path, searchText: source.content_snippet ?? '', pageNumber: source.page_number ?? null }
+                          }))}
                         >
                           <FileTypeIcon fileType={source.file_type} class="w-3.5 h-3.5 flex-shrink-0" />
                           <span class="font-bold {getFileTypeConfig(source.file_type).color} uppercase">
@@ -522,8 +572,8 @@
                           </span>
                           <span class="text-gray-500 dark:text-gray-400 tabular-nums">
                             {(source.relevance_score * 100).toFixed(0)}%
-              </span>
-            </div>
+                          </span>
+                        </button>
                       {/each}
                       
                         <!-- Show more button as inline chip -->

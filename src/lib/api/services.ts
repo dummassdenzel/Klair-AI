@@ -42,7 +42,6 @@ export const apiService = {
       onDone?: (message: string, responseTime: number) => void;
       onError?: (detail: string) => void;
       onEditProposal?: (proposal: import('./types').EditProposal) => void;
-      onFileOpProposal?: (proposal: import('./types').FileOpProposal) => void;
     }
   ): Promise<void> {
     const baseURL = apiClient.defaults.baseURL ?? '';
@@ -64,7 +63,9 @@ export const apiService = {
     }
     const decoder = new TextDecoder();
     let buffer = '';
-    while (true) {
+    let pendingError: string | null = null;
+
+    outer: while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
@@ -72,27 +73,35 @@ export const apiService = {
       buffer = lines.pop() ?? '';
       let event = '';
       for (const line of lines) {
-        if (line.startsWith('event: ')) event = line.slice(7).trim();
-        else if (line.startsWith('data: ') && event) {
+        if (line.startsWith('event: ')) {
+          event = line.slice(7).trim();
+        } else if (line.startsWith('data: ') && event) {
+          let data: Record<string, unknown> = {};
           try {
-            const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
-            if (event === 'meta') {
-              callbacks.onMeta?.((data.sources as ChatResponse['sources']) ?? [], (data.session_id as number) ?? 0);
-            } else if (event === 'edit_proposal') {
-              callbacks.onEditProposal?.(data as unknown as import('./types').EditProposal);
-            } else if (event === 'file_op_proposal') {
-              callbacks.onFileOpProposal?.(data as unknown as import('./types').FileOpProposal);
-            } else if (event === 'token') {
-              callbacks.onToken?.((data.delta as string) ?? '');
-            } else if (event === 'done') {
-              callbacks.onDone?.((data.message as string) ?? '', (data.response_time as number) ?? 0);
-            } else if (event === 'error') {
-              callbacks.onError?.((data.detail as string) ?? 'Unknown error');
-            }
-          } catch (_) {}
+            data = JSON.parse(line.slice(6)) as Record<string, unknown>;
+          } catch (_) {
+            event = '';
+            continue;
+          }
+          if (event === 'meta') {
+            callbacks.onMeta?.((data.sources as ChatResponse['sources']) ?? [], (data.session_id as number) ?? 0);
+          } else if (event === 'edit_proposal') {
+            callbacks.onEditProposal?.(data as unknown as import('./types').EditProposal);
+          } else if (event === 'token') {
+            callbacks.onToken?.((data.delta as string) ?? '');
+          } else if (event === 'done') {
+            callbacks.onDone?.((data.message as string) ?? '', (data.response_time as number) ?? 0);
+          } else if (event === 'error') {
+            pendingError = (data.detail as string) ?? 'Unknown error';
+            break outer;
+          }
           event = '';
         }
       }
+    }
+
+    if (pendingError !== null) {
+      callbacks.onError?.(pendingError);
     }
   },
 
@@ -142,6 +151,11 @@ export const apiService = {
   async discardEditProposal(proposalId: string): Promise<{ status: string }> {
     const response = await apiClient.post('/documents/edit/discard', { proposal_id: proposalId });
     return response.data;
+  },
+
+  async getSuggestions(): Promise<string[]> {
+    const response = await apiClient.get('/chat/suggestions');
+    return (response.data.suggestions as string[]) ?? [];
   },
 
   // Chat Session Management

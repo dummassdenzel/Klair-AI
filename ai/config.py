@@ -81,10 +81,19 @@ class Settings(BaseSettings):
     GROQ_MAX_CONTEXT_CHARS: int = 50000
     GROQ_MAX_SIMPLE_PROMPT_CHARS: int = 15000
     GROQ_MAX_LISTING_CONTEXT_CHARS: int = 25000
+    # OpenAI (ChatGPT)
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    # Anthropic (Claude)
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-sonnet-4-6"
+    # xAI (Grok)
+    XAI_API_KEY: str = ""
+    XAI_MODEL: str = "grok-3-mini"
 
     # PPTX Preview
     LIBREOFFICE_PATH: str = ""
-    PPTX_CACHE_DIR: str = "./pptx_cache"
+    PPTX_CACHE_DIR: str = "./preview_cache"
     PPTX_CACHE_ENABLED: bool = True
     PPTX_CONVERSION_TIMEOUT: int = 60
 
@@ -131,6 +140,9 @@ class Settings(BaseSettings):
         "ollama_model", "ollama_base_url",
         "gemini_model", "gemini_api_key",
         "groq_model", "groq_api_key",
+        "openai_model", "openai_api_key",
+        "anthropic_model", "anthropic_api_key",
+        "xai_model", "xai_api_key",
     }
 
     def update(self, **kwargs) -> None:
@@ -147,6 +159,12 @@ class Settings(BaseSettings):
             "gemini_api_key": "GEMINI_API_KEY",
             "groq_model": "GROQ_MODEL",
             "groq_api_key": "GROQ_API_KEY",
+            "openai_model": "OPENAI_MODEL",
+            "openai_api_key": "OPENAI_API_KEY",
+            "anthropic_model": "ANTHROPIC_MODEL",
+            "anthropic_api_key": "ANTHROPIC_API_KEY",
+            "xai_model": "XAI_MODEL",
+            "xai_api_key": "XAI_API_KEY",
         }
         for key, value in kwargs.items():
             attr = mapping.get(key)

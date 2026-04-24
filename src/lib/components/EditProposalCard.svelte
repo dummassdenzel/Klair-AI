@@ -15,7 +15,7 @@
 
   let state = $state<'idle' | 'applying' | 'discarding' | 'applied' | 'discarded' | 'error'>('idle');
   let errorMessage = $state('');
-  let expandedIndex = $state<number | null>(null);
+  let expandedIndex: number | null = $state(0);
 
   async function handleApply() {
     state = 'applying';

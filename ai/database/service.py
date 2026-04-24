@@ -67,6 +67,32 @@ class DatabaseService:
                 await session.rollback()
                 raise
     
+    async def update_chat_message(
+        self,
+        message_id: int,
+        ai_response: str,
+        sources: List[Dict],
+        response_time: float,
+    ) -> bool:
+        """Update an existing chat message with the final AI response after streaming."""
+        async with AsyncSessionLocal() as session:
+            try:
+                stmt = (
+                    update(ChatMessage)
+                    .where(ChatMessage.id == message_id)
+                    .values(
+                        ai_response=ai_response,
+                        sources=sources,
+                        response_time=response_time,
+                    )
+                )
+                result = await session.execute(stmt)
+                await session.commit()
+                return (result.rowcount or 0) > 0
+            except Exception:
+                await session.rollback()
+                raise
+
     async def store_document_metadata(
         self,
         file_path: str,

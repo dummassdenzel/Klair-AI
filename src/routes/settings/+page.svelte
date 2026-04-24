@@ -16,40 +16,93 @@
   let saveState = $state<SaveState>('idle');
   let errorMessage = $state('');
 
+  // activeProvider reflects what's actually running (from backend), shown in the badge.
+  // selectedProvider is what's currently being edited in the form.
+  let activeProvider = $state<LLMProvider>('ollama');
+  let activeModel = $state('');
   let selectedProvider = $state<LLMProvider>('ollama');
 
-  // Ollama
+  // Per-provider model selections
   let ollamaBaseUrl = $state('http://localhost:11434');
   let ollamaModel = $state('tinyllama');
-
-  // Gemini
   let geminiModel = $state('gemini-2.5-pro');
   let geminiApiKey = $state('');
   let geminiApiKeySet = $state(false);
-
-  // Groq
   let groqModel = $state('meta-llama/llama-4-scout-17b-16e-instruct');
   let groqApiKey = $state('');
   let groqApiKeySet = $state(false);
+  let openaiModel = $state('gpt-4o-mini');
+  let openaiApiKey = $state('');
+  let openaiApiKeySet = $state(false);
+  let anthropicModel = $state('claude-sonnet-4-6');
+  let anthropicApiKey = $state('');
+  let anthropicApiKeySet = $state(false);
+  let xaiModel = $state('grok-3-mini');
+  let xaiApiKey = $state('');
+  let xaiApiKeySet = $state(false);
 
-  // Generation temperature (shared across all providers)
   let temperature = $state(0.1);
 
   const PROVIDER_LABELS: Record<LLMProvider, string> = {
-    ollama: 'Ollama',
+    ollama: 'Ollama (local)',
     gemini: 'Gemini',
     groq: 'Groq',
+    openai: 'OpenAI',
+    anthropic: 'Anthropic',
+    xai: 'xAI',
   };
 
-  const PROVIDER_DESCRIPTIONS: Record<LLMProvider, string> = {
-    ollama: 'Local inference — no API key required.',
-    gemini: 'Google Gemini cloud API.',
-    groq: 'Groq cloud API — fast inference.',
+  const MODEL_OPTIONS: Record<LLMProvider, string[]> = {
+    ollama: ['tinyllama', 'llama3.2', 'llama3.1', 'mistral', 'phi3', 'gemma2', 'codellama'],
+    gemini: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
+    groq: [
+      'meta-llama/llama-4-scout-17b-16e-instruct',
+      'meta-llama/llama-4-maverick-17b-128e-instruct',
+      'llama-3.3-70b-versatile',
+      'llama-3.1-8b-instant',
+      'mixtral-8x7b-32768',
+    ],
+    openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+    anthropic: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
+    xai: ['grok-3', 'grok-3-mini', 'grok-2-1212'],
   };
+
+  // Returns the current model value for the selected provider
+  function getCurrentModel(p: LLMProvider): string {
+    if (p === 'ollama') return ollamaModel;
+    if (p === 'gemini') return geminiModel;
+    if (p === 'groq') return groqModel;
+    if (p === 'openai') return openaiModel;
+    if (p === 'anthropic') return anthropicModel;
+    if (p === 'xai') return xaiModel;
+    return '';
+  }
+
+  function setCurrentModel(p: LLMProvider, v: string) {
+    if (p === 'ollama') ollamaModel = v;
+    else if (p === 'gemini') geminiModel = v;
+    else if (p === 'groq') groqModel = v;
+    else if (p === 'openai') openaiModel = v;
+    else if (p === 'anthropic') anthropicModel = v;
+    else if (p === 'xai') xaiModel = v;
+  }
+
+  function getApiKeySet(p: LLMProvider): boolean {
+    if (p === 'gemini') return geminiApiKeySet;
+    if (p === 'groq') return groqApiKeySet;
+    if (p === 'openai') return openaiApiKeySet;
+    if (p === 'anthropic') return anthropicApiKeySet;
+    if (p === 'xai') return xaiApiKeySet;
+    return false;
+  }
+
+  // Reactive current model for the selected provider
+  let currentModel = $derived(getCurrentModel(selectedProvider));
 
   async function loadConfig() {
     try {
       const cfg: LLMConfig = await apiService.getLLMConfig();
+      activeProvider = cfg.provider;
       selectedProvider = cfg.provider;
       temperature = cfg.temperature ?? 0.1;
       ollamaBaseUrl = cfg.ollama_base_url;
@@ -58,6 +111,13 @@
       geminiApiKeySet = cfg.gemini_api_key_set;
       groqModel = cfg.groq_model;
       groqApiKeySet = cfg.groq_api_key_set;
+      openaiModel = cfg.openai_model;
+      openaiApiKeySet = cfg.openai_api_key_set;
+      anthropicModel = cfg.anthropic_model;
+      anthropicApiKeySet = cfg.anthropic_api_key_set;
+      xaiModel = cfg.xai_model;
+      xaiApiKeySet = cfg.xai_api_key_set;
+      activeModel = getCurrentModel(cfg.provider);
     } catch {
       // backend may not be running yet — silently ignore
     } finally {
@@ -80,17 +140,34 @@
     } else if (selectedProvider === 'groq') {
       update.groq_model = groqModel.trim() || undefined;
       if (groqApiKey.trim()) update.groq_api_key = groqApiKey.trim();
+    } else if (selectedProvider === 'openai') {
+      update.openai_model = openaiModel.trim() || undefined;
+      if (openaiApiKey.trim()) update.openai_api_key = openaiApiKey.trim();
+    } else if (selectedProvider === 'anthropic') {
+      update.anthropic_model = anthropicModel.trim() || undefined;
+      if (anthropicApiKey.trim()) update.anthropic_api_key = anthropicApiKey.trim();
+    } else if (selectedProvider === 'xai') {
+      update.xai_model = xaiModel.trim() || undefined;
+      if (xaiApiKey.trim()) update.xai_api_key = xaiApiKey.trim();
     }
 
     try {
       const result = await apiService.updateLLMConfig(update);
-      // Sync key-set flags and temperature from response
       geminiApiKeySet = result.gemini_api_key_set;
       groqApiKeySet = result.groq_api_key_set;
+      openaiApiKeySet = result.openai_api_key_set;
+      anthropicApiKeySet = result.anthropic_api_key_set;
+      xaiApiKeySet = result.xai_api_key_set;
       if (result.temperature != null) temperature = result.temperature;
-      // Clear plaintext key inputs after a successful save
+      // Update active badge to reflect what's now actually running
+      activeProvider = selectedProvider;
+      activeModel = getCurrentModel(selectedProvider);
+      // Clear plaintext key inputs
       geminiApiKey = '';
       groqApiKey = '';
+      openaiApiKey = '';
+      anthropicApiKey = '';
+      xaiApiKey = '';
       saveState = 'success';
       setTimeout(() => { saveState = 'idle'; }, 2500);
     } catch (e: any) {
@@ -119,18 +196,16 @@
 
       <!-- ── Appearance ────────────────────────────────────────────────── -->
       <div class="bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-2xl p-6 shadow-sm">
-        <div class="flex items-start justify-between gap-6">
-          <div class="flex-1">
-            <div class="flex items-center gap-3">
-              <div class="w-10 h-10 rounded-xl bg-[#443C68]/10 flex items-center justify-center">
-                <svg class="w-5 h-5 text-[#443C68]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m8-9h1M3 12H2m15.364-6.364l.707.707M5.929 18.071l-.707.707m12.142 0l-.707-.707M6.636 6.636l-.707-.707M12 18a6 6 0 100-12 6 6 0 000 12z" />
-                </svg>
-              </div>
-              <div>
-                <h2 class="text-sm font-semibold text-[#37352F] dark:text-gray-100">Appearance</h2>
-                <p class="text-xs text-gray-600 dark:text-gray-400 mt-1">Choose a theme for the app.</p>
-              </div>
+        <div class="flex items-center justify-between gap-6">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-[#443C68]/10 flex items-center justify-center shrink-0">
+              <svg class="w-5 h-5 text-[#443C68]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m8-9h1M3 12H2m15.364-6.364l.707.707M5.929 18.071l-.707.707m12.142 0l-.707-.707M6.636 6.636l-.707-.707M12 18a6 6 0 100-12 6 6 0 000 12z" />
+              </svg>
+            </div>
+            <div>
+              <h2 class="text-sm font-semibold text-[#37352F] dark:text-gray-100">Appearance</h2>
+              <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Choose a theme for the app.</p>
             </div>
           </div>
 
@@ -159,59 +234,106 @@
 
       <!-- ── AI Model ──────────────────────────────────────────────────── -->
       <div class="bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-2xl p-6 shadow-sm">
-        <div class="flex items-center gap-3 mb-6">
-          <div class="w-10 h-10 rounded-xl bg-[#443C68]/10 flex items-center justify-center">
-            <svg class="w-5 h-5 text-[#443C68]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.346a4 4 0 00-.999 1.354l-.142.49a2 2 0 01-1.93 1.474H10.88a2 2 0 01-1.93-1.474l-.141-.49a4 4 0 00-1-1.354l-.346-.346z" />
-            </svg>
-          </div>
-          <div class="flex-1">
-            <h2 class="text-sm font-semibold text-[#37352F] dark:text-gray-100">AI Model</h2>
-            <p class="text-xs text-gray-600 dark:text-gray-400 mt-1">Choose your LLM provider and model.</p>
+        <!-- Header row — same structure as Appearance -->
+        <div class="flex items-center justify-between gap-6">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl bg-[#443C68]/10 flex items-center justify-center shrink-0">
+              <svg class="w-5 h-5 text-[#443C68]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.346a4 4 0 00-.999 1.354l-.142.49a2 2 0 01-1.93 1.474H10.88a2 2 0 01-1.93-1.474l-.141-.49a4 4 0 00-1-1.354l-.346-.346z" />
+              </svg>
+            </div>
+            <div>
+              <h2 class="text-sm font-semibold text-[#37352F] dark:text-gray-100">AI Model</h2>
+              <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Choose your LLM provider and model.</p>
+            </div>
           </div>
 
-          {#if !loading}
-            <!-- Active-provider badge -->
-            <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium
+          <!-- Active badge — only reflects what's actually saved/running -->
+          {#if !loading && activeModel}
+            <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium shrink-0
               bg-[#443C68]/10 text-[#443C68] dark:bg-[#443C68]/20 dark:text-purple-300">
               <span class="w-1.5 h-1.5 rounded-full bg-[#443C68] dark:bg-purple-400"></span>
-              {PROVIDER_LABELS[selectedProvider]} active
+              {PROVIDER_LABELS[activeProvider]} · {activeModel}
+            </span>
+          {:else if !loading}
+            <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium shrink-0
+              bg-[#443C68]/10 text-[#443C68] dark:bg-[#443C68]/20 dark:text-purple-300">
+              <span class="w-1.5 h-1.5 rounded-full bg-[#443C68] dark:bg-purple-400"></span>
+              {PROVIDER_LABELS[activeProvider]}
             </span>
           {/if}
         </div>
 
+        <!-- Form — always visible (uncollapsed) -->
         {#if loading}
-          <div class="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 py-4">
-            <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+          <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 mt-5">
+            <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
             </svg>
             Loading configuration…
           </div>
         {:else}
-          <!-- Provider selector tabs -->
-          <div class="flex gap-2 mb-6">
-            {#each (['ollama', 'gemini', 'groq'] as LLMProvider[]) as p}
-              <button
-                type="button"
-                onclick={() => { selectedProvider = p; saveState = 'idle'; }}
-                class="flex-1 py-2.5 px-3 rounded-xl text-xs font-medium border transition-all
-                  {selectedProvider === p
-                    ? 'bg-[#443C68] text-white border-[#443C68] shadow-sm'
-                    : 'bg-gray-50 dark:bg-gray-900 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-800 hover:border-[#443C68]/50 hover:text-[#443C68] dark:hover:text-purple-300'}"
-              >
-                {PROVIDER_LABELS[p]}
-              </button>
-            {/each}
-          </div>
+          <div class="mt-5 pt-5 border-t border-gray-100 dark:border-gray-800 space-y-4">
 
-          <p class="text-xs text-gray-500 dark:text-gray-400 mb-5">
-            {PROVIDER_DESCRIPTIONS[selectedProvider]}
-          </p>
+            <!-- Provider + Model row -->
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label for="llm-provider" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                  Provider
+                </label>
+                <select
+                  id="llm-provider"
+                  bind:value={selectedProvider}
+                  onchange={() => { saveState = 'idle'; }}
+                  class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700
+                    bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100
+                    focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68]
+                    transition-colors cursor-pointer"
+                >
+                  {#each Object.entries(PROVIDER_LABELS) as [val, label]}
+                    <option value={val}>{label}</option>
+                  {/each}
+                </select>
+              </div>
 
-          <!-- Provider-specific fields -->
-          {#if selectedProvider === 'ollama'}
-            <div class="space-y-4">
+              <div>
+                <label for="llm-model" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                  Model
+                </label>
+                {#if selectedProvider === 'ollama'}
+                  <!-- Ollama: free text since installed models vary -->
+                  <input
+                    id="llm-model"
+                    type="text"
+                    bind:value={ollamaModel}
+                    placeholder="e.g. tinyllama"
+                    class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700
+                      bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100
+                      placeholder-gray-400 dark:placeholder-gray-600
+                      focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68]
+                      transition-colors"
+                  />
+                {:else}
+                  <select
+                    id="llm-model"
+                    value={currentModel}
+                    onchange={(e) => setCurrentModel(selectedProvider, (e.target as HTMLSelectElement).value)}
+                    class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700
+                      bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100
+                      focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68]
+                      transition-colors cursor-pointer"
+                  >
+                    {#each MODEL_OPTIONS[selectedProvider] as m}
+                      <option value={m}>{m}</option>
+                    {/each}
+                  </select>
+                {/if}
+              </div>
+            </div>
+
+            <!-- Ollama base URL (only for Ollama) -->
+            {#if selectedProvider === 'ollama'}
               <div>
                 <label for="ollama-url" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1.5">
                   Base URL
@@ -228,181 +350,112 @@
                     transition-colors"
                 />
               </div>
+            {:else}
+              <!-- API Key for cloud providers -->
               <div>
-                <label for="ollama-model" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                  Model name
-                </label>
-                <input
-                  id="ollama-model"
-                  type="text"
-                  bind:value={ollamaModel}
-                  placeholder="tinyllama"
-                  class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700
-                    bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100
-                    placeholder-gray-400 dark:placeholder-gray-600
-                    focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68]
-                    transition-colors"
-                />
-              </div>
-            </div>
-
-          {:else if selectedProvider === 'gemini'}
-            <div class="space-y-4">
-              <div>
-                <label for="gemini-model" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                  Model name
-                </label>
-                <input
-                  id="gemini-model"
-                  type="text"
-                  bind:value={geminiModel}
-                  placeholder="gemini-2.5-pro"
-                  class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700
-                    bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100
-                    placeholder-gray-400 dark:placeholder-gray-600
-                    focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68]
-                    transition-colors"
-                />
-              </div>
-              <div>
-                <label for="gemini-key" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                <label for="llm-api-key" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1.5">
                   API Key
-                  {#if geminiApiKeySet}
-                    <span class="ml-1 text-green-600 dark:text-green-400 font-normal">(configured)</span>
+                  {#if getApiKeySet(selectedProvider)}
+                    <span class="ml-1 font-normal text-green-600 dark:text-green-400">· configured</span>
                   {/if}
                 </label>
-                <input
-                  id="gemini-key"
-                  type="password"
-                  bind:value={geminiApiKey}
-                  placeholder={geminiApiKeySet ? 'Leave blank to keep existing key' : 'Enter your Gemini API key'}
-                  class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700
-                    bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100
-                    placeholder-gray-400 dark:placeholder-gray-600
-                    focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68]
-                    transition-colors"
-                />
-              </div>
-            </div>
-
-          {:else if selectedProvider === 'groq'}
-            <div class="space-y-4">
-              <div>
-                <label for="groq-model" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                  Model name
-                </label>
-                <input
-                  id="groq-model"
-                  type="text"
-                  bind:value={groqModel}
-                  placeholder="meta-llama/llama-4-scout-17b-16e-instruct"
-                  class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700
-                    bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100
-                    placeholder-gray-400 dark:placeholder-gray-600
-                    focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68]
-                    transition-colors"
-                />
-              </div>
-              <div>
-                <label for="groq-key" class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                  API Key
-                  {#if groqApiKeySet}
-                    <span class="ml-1 text-green-600 dark:text-green-400 font-normal">(configured)</span>
-                  {/if}
-                </label>
-                <input
-                  id="groq-key"
-                  type="password"
-                  bind:value={groqApiKey}
-                  placeholder={groqApiKeySet ? 'Leave blank to keep existing key' : 'Enter your Groq API key'}
-                  class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700
-                    bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100
-                    placeholder-gray-400 dark:placeholder-gray-600
-                    focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68]
-                    transition-colors"
-                />
-              </div>
-            </div>
-          {/if}
-
-          <!-- Temperature control -->
-          <div class="mt-6 pt-5 border-t border-gray-100 dark:border-gray-800">
-            <div class="flex items-center justify-between mb-2">
-              <div>
-                <label for="llm-temperature" class="block text-xs font-medium text-gray-700 dark:text-gray-300">
-                  Response Temperature
-                </label>
-                <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                  Controls answer randomness. Lower = more consistent and factual.
-                </p>
-              </div>
-              <div class="flex items-center gap-2">
-                <span class="text-xs font-mono font-semibold text-[#443C68] dark:text-purple-300 w-8 text-right">
-                  {temperature.toFixed(2)}
-                </span>
-                {#if temperature <= 0.2}
-                  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">
-                    Recommended
-                  </span>
+                {#if selectedProvider === 'gemini'}
+                  <input id="llm-api-key" type="password" bind:value={geminiApiKey}
+                    placeholder={geminiApiKeySet ? 'Leave blank to keep existing key' : 'Enter your Gemini API key'}
+                    class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68] transition-colors" />
+                {:else if selectedProvider === 'groq'}
+                  <input id="llm-api-key" type="password" bind:value={groqApiKey}
+                    placeholder={groqApiKeySet ? 'Leave blank to keep existing key' : 'Enter your Groq API key'}
+                    class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68] transition-colors" />
+                {:else if selectedProvider === 'openai'}
+                  <input id="llm-api-key" type="password" bind:value={openaiApiKey}
+                    placeholder={openaiApiKeySet ? 'Leave blank to keep existing key' : 'Enter your OpenAI API key'}
+                    class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68] transition-colors" />
+                {:else if selectedProvider === 'anthropic'}
+                  <input id="llm-api-key" type="password" bind:value={anthropicApiKey}
+                    placeholder={anthropicApiKeySet ? 'Leave blank to keep existing key' : 'Enter your Anthropic API key'}
+                    class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68] transition-colors" />
+                {:else if selectedProvider === 'xai'}
+                  <input id="llm-api-key" type="password" bind:value={xaiApiKey}
+                    placeholder={xaiApiKeySet ? 'Leave blank to keep existing key' : 'Enter your xAI API key'}
+                    class="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-[#37352F] dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-[#443C68]/30 focus:border-[#443C68] transition-colors" />
                 {/if}
               </div>
-            </div>
-            <div class="flex items-center gap-3">
-              <span class="text-xs text-gray-400 dark:text-gray-500 shrink-0">Precise</span>
-              <input
-                id="llm-temperature"
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                bind:value={temperature}
-                class="flex-1 h-2 rounded-full appearance-none cursor-pointer
-                  accent-[#443C68]
-                  bg-gray-200 dark:bg-gray-700"
-              />
-              <span class="text-xs text-gray-400 dark:text-gray-500 shrink-0">Creative</span>
-            </div>
-          </div>
-
-          <!-- Save row -->
-          <div class="flex items-center justify-between mt-5">
-            {#if saveState === 'success'}
-              <span class="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                Saved successfully
-              </span>
-            {:else if saveState === 'error'}
-              <span class="flex items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-                {errorMessage}
-              </span>
-            {:else}
-              <span></span>
             {/if}
 
-            <button
-              type="button"
-              onclick={saveConfig}
-              disabled={saveState === 'saving'}
-              class="inline-flex items-center gap-2 px-5 py-2 rounded-xl text-xs font-semibold
-                bg-[#443C68] text-white hover:bg-[#362f55] active:scale-95
-                disabled:opacity-60 disabled:cursor-not-allowed
-                transition-all shadow-sm"
-            >
-              {#if saveState === 'saving'}
-                <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
-                </svg>
-                Saving…
+            <!-- Temperature -->
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <label for="llm-temperature" class="text-xs font-medium text-gray-700 dark:text-gray-300">
+                  Temperature
+                </label>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs font-mono font-semibold text-[#443C68] dark:text-purple-300">
+                    {temperature.toFixed(2)}
+                  </span>
+                  {#if temperature <= 0.2}
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400">
+                      Recommended
+                    </span>
+                  {/if}
+                </div>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="text-xs text-gray-400 dark:text-gray-500 shrink-0">Precise</span>
+                <input
+                  id="llm-temperature"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  bind:value={temperature}
+                  class="flex-1 h-2 rounded-full appearance-none cursor-pointer accent-[#443C68] bg-gray-200 dark:bg-gray-700"
+                />
+                <span class="text-xs text-gray-400 dark:text-gray-500 shrink-0">Creative</span>
+              </div>
+            </div>
+
+            <!-- Save row -->
+            <div class="flex items-center justify-between pt-1">
+              {#if saveState === 'success'}
+                <span class="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  Saved
+                </span>
+              {:else if saveState === 'error'}
+                <span class="flex items-center gap-1.5 text-xs text-red-600 dark:text-red-400">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                  {errorMessage}
+                </span>
               {:else}
-                Save
+                <span></span>
               {/if}
-            </button>
+
+              <button
+                type="button"
+                onclick={saveConfig}
+                disabled={saveState === 'saving'}
+                class="inline-flex items-center gap-2 px-5 py-2 rounded-xl text-xs font-semibold
+                  bg-[#443C68] text-white hover:bg-[#362f55] active:scale-95
+                  disabled:opacity-60 disabled:cursor-not-allowed
+                  transition-all shadow-sm"
+              >
+                {#if saveState === 'saving'}
+                  <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+                  </svg>
+                  Saving…
+                {:else}
+                  Save
+                {/if}
+              </button>
+            </div>
+
           </div>
         {/if}
       </div>

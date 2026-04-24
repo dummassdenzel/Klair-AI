@@ -1,6 +1,7 @@
+import bisect
 import logging
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from ..models import DocumentChunk
 
 logger = logging.getLogger(__name__)
@@ -8,6 +9,9 @@ logger = logging.getLogger(__name__)
 # Strips PDF layout markers added by the column-detection path in text_extractor.py.
 # These markers help build previews but are noise inside embedded chunks.
 _REGION_MARKER_RE = re.compile(r"\[Region: \w+\]\n?")
+
+# Matches page boundary markers emitted by the PDF extractor: "[Page N]"
+_PAGE_MARKER_RE = re.compile(r"\[Page (\d+)\]")
 
 # Conservative char-to-token ratio for English text.
 # Used as a fallback when no actual tokenizer is wired in.
@@ -80,9 +84,26 @@ class DocumentChunker:
     # Chunking
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _build_page_map(text: str) -> List[Tuple[int, int]]:
+        """Return sorted list of (start_pos, page_number) parsed from [Page N] markers."""
+        return [(m.start(), int(m.group(1))) for m in _PAGE_MARKER_RE.finditer(text)]
+
+    @staticmethod
+    def _lookup_page(pos: int, page_map: List[Tuple[int, int]]) -> Optional[int]:
+        """Return the page number that covers `pos`, or None if no markers exist."""
+        if not page_map:
+            return None
+        # Binary search: find the rightmost marker whose start_pos <= pos
+        keys = [entry[0] for entry in page_map]
+        idx = bisect.bisect_right(keys, pos) - 1
+        return page_map[idx][1] if idx >= 0 else None
+
     def create_chunks(self, text: str, file_path: str) -> List[DocumentChunk]:
         """Create overlapping token-sized chunks with semantic boundary detection."""
         text = _REGION_MARKER_RE.sub("", text)
+        # Build page map BEFORE any further stripping so positions are valid.
+        page_map = self._build_page_map(text)
         # Derive character-space window sizes from token targets.
         # Over-estimated slightly so _find_chunk_boundary has room to pull back.
         char_window = self.chunk_size * _CHARS_PER_TOKEN
@@ -105,6 +126,7 @@ class DocumentChunker:
                     file_path=file_path,
                     start_pos=0,
                     end_pos=len(chunk_text),
+                    page_number=self._lookup_page(0, page_map),
                 )]
 
         chunks: List[DocumentChunk] = []
@@ -132,6 +154,7 @@ class DocumentChunker:
                     file_path=file_path,
                     start_pos=start,
                     end_pos=start + len(chunk_text),
+                    page_number=self._lookup_page(start, page_map),
                 ))
                 chunk_id += 1
 

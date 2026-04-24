@@ -80,6 +80,12 @@ async def set_directory(request: Request):
             gemini_model=settings.GEMINI_MODEL,
             groq_api_key=settings.GROQ_API_KEY,
             groq_model=settings.GROQ_MODEL,
+            openai_api_key=settings.OPENAI_API_KEY,
+            openai_model=settings.OPENAI_MODEL,
+            anthropic_api_key=settings.ANTHROPIC_API_KEY,
+            anthropic_model=settings.ANTHROPIC_MODEL,
+            xai_api_key=settings.XAI_API_KEY,
+            xai_model=settings.XAI_MODEL,
             llm_provider=settings.LLM_PROVIDER,
             database_service=db_service,
             embedding_service=getattr(request.app.state, "embedding_service", None),
@@ -314,16 +320,19 @@ async def get_document_file(request: Request, document_id: int, state=Depends(re
         raise HTTPException(status_code=500, detail=f"Failed to serve document file: {str(e)}")
 
 
+_PREVIEW_SUPPORTED_TYPES = {"pptx", "docx"}
+
+
 @router.get("/documents/{document_id}/preview")
 async def get_document_preview(
     request: Request, document_id: int,
     format: str = "pdf", force_refresh: bool = False,
     state=Depends(require_app_state),
 ):
-    """Get a preview of a document (currently PPTX -> PDF)."""
-    pptx_converter = getattr(request.app.state, "pptx_converter", None)
-    if not pptx_converter or not pptx_converter.is_available():
-        raise HTTPException(status_code=503, detail="PPTX preview service not available.")
+    """Convert PPTX or DOCX to PDF for pixel-perfect preview."""
+    office_converter = getattr(request.app.state, "pptx_converter", None)
+    if not office_converter or not office_converter.is_available():
+        raise HTTPException(status_code=503, detail="Document preview service not available (LibreOffice not found).")
 
     try:
         document = await db_service.get_document_by_id(document_id)
@@ -338,7 +347,7 @@ async def get_document_preview(
 
         if path_obj.suffix.lower().lstrip(".") != file_type.lstrip("."):
             raise HTTPException(status_code=400, detail="File extension does not match document record.")
-        if file_type != "pptx":
+        if file_type not in _PREVIEW_SUPPORTED_TYPES:
             raise HTTPException(status_code=400, detail=f"Preview not supported for file type: {file_type}.")
         if format != "pdf":
             raise HTTPException(status_code=400, detail=f"Preview format '{format}' not supported.")
@@ -347,7 +356,7 @@ async def get_document_preview(
         timeout = settings.PPTX_CONVERSION_TIMEOUT
         try:
             pdf_path = await asyncio.wait_for(
-                pptx_converter.convert_pptx_to_pdf(document.file_path, use_cache=use_cache),
+                office_converter.convert_to_pdf(document.file_path, use_cache=use_cache),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -358,16 +367,16 @@ async def get_document_preview(
             headers={
                 "X-Document-Id": str(document_id), "X-Original-File": path_obj.name,
                 "X-Preview-Format": "pdf",
-                "X-Cache-Used": "true" if use_cache and pptx_converter.get_cached_pdf(document.file_path) else "false",
+                "X-Cache-Used": "true" if use_cache and office_converter.get_cached_pdf(document.file_path) else "false",
                 "Cache-Control": "no-store",
             },
         )
     except HTTPException:
         raise
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=f"PPTX file not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=f"File not found: {str(e)}")
     except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to convert PPTX to PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to convert to PDF: {str(e)}")
     except Exception as e:
         logger.error(f"Failed to generate preview for document {document_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate preview: {str(e)}")

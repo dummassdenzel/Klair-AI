@@ -12,6 +12,7 @@ class DocumentChunk:
     file_path: str
     start_pos: int
     end_pos: int
+    page_number: Optional[int] = None
 
 
 @dataclass 

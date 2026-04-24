@@ -95,6 +95,17 @@ async def _rewrite_query_for_session(session_id: int, raw_message: str) -> str:
 # Chat
 # ---------------------------------------------------------------------------
 
+@router.get("/chat/suggestions")
+async def get_chat_suggestions(state=Depends(require_app_state)):
+    """Return 4 context-aware suggested questions based on the indexed documents."""
+    try:
+        suggestions = await state.doc_processor.generate_suggestions()
+        return {"suggestions": suggestions}
+    except Exception as e:
+        logger.warning("Failed to generate suggestions: %s", e)
+        return {"suggestions": []}
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(chat_request: ChatRequest, request: Request, state=Depends(require_app_state)):
     """Query the document index with natural language."""
@@ -137,48 +148,94 @@ async def chat_stream(chat_request: ChatRequest, request: Request, state=Depends
         rewritten_message = await _rewrite_query_for_session(chat_session.id, chat_request.message)
 
         async def event_generator():
+            import asyncio as _asyncio
             sources = []
             final_message = ""
             response_time = 0.0
             query_type = "document_search"
-            retrieval_count = 0
-            rerank_count = 0
+            HEARTBEAT_INTERVAL = 15  # seconds between keepalive pings
+
+            # Save the user turn to DB immediately so that conversation history
+            # is consistent if a follow-up query arrives before the stream ends.
             try:
-                async for event_type, payload in state.doc_processor.query_stream(
-                    rewritten_message, conversation_history=conversation_history
-                ):
+                pending_msg = await db_service.add_chat_message(
+                    session_id=chat_session.id,
+                    user_message=chat_request.message,
+                    ai_response="",
+                    sources=[],
+                    response_time=0.0,
+                )
+                pending_msg_id: int | None = pending_msg.id
+            except Exception as e:
+                logger.error(f"Failed to pre-save chat message: {e}")
+                pending_msg_id = None
+
+            # Use a queue so the pipeline runs concurrently and we can emit
+            # SSE keepalive comments whenever it goes quiet for >15 s.
+            queue: _asyncio.Queue = _asyncio.Queue()
+
+            async def _run_pipeline():
+                try:
+                    async for event_type, payload in state.doc_processor.query_stream(
+                        rewritten_message, conversation_history=conversation_history
+                    ):
+                        await queue.put((event_type, payload))
+                except Exception as exc:
+                    await queue.put(("error", {"detail": str(exc)}))
+                finally:
+                    await queue.put(None)  # sentinel — stream finished
+
+            pipeline_task = _asyncio.create_task(_run_pipeline())
+            try:
+                while True:
+                    try:
+                        item = await _asyncio.wait_for(
+                            queue.get(), timeout=HEARTBEAT_INTERVAL
+                        )
+                    except _asyncio.TimeoutError:
+                        # Proxy keepalive: SSE comment lines are ignored by browsers
+                        # but prevent reverse-proxy idle timeouts (nginx, Apache).
+                        yield ": keepalive\n\n"
+                        continue
+
+                    if item is None:
+                        break  # pipeline finished
+
+                    event_type, payload = item
                     if event_type == "meta":
                         sources[:] = payload.get("sources", [])
                         query_type = payload.get("query_type", "document_search")
                         yield _format_sse("meta", {"sources": sources, "session_id": chat_session.id})
                     elif event_type == "edit_proposal":
                         yield _format_sse("edit_proposal", payload)
-                    elif event_type == "file_op_proposal":
-                        yield _format_sse("file_op_proposal", payload)
                     elif event_type == "token":
                         yield _format_sse("token", {"delta": payload})
                     elif event_type == "done":
                         final_message = payload.get("message", "")
                         response_time = payload.get("response_time", 0)
                         query_type = payload.get("query_type", query_type)
-                        retrieval_count = payload.get("retrieval_count", 0)
-                        rerank_count = payload.get("rerank_count", 0)
                         yield _format_sse("done", payload)
                     elif event_type == "error":
                         yield _format_sse("error", payload)
-                        return
+            finally:
+                pipeline_task.cancel()
+                try:
+                    await pipeline_task
+                except (_asyncio.CancelledError, Exception):
+                    pass
 
-                await db_service.add_chat_message(
-                    session_id=chat_session.id,
-                    user_message=chat_request.message,
-                    ai_response=final_message,
-                    sources=sources,
-                    response_time=response_time,
-                )
-                await db_service.link_sources_to_chat(sources, chat_session.id)
-            except Exception as e:
-                logger.error(f"Stream failed: {e}")
-                yield _format_sse("error", {"detail": str(e)})
+            # Update the pre-saved message with the final response.
+            if pending_msg_id is not None and final_message:
+                try:
+                    await db_service.update_chat_message(
+                        message_id=pending_msg_id,
+                        ai_response=final_message,
+                        sources=sources,
+                        response_time=response_time,
+                    )
+                    await db_service.link_sources_to_chat(sources, chat_session.id)
+                except Exception as e:
+                    logger.error(f"Failed to update chat message {pending_msg_id}: {e}")
 
         return StreamingResponse(
             event_generator(),

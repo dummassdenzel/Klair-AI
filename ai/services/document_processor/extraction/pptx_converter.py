@@ -129,68 +129,73 @@ class PPTXConverter:
         except OSError:
             return False
     
-    async def convert_pptx_to_pdf(
-        self, 
-        pptx_path: str, 
+    async def convert_to_pdf(
+        self,
+        file_path: str,
         output_path: Optional[str] = None,
-        use_cache: bool = True
+        use_cache: bool = True,
     ) -> str:
         """
-        Convert PPTX file to PDF.
-        
+        Convert any LibreOffice-supported file (PPTX, DOCX, etc.) to PDF.
+
         Args:
-            pptx_path: Path to PPTX file
-            output_path: Optional output path. If None, uses cache directory.
-            use_cache: Whether to use cached conversion if available
-            
+            file_path: Path to the source file
+            output_path: Optional explicit output path. If None, uses cache directory.
+            use_cache: Whether to return a cached conversion if still valid
+
         Returns:
-            Path to converted PDF file
-            
+            Path to the converted PDF file
+
         Raises:
-            FileNotFoundError: If PPTX file doesn't exist
-            RuntimeError: If conversion fails
+            FileNotFoundError: If the source file does not exist
+            RuntimeError: If LibreOffice is unavailable or conversion fails
         """
         if not self.libreoffice_path:
-            raise RuntimeError("LibreOffice not found. Please install LibreOffice to enable PPTX preview.")
-        
-        pptx_path_obj = Path(pptx_path)
-        if not pptx_path_obj.exists():
-            raise FileNotFoundError(f"PPTX file not found: {pptx_path}")
-        
-        # Check cache first
+            raise RuntimeError(
+                "LibreOffice not found. Please install LibreOffice to enable document preview."
+            )
+
+        src = Path(file_path)
+        if not src.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
         if use_cache:
-            cache_path = self._get_cache_path(pptx_path)
-            if self._is_cache_valid(pptx_path, cache_path):
-                logger.info(f"Using cached PDF for {pptx_path_obj.name}")
+            cache_path = self._get_cache_path(file_path)
+            if self._is_cache_valid(file_path, cache_path):
+                logger.info("Using cached PDF for %s", src.name)
                 return str(cache_path)
-        
-        # Determine output path
+
         if output_path is None:
-            output_path = str(self._get_cache_path(pptx_path))
-        
+            output_path = str(self._get_cache_path(file_path))
+
         output_path_obj = Path(output_path)
         output_dir = output_path_obj.parent
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Run conversion in thread pool (subprocess is blocking)
-        await asyncio.to_thread(self._convert_sync, pptx_path, str(output_dir))
-        
-        # LibreOffice outputs with same name but .pdf extension
-        # It uses the original filename, so we need to find it
-        expected_pdf = output_dir / f"{pptx_path_obj.stem}.pdf"
-        
+
+        await asyncio.to_thread(self._convert_sync, file_path, str(output_dir))
+
+        expected_pdf = output_dir / f"{src.stem}.pdf"
         if not expected_pdf.exists():
-            raise RuntimeError(f"PDF conversion failed: output file not found at {expected_pdf}")
-        
-        # Move/rename to final location if needed
+            raise RuntimeError(
+                f"PDF conversion failed: output file not found at {expected_pdf}"
+            )
+
         if expected_pdf != output_path_obj:
-            # If target exists, remove it first
             if output_path_obj.exists():
                 output_path_obj.unlink()
             shutil.move(str(expected_pdf), str(output_path_obj))
-        
-        logger.info(f"Successfully converted {pptx_path_obj.name} to PDF: {output_path_obj}")
+
+        logger.info("Converted %s → %s", src.name, output_path_obj)
         return str(output_path_obj)
+
+    async def convert_pptx_to_pdf(
+        self,
+        pptx_path: str,
+        output_path: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> str:
+        """Backward-compatible alias for convert_to_pdf."""
+        return await self.convert_to_pdf(pptx_path, output_path, use_cache)
     
     def _convert_sync(self, pptx_path: str, output_dir: str):
         """
@@ -314,18 +319,10 @@ class PPTXConverter:
                     except Exception:
                         pass
     
-    def get_cached_pdf(self, pptx_path: str) -> Optional[str]:
-        """
-        Get cached PDF if available and valid.
-        
-        Args:
-            pptx_path: Path to PPTX file
-            
-        Returns:
-            Path to cached PDF, or None if not available/invalid
-        """
-        cache_path = self._get_cache_path(pptx_path)
-        if self._is_cache_valid(pptx_path, cache_path):
+    def get_cached_pdf(self, file_path: str) -> Optional[str]:
+        """Return path to cached PDF if still valid, else None."""
+        cache_path = self._get_cache_path(file_path)
+        if self._is_cache_valid(file_path, cache_path):
             return str(cache_path)
         return None
     

@@ -438,13 +438,19 @@
   }
 
   let documentReloadKey = $state(0);
+  let viewerSearchText = $state('');
+  let viewerPageNumber = $state<number | null>(null);
 
   function handleDocumentClick(document: any) {
     selectedDocument = document;
+    viewerSearchText = '';
+    viewerPageNumber = null;
   }
 
   function handleCloseDocumentViewer() {
     selectedDocument = null;
+    viewerSearchText = '';
+    viewerPageNumber = null;
   }
 
   // "Change Directory" from chat page: show directory picker in main area
@@ -484,11 +490,25 @@
     };
     window.addEventListener('fileModified', handleFileModified);
 
+    // Source chip click from chat: open the document viewer at the relevant snippet.
+    const handleOpenDocumentViewer = (e: Event) => {
+      const { filePath, searchText: snippet, pageNumber } = (e as CustomEvent<{ filePath: string; searchText: string; pageNumber?: number | null }>).detail;
+      const doc = indexedDocuments.find((d: any) => d.file_path === filePath);
+      if (doc) {
+        selectedDocument = doc;
+        viewerSearchText = snippet ?? '';
+        viewerPageNumber = pageNumber ?? null;
+        documentReloadKey += 1;
+      }
+    };
+    window.addEventListener('openDocumentViewer', handleOpenDocumentViewer);
+
     return () => {
       window.removeEventListener('openDirectoryModalFromLayout', handleRequestChangeFolder);
       window.removeEventListener('editApplied', handleEditApplied);
       window.removeEventListener('fileDeleted', handleFileDeleted);
       window.removeEventListener('fileModified', handleFileModified);
+      window.removeEventListener('openDocumentViewer', handleOpenDocumentViewer);
     };
   });
 
@@ -556,7 +576,7 @@
         <div
           transition:slideWidth={{ duration: 240, easing: cubicOut }}
           class="flex flex-col bg-white dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800 overflow-hidden flex-shrink-0"
-          style="width: 480px; min-width: 320px; max-width: 50vw;"
+          style="width: 560px; min-width: 360px; max-width: 55vw;"
         >
           <!-- Panel header -->
           <div class="flex-shrink-0 bg-white dark:bg-gray-950 border-b border-gray-200 dark:border-gray-800 px-4 py-3 flex items-center gap-3">
@@ -589,7 +609,7 @@
           <!-- Panel content -->
           <div class="flex-1 overflow-hidden">
             {#key documentReloadKey}
-              <DocumentViewer document={selectedDocument as any} />
+              <DocumentViewer document={selectedDocument as any} searchText={viewerSearchText} pageNumber={viewerPageNumber} />
             {/key}
           </div>
         </div>

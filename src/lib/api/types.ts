@@ -16,6 +16,7 @@ export interface ChatRequest {
     content_snippet: string;
     chunks_found: number;
     file_type: string;
+    page_number?: number;
   }
   
   // Directory & Status Types
@@ -105,17 +106,6 @@ export interface ChatRequest {
     response_time: number;
     timestamp: string;
     edit_proposal?: EditProposal | null;
-    file_op_proposals?: FileOpProposal[];
-  }
-
-  export interface FileOpProposal {
-    id: string;
-    type: 'rename' | 'delete' | 'move';
-    file_path: string;
-    document_name: string;
-    new_name?: string;
-    destination_folder?: string;
-    destination_path?: string;
   }
 
   // File operations
@@ -126,7 +116,7 @@ export interface ChatRequest {
   }
 
   // LLM Configuration
-  export type LLMProvider = 'ollama' | 'gemini' | 'groq';
+  export type LLMProvider = 'ollama' | 'gemini' | 'groq' | 'openai' | 'anthropic' | 'xai';
 
   export interface LLMConfig {
     provider: LLMProvider;
@@ -137,6 +127,12 @@ export interface ChatRequest {
     gemini_api_key_set: boolean;
     groq_model: string;
     groq_api_key_set: boolean;
+    openai_model: string;
+    openai_api_key_set: boolean;
+    anthropic_model: string;
+    anthropic_api_key_set: boolean;
+    xai_model: string;
+    xai_api_key_set: boolean;
   }
 
   export interface LLMConfigUpdate {
@@ -148,4 +144,10 @@ export interface ChatRequest {
     gemini_api_key?: string;
     groq_model?: string;
     groq_api_key?: string;
+    openai_model?: string;
+    openai_api_key?: string;
+    anthropic_model?: string;
+    anthropic_api_key?: string;
+    xai_model?: string;
+    xai_api_key?: string;
   }

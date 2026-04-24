@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx vite *)",
+      "Bash(python -m py_compile services/document_processor/edit_service.py routers/edit.py services/document_processor/orchestrator.py)"
+    ]
+  }
+}

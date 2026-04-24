@@ -63,6 +63,12 @@ class DocumentProcessorOrchestrator:
                  gemini_model: str = "gemini-2.5-pro",
                  groq_api_key: Optional[str] = None,
                  groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
+        openai_api_key: Optional[str] = None,
+        openai_model: str = "gpt-4o-mini",
+        anthropic_api_key: Optional[str] = None,
+        anthropic_model: str = "claude-sonnet-4-6",
+        xai_api_key: Optional[str] = None,
+        xai_model: str = "grok-3-mini",
         llm_provider: str = "ollama",
         database_service: Optional["DatabaseService"] = None,
         embedding_service: Optional["EmbeddingService"] = None,
@@ -99,6 +105,12 @@ class DocumentProcessorOrchestrator:
             gemini_model=gemini_model,
             groq_api_key=groq_api_key,
             groq_model=groq_model,
+            openai_api_key=openai_api_key,
+            openai_model=openai_model,
+            anthropic_api_key=anthropic_api_key,
+            anthropic_model=anthropic_model,
+            xai_api_key=xai_api_key,
+            xai_model=xai_model,
             provider=llm_provider,
         )
         self.file_validator = FileValidator(max_file_size_mb, ocr_service=ocr_service)
@@ -155,7 +167,6 @@ class DocumentProcessorOrchestrator:
             router=_router,
             retrieval_service=self.retrieval,
             edit_service=self.edit_service,
-            file_ops=self,
         )
 
         logger.info(
@@ -210,6 +221,7 @@ class DocumentProcessorOrchestrator:
     ) -> None:
         await self.indexing.initialize_from_directory(directory_path, resume_mode)
         self.edit_service.current_directory = directory_path
+        self.pipeline.invalidate_suggestions_cache(directory_path)
 
     async def add_document(
         self, file_path: str, force_reindex: bool = False, use_queue: bool = True
@@ -246,6 +258,9 @@ class DocumentProcessorOrchestrator:
         session_id: Optional[int] = None,
     ) -> List[Dict[str, str]]:
         return await self.pipeline.build_conversation_history(message_pairs, session_id)
+
+    async def generate_suggestions(self) -> List[str]:
+        return await self.pipeline.generate_suggestions(self.current_directory or "")
 
     # ── Data management ───────────────────────────────────────────────────────
 
@@ -337,6 +352,18 @@ class DocumentProcessorOrchestrator:
     def get_edit_proposal(self, proposal_id: str):
         """Look up a pending edit proposal by ID."""
         return self.edit_service.get_proposal(proposal_id)
+
+    def save_excel_cells(self, file_path: str, changes: list) -> Dict:
+        """Apply cell-level edits to an XLSX file with backup. Returns result dict."""
+        result = self.edit_service.save_cells(file_path, changes)
+        result["file_path"] = file_path
+        return result
+
+    def save_document_content(self, file_path: str, content: str, fmt: str) -> Dict:
+        """Write full TipTap editor content to disk with backup. Returns result dict."""
+        result = self.edit_service.save_content(file_path, content, fmt)
+        result["file_path"] = file_path
+        return result
 
     def apply_edit_proposal(self, proposal_id: str) -> Dict:
         """Validate and apply a confirmed edit proposal. Returns result dict."""

@@ -435,20 +435,23 @@ class RetrievalService:
             primary_chunks = file_chunks.get(primary_file_path, [])
             if primary_chunks:
                 avg_score = sum(c["score"] for c in primary_chunks) / len(primary_chunks)
-                sample_meta = primary_chunks[0]["metadata"]
+                best_chunk = max(primary_chunks, key=lambda c: c["score"])
+                sample_meta = best_chunk["metadata"]
                 snippet_source = full_text if full_text else "\n".join(
                     c["text"] for c in primary_chunks
                 )
                 snippet = snippet_source[:300] + "..." if len(snippet_source) > 300 else snippet_source
-                sources.append(
-                    {
-                        "file_path": primary_file_path,
-                        "relevance_score": round(avg_score, 3),
-                        "content_snippet": snippet,
-                        "chunks_found": full_chunk_count or len(primary_chunks),
-                        "file_type": sample_meta.get("file_type", "unknown"),
-                    }
-                )
+                source_entry: Dict[str, Any] = {
+                    "file_path": primary_file_path,
+                    "relevance_score": round(avg_score, 3),
+                    "content_snippet": snippet,
+                    "chunks_found": full_chunk_count or len(primary_chunks),
+                    "file_type": sample_meta.get("file_type", "unknown"),
+                }
+                page_num = sample_meta.get("page_number")
+                if page_num is not None:
+                    source_entry["page_number"] = page_num
+                sources.append(source_entry)
             else:
                 snippet = full_text[:300] + "..." if len(full_text) > 300 else full_text
                 sources.append(
@@ -479,15 +482,18 @@ class RetrievalService:
                 context_parts.append(f"[Document: {filename}]\n{file_text}")
                 avg_score = sum(c["score"] for c in chunks) / len(chunks)
                 snippet = file_text[:300] + "..." if len(file_text) > 300 else file_text
-                sources.append(
-                    {
-                        "file_path": fp,
-                        "relevance_score": round(avg_score, 3),
-                        "content_snippet": snippet,
-                        "chunks_found": len(chunks),
-                        "file_type": chunks[0]["metadata"].get("file_type", "unknown"),
-                    }
-                )
+                best_meta = max(chunks, key=lambda c: c["score"])["metadata"]
+                source_entry = {
+                    "file_path": fp,
+                    "relevance_score": round(avg_score, 3),
+                    "content_snippet": snippet,
+                    "chunks_found": len(chunks),
+                    "file_type": best_meta.get("file_type", "unknown"),
+                }
+                page_num = best_meta.get("page_number")
+                if page_num is not None:
+                    source_entry["page_number"] = page_num
+                sources.append(source_entry)
 
             sources.sort(key=lambda x: x["relevance_score"], reverse=True)
             source_limit = self.retrieval_config.get_source_limit(

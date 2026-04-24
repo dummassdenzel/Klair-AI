@@ -14,6 +14,7 @@ import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -295,9 +296,10 @@ class EditService:
         content = Path(file_path).read_text(encoding="utf-8", errors="replace")
         applied = 0
         for change in changes:
-            if change.find in content:
-                content = content.replace(change.find, change.replace, 1)
-                applied += 1
+            count = content.count(change.find)
+            if count:
+                content = content.replace(change.find, change.replace)
+                applied += count
             else:
                 logger.warning(
                     "_apply_txt: find text no longer present, skipping: %r", change.find[:60]
@@ -309,36 +311,29 @@ class EditService:
         """
         Apply changes to a DOCX file.
 
-        Strategy: for each paragraph (and table cell) concatenate all run texts,
-        apply the replacement, then write the result back to the first run and
-        blank the remaining runs.  This preserves paragraph-level formatting but
-        collapses per-run formatting (bold/italic) inside changed paragraphs —
-        an acceptable tradeoff for Phase 1.
+        For each paragraph (and table cell) concatenate all run texts, apply ALL
+        replacements, then write the result back to the first run and blank the
+        remaining runs.  Preserves paragraph-level formatting; collapses per-run
+        formatting inside changed paragraphs — acceptable for Phase 1.
         """
         from docx import Document
 
         doc = Document(file_path)
-        remaining = list(changes)
         applied = 0
 
         def _try_replace_in_para(para: Any) -> None:
             nonlocal applied
-            if not remaining:
-                return
             para_text = para.text
-            for change in list(remaining):
-                if change.find not in para_text:
-                    continue
-                new_text = para_text.replace(change.find, change.replace, 1)
-                if new_text == para_text:
-                    continue
-                if para.runs:
-                    para.runs[0].text = new_text
-                    for run in para.runs[1:]:
-                        run.text = ""
-                applied += 1
-                remaining.remove(change)
-                para_text = new_text
+            new_text = para_text
+            for change in changes:
+                count = new_text.count(change.find)
+                if count:
+                    new_text = new_text.replace(change.find, change.replace)
+                    applied += count
+            if new_text != para_text and para.runs:
+                para.runs[0].text = new_text
+                for run in para.runs[1:]:
+                    run.text = ""
 
         for para in doc.paragraphs:
             _try_replace_in_para(para)
@@ -351,3 +346,284 @@ class EditService:
 
         doc.save(file_path)
         return applied
+
+    # ------------------------------------------------------------------
+    # Direct save (TipTap editor content → disk)
+    # ------------------------------------------------------------------
+
+    def save_content(self, file_path: str, content: str, fmt: str) -> Dict[str, Any]:
+        """
+        Write full document content coming from the TipTap editor.
+
+        fmt must be "txt" or "docx".
+        Backs up the original file before overwriting.
+        Returns dict with backup_path.
+        Raises ValueError on validation / IO errors.
+        """
+        current_dir = self.current_directory
+        if not current_dir:
+            raise ValueError("No directory is currently loaded")
+
+        try:
+            abs_file = os.path.abspath(file_path)
+            abs_dir = os.path.abspath(current_dir)
+            if not abs_file.startswith(abs_dir + os.sep) and abs_file != abs_dir:
+                raise ValueError("File is outside the indexed directory")
+        except Exception as exc:
+            raise ValueError(f"Path validation failed: {exc}")
+
+        path = Path(file_path)
+        if not path.exists() or not path.is_file():
+            raise ValueError(f"File no longer exists: {file_path}")
+
+        suffix = path.suffix.lower()
+        if suffix not in SUPPORTED_EDIT_EXTENSIONS:
+            raise ValueError(f"Unsupported file type for editing: {suffix}")
+
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_path = path.with_suffix(f".{ts}.bak{suffix}")
+        shutil.copy2(str(path), str(backup_path))
+        logger.info("Backup created: %s", backup_path)
+
+        if fmt != "txt":
+            raise ValueError("Only .txt files support direct content save. Use AI proposals to edit DOCX.")
+
+    # ------------------------------------------------------------------
+    # Cell-level save (Excel)
+    # ------------------------------------------------------------------
+
+    def save_cells(self, file_path: str, changes: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Apply cell-level edits to an XLSX file.
+
+        changes: list of {sheet: str, cell: str (e.g. "B5"), value: str}
+        Only .xlsx is supported — .xls is read-only via xlrd.
+        Backs up the file before writing.
+        """
+        current_dir = self.current_directory
+        if not current_dir:
+            raise ValueError("No directory is currently loaded")
+
+        try:
+            abs_file = os.path.abspath(file_path)
+            abs_dir = os.path.abspath(current_dir)
+            if not abs_file.startswith(abs_dir + os.sep) and abs_file != abs_dir:
+                raise ValueError("File is outside the indexed directory")
+        except Exception as exc:
+            raise ValueError(f"Path validation failed: {exc}")
+
+        path = Path(file_path)
+        if not path.exists() or not path.is_file():
+            raise ValueError(f"File no longer exists: {file_path}")
+
+        if path.suffix.lower() != ".xlsx":
+            raise ValueError(
+                "Cell editing is only supported for .xlsx files. "
+                ".xls files are read-only — convert to .xlsx to edit."
+            )
+
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_path = path.with_suffix(f".{ts}.bak.xlsx")
+        shutil.copy2(str(path), str(backup_path))
+        logger.info("Backup created: %s", backup_path)
+
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(str(path))
+            applied = 0
+            for change in changes:
+                sheet_name = change.get("sheet", "")
+                cell_address = change.get("cell", "")
+                raw_value = change.get("value", "")
+                if not sheet_name or not cell_address:
+                    continue
+                if sheet_name not in wb.sheetnames:
+                    logger.warning("save_cells: sheet %r not found, skipping", sheet_name)
+                    continue
+                wb[sheet_name][cell_address] = self._coerce_cell_value(raw_value)
+                applied += 1
+            wb.save(str(path))
+            wb.close()
+        except Exception as exc:
+            shutil.copy2(str(backup_path), str(path))
+            logger.error("save_cells failed, restored from backup: %s", exc)
+            raise ValueError(f"Cell save failed — file restored: {exc}")
+
+        return {"applied_changes": applied, "backup_path": str(backup_path)}
+
+    @staticmethod
+    def _coerce_cell_value(raw: str):
+        """Parse as int or float when possible, else return as string."""
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            pass
+        try:
+            return float(stripped)
+        except ValueError:
+            pass
+        return stripped
+
+        try:
+            path.write_text(content, encoding="utf-8")
+        except Exception as exc:
+            shutil.copy2(str(backup_path), str(path))
+            logger.error("save_content failed, restored from backup: %s", exc)
+            raise ValueError(f"Save failed — file restored: {exc}")
+
+        return {"backup_path": str(backup_path)}
+
+    def _save_html_as_docx(self, file_path: str, html: str) -> None:
+        """Convert TipTap HTML to a DOCX file using python-docx."""
+        from docx import Document
+        from docx.shared import Pt
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        doc = Document()
+
+        # Remove default empty paragraph Word adds
+        for p in doc.paragraphs:
+            p._element.getparent().remove(p._element)
+
+        parser = _TipTapHTMLParser(doc)
+        parser.feed(html)
+        doc.save(file_path)
+
+
+class _TipTapHTMLParser(HTMLParser):
+    """
+    Minimal HTML → python-docx converter for TipTap StarterKit output.
+    Handles: p, h1-h6, ul/ol/li, strong, em, u, s, br, blockquote, pre/code.
+    """
+
+    _HEADING_LEVELS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
+
+    def __init__(self, doc: Any) -> None:
+        super().__init__()
+        self._doc = doc
+        self._para: Any = None          # current paragraph
+        self._run_stack: List[Dict] = []  # formatting context stack
+        self._list_stack: List[str] = []  # "ul" | "ol"
+        self._list_counters: List[int] = []
+        self._in_pre = False
+
+    # ------------------------------------------------------------------ helpers
+
+    def _current_fmt(self) -> Dict:
+        fmt: Dict = {}
+        for layer in self._run_stack:
+            fmt.update(layer)
+        return fmt
+
+    def _new_para(self, style: str = "Normal") -> Any:
+        from docx.oxml.ns import qn
+        p = self._doc.add_paragraph(style=style)
+        self._para = p
+        return p
+
+    def _add_run(self, text: str) -> None:
+        if self._para is None:
+            self._new_para()
+        fmt = self._current_fmt()
+        run = self._para.add_run(text)
+        run.bold = fmt.get("bold", False)
+        run.italic = fmt.get("italic", False)
+        run.underline = fmt.get("underline", False)
+        if fmt.get("strike"):
+            from docx.oxml.ns import qn
+            from docx.oxml import OxmlElement
+            rPr = run._r.get_or_add_rPr()
+            strike = OxmlElement("w:strike")
+            rPr.append(strike)
+
+    # ------------------------------------------------------------------ tags
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        tag = tag.lower()
+
+        if tag in self._HEADING_LEVELS:
+            level = self._HEADING_LEVELS[tag]
+            self._new_para(style=f"Heading {level}")
+
+        elif tag == "p":
+            if self._list_stack:
+                # Inside a list item — paragraph already created by <li>
+                pass
+            else:
+                self._new_para()
+
+        elif tag == "li":
+            list_type = self._list_stack[-1] if self._list_stack else "ul"
+            if list_type == "ol":
+                self._list_counters[-1] += 1
+                self._new_para(style="List Number")
+            else:
+                self._new_para(style="List Bullet")
+
+        elif tag == "ul":
+            self._list_stack.append("ul")
+            self._list_counters.append(0)
+
+        elif tag == "ol":
+            self._list_stack.append("ol")
+            self._list_counters.append(0)
+
+        elif tag == "blockquote":
+            self._new_para(style="Quote")
+
+        elif tag in ("pre", "code"):
+            self._in_pre = True
+            if tag == "pre":
+                self._new_para(style="Normal")
+
+        elif tag == "br":
+            if self._para is not None:
+                self._para.add_run().add_break()
+
+        elif tag == "strong" or tag == "b":
+            self._run_stack.append({"bold": True})
+
+        elif tag == "em" or tag == "i":
+            self._run_stack.append({"italic": True})
+
+        elif tag == "u":
+            self._run_stack.append({"underline": True})
+
+        elif tag in ("s", "del", "strike"):
+            self._run_stack.append({"strike": True})
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+
+        if tag in self._HEADING_LEVELS or tag == "p":
+            self._para = None
+
+        elif tag == "li":
+            self._para = None
+
+        elif tag in ("ul", "ol"):
+            if self._list_stack:
+                self._list_stack.pop()
+                self._list_counters.pop()
+
+        elif tag in ("pre", "code"):
+            self._in_pre = False
+            if tag == "pre":
+                self._para = None
+
+        elif tag in ("strong", "b", "em", "i", "u", "s", "del", "strike"):
+            if self._run_stack:
+                self._run_stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        if not data:
+            return
+        if self._para is None and not self._list_stack:
+            self._new_para()
+        if self._para is not None:
+            self._add_run(data)
+
+

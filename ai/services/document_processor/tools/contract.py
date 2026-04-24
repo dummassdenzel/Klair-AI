@@ -20,9 +20,6 @@ TOOL_SEARCH_DOCUMENTS = "search_documents"
 TOOL_SEARCH_SPECIFIC_DOCUMENT = "search_specific_document"
 TOOL_SUMMARIZE_CORPUS = "summarize_corpus"
 TOOL_PROPOSE_DOCUMENT_EDIT = "propose_document_edit"
-TOOL_RENAME_FILE = "rename_file"
-TOOL_DELETE_FILE = "delete_file"
-TOOL_MOVE_FILE = "move_file"
 
 VALID_TOOL_NAMES = frozenset({
     TOOL_LIST_DOCUMENTS,
@@ -30,9 +27,6 @@ VALID_TOOL_NAMES = frozenset({
     TOOL_SEARCH_SPECIFIC_DOCUMENT,
     TOOL_SUMMARIZE_CORPUS,
     TOOL_PROPOSE_DOCUMENT_EDIT,
-    TOOL_RENAME_FILE,
-    TOOL_DELETE_FILE,
-    TOOL_MOVE_FILE,
 })
 
 # ---------------------------------------------------------------------------
@@ -128,55 +122,6 @@ TOOL_DEFINITIONS = [
         "returns": "SummarizeCorpusResult",
     },
     {
-        "name": TOOL_RENAME_FILE,
-        "description": "Rename a file in the indexed folder.",
-        "when_to_use": "Use when the user asks to rename a file. Requires the current filename and the desired new filename.",
-        "parameters": {
-            "document_name": {
-                "type": "string",
-                "description": "Current filename (e.g. 'old_name.docx').",
-                "required": True,
-            },
-            "new_name": {
-                "type": "string",
-                "description": "New filename including extension (e.g. 'new_name.docx'). Must not contain path separators.",
-                "required": True,
-            },
-        },
-        "returns": "FileOpResult",
-    },
-    {
-        "name": TOOL_DELETE_FILE,
-        "description": "Permanently delete a file from the indexed folder. This cannot be undone.",
-        "when_to_use": "Use ONLY when the user explicitly confirms they want to permanently delete a file. Always confirm with the user before calling this tool.",
-        "parameters": {
-            "document_name": {
-                "type": "string",
-                "description": "Filename to delete (e.g. 'old_report.pdf').",
-                "required": True,
-            },
-        },
-        "returns": "FileOpResult",
-    },
-    {
-        "name": TOOL_MOVE_FILE,
-        "description": "Move a file to a different folder within the indexed directory.",
-        "when_to_use": "Use when the user asks to move a file to another folder. Use list_documents first to identify the exact destination folder path.",
-        "parameters": {
-            "document_name": {
-                "type": "string",
-                "description": "Filename to move (e.g. 'report.pdf').",
-                "required": True,
-            },
-            "destination_folder": {
-                "type": "string",
-                "description": "Name or partial path of the destination folder (e.g. 'Reports' or 'Archive/2025'). Use list_documents to find exact folder names.",
-                "required": True,
-            },
-        },
-        "returns": "FileOpResult",
-    },
-    {
         "name": TOOL_PROPOSE_DOCUMENT_EDIT,
         "description": (
             "Propose an edit to a .txt or .docx file. Reads the file, generates a structured "
@@ -217,7 +162,7 @@ TOOL_CALL_ITEM_SCHEMA = {
         "tool": {
             "type": "string",
             "enum": list(VALID_TOOL_NAMES),
-            "description": "One of: list_documents, search_documents, search_specific_document, summarize_corpus, propose_document_edit, rename_file, delete_file, move_file",
+            "description": "One of: list_documents, search_documents, search_specific_document, summarize_corpus, propose_document_edit",
         },
         "query": {
             "type": "string",
@@ -225,15 +170,7 @@ TOOL_CALL_ITEM_SCHEMA = {
         },
         "document_name": {
             "type": "string",
-            "description": "Required for search_specific_document, propose_document_edit, rename_file, delete_file, move_file.",
-        },
-        "new_name": {
-            "type": "string",
-            "description": "Required when tool is rename_file. The new filename including extension.",
-        },
-        "destination_folder": {
-            "type": "string",
-            "description": "Required when tool is move_file. Name or partial path of the destination folder.",
+            "description": "Required for search_specific_document and propose_document_edit.",
         },
     },
     "required": ["tool"],

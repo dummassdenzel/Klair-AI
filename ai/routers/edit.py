@@ -1,7 +1,8 @@
-"""Edit endpoints — apply or discard an AI-proposed document edit."""
+"""Edit endpoints — apply or discard an AI-proposed document edit, or save direct TipTap content."""
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from typing import Any, Dict, List, Literal
 import logging
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,23 @@ class ApplyRequest(BaseModel):
 
 class DiscardRequest(BaseModel):
     proposal_id: str
+
+
+class SaveContentRequest(BaseModel):
+    file_path: str
+    content: str
+    fmt: Literal["txt"]  # DOCX edits must go through AI proposals (find/replace preserves formatting)
+
+
+class CellChange(BaseModel):
+    sheet: str
+    cell: str   # Excel address, e.g. "B5"
+    value: str
+
+
+class SaveCellsRequest(BaseModel):
+    file_path: str
+    changes: List[CellChange]
 
 
 @router.post("/apply")
@@ -62,6 +80,80 @@ async def apply_edit(body: ApplyRequest, request: Request):
         "status": "success",
         "message": f"Edit applied ({result.get('applied_changes', 0)} change(s)). "
                    f"Backup saved at: {result.get('backup_path', 'unknown')}",
+        "applied_changes": result.get("applied_changes", 0),
+        "backup_path": result.get("backup_path"),
+    }
+
+
+@router.post("/save-content")
+async def save_content(body: SaveContentRequest, request: Request):
+    """
+    Persist full document content from the TipTap editor.
+    Backs up the original file before writing.
+    Triggers re-index so the vector store stays current.
+    """
+    doc_processor = getattr(request.app.state, "doc_processor", None)
+    if doc_processor is None:
+        raise HTTPException(status_code=503, detail="Document processor not ready")
+
+    try:
+        result = doc_processor.save_document_content(
+            body.file_path, body.content, body.fmt
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("save_content failed for %s: %s", body.file_path, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to save document: {exc}")
+
+    file_path = result.get("file_path")
+    if file_path:
+        try:
+            await doc_processor.enqueue_update(file_path, update_type="modified", user_requested=True)
+        except Exception as exc:
+            logger.warning("Re-index trigger failed (non-fatal): %s", exc)
+
+    return {
+        "status": "success",
+        "message": "Document saved successfully.",
+        "backup_path": result.get("backup_path"),
+    }
+
+
+@router.post("/save-cells")
+async def save_cells(body: SaveCellsRequest, request: Request):
+    """
+    Apply cell-level edits to an XLSX file.
+    Each change specifies a sheet name, cell address, and new value.
+    Backs up the file and triggers re-index.
+    """
+    doc_processor = getattr(request.app.state, "doc_processor", None)
+    if doc_processor is None:
+        raise HTTPException(status_code=503, detail="Document processor not ready")
+
+    if not body.changes:
+        raise HTTPException(status_code=400, detail="No cell changes provided")
+
+    changes = [{"sheet": c.sheet, "cell": c.cell, "value": c.value} for c in body.changes]
+
+    try:
+        result = doc_processor.save_excel_cells(body.file_path, changes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("save_cells failed for %s: %s", body.file_path, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to save cells: {exc}")
+
+    file_path = result.get("file_path")
+    if file_path:
+        try:
+            await doc_processor.enqueue_update(file_path, update_type="modified", user_requested=True)
+        except Exception as exc:
+            logger.warning("Re-index trigger failed (non-fatal): %s", exc)
+
+    return {
+        "status": "success",
+        "message": f"{result.get('applied_changes', 0)} cell(s) saved.",
         "applied_changes": result.get("applied_changes", 0),
         "backup_path": result.get("backup_path"),
     }

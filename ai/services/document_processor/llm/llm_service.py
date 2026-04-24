@@ -40,6 +40,12 @@ class LLMService:
         gemini_model: str = "gemini-2.5-pro",
         groq_api_key: Optional[str] = None,
         groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
+        openai_api_key: Optional[str] = None,
+        openai_model: str = "gpt-4o-mini",
+        anthropic_api_key: Optional[str] = None,
+        anthropic_model: str = "claude-sonnet-4-6",
+        xai_api_key: Optional[str] = None,
+        xai_model: str = "grok-3-mini",
         provider: str = "ollama",
         adapter: Optional[LLMProviderAdapter] = None,
     ):
@@ -49,6 +55,12 @@ class LLMService:
         self.gemini_model = gemini_model
         self.groq_api_key = groq_api_key or ""
         self.groq_model = groq_model
+        self.openai_api_key = openai_api_key or ""
+        self.openai_model = openai_model
+        self.anthropic_api_key = anthropic_api_key or ""
+        self.anthropic_model = anthropic_model
+        self.xai_api_key = xai_api_key or ""
+        self.xai_model = xai_model
         self.provider = provider.lower().strip()
         self._adapter: LLMProviderAdapter = adapter or create_adapter_for_provider(self.provider, settings)
         self._token_usage: Dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
@@ -92,6 +104,12 @@ class LLMService:
             return f"groq/{self.groq_model}"
         if self.provider == "gemini":
             return f"gemini/{self.gemini_model}"
+        if self.provider == "openai":
+            return f"openai/{self.openai_model}"
+        if self.provider == "anthropic":
+            return f"anthropic/{self.anthropic_model}"
+        if self.provider == "xai":
+            return f"xai/{self.xai_model}"
         return f"ollama_chat/{self.model}"
 
     def _api_key(self) -> Optional[str]:
@@ -99,6 +117,12 @@ class LLMService:
             return self.groq_api_key or None
         if self.provider == "gemini":
             return self.gemini_api_key or None
+        if self.provider == "openai":
+            return self.openai_api_key or None
+        if self.provider == "anthropic":
+            return self.anthropic_api_key or None
+        if self.provider == "xai":
+            return self.xai_api_key or None
         return None
 
     def _extra_kwargs(self) -> Dict[str, Any]:
@@ -144,8 +168,9 @@ class LLMService:
         base_url: Optional[str] = None,
     ) -> None:
         provider = provider.lower().strip()
-        if provider not in ("ollama", "gemini", "groq"):
-            raise ValueError(f"Unknown provider: {provider!r}. Must be ollama, gemini, or groq.")
+        _VALID = {"ollama", "gemini", "groq", "openai", "anthropic", "xai"}
+        if provider not in _VALID:
+            raise ValueError(f"Unknown provider: {provider!r}. Must be one of {sorted(_VALID)}.")
         if provider == "ollama":
             if model:
                 self.model = model
@@ -161,6 +186,21 @@ class LLMService:
                 self.groq_model = model
             if api_key:
                 self.groq_api_key = api_key
+        elif provider == "openai":
+            if model:
+                self.openai_model = model
+            if api_key:
+                self.openai_api_key = api_key
+        elif provider == "anthropic":
+            if model:
+                self.anthropic_model = model
+            if api_key:
+                self.anthropic_api_key = api_key
+        elif provider == "xai":
+            if model:
+                self.xai_model = model
+            if api_key:
+                self.xai_api_key = api_key
         self.provider = provider
         self._adapter = create_adapter_for_provider(self.provider, settings)
         logger.info("LLM provider switched to: %s", self.provider)

@@ -21,6 +21,12 @@ class LLMConfigUpdate(BaseModel):
     gemini_api_key: Optional[str] = None
     groq_model: Optional[str] = None
     groq_api_key: Optional[str] = None
+    openai_model: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    anthropic_model: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
+    xai_model: Optional[str] = None
+    xai_api_key: Optional[str] = None
 
 
 @router.get("/status")
@@ -125,6 +131,12 @@ async def get_llm_config():
         "gemini_api_key_set": bool(settings.GEMINI_API_KEY),
         "groq_model": settings.GROQ_MODEL,
         "groq_api_key_set": bool(settings.GROQ_API_KEY),
+        "openai_model": settings.OPENAI_MODEL,
+        "openai_api_key_set": bool(settings.OPENAI_API_KEY),
+        "anthropic_model": settings.ANTHROPIC_MODEL,
+        "anthropic_api_key_set": bool(settings.ANTHROPIC_API_KEY),
+        "xai_model": settings.XAI_MODEL,
+        "xai_api_key_set": bool(settings.XAI_API_KEY),
     }
 
 
@@ -132,8 +144,9 @@ async def get_llm_config():
 async def update_llm_config(body: LLMConfigUpdate, request: Request):
     """Switch the active LLM provider and update model / API key at runtime."""
     provider = body.provider.lower().strip()
-    if provider not in ("ollama", "gemini", "groq"):
-        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider!r}. Must be ollama, gemini, or groq.")
+    _VALID_PROVIDERS = ("ollama", "gemini", "groq", "openai", "anthropic", "xai")
+    if provider not in _VALID_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider!r}. Must be one of: {', '.join(_VALID_PROVIDERS)}.")
 
     # Build kwargs for Settings.update()
     setting_updates: dict = {"llm_provider": provider}
@@ -156,6 +169,21 @@ async def update_llm_config(body: LLMConfigUpdate, request: Request):
             setting_updates["groq_model"] = body.groq_model
         if body.groq_api_key:
             setting_updates["groq_api_key"] = body.groq_api_key
+    elif provider == "openai":
+        if body.openai_model:
+            setting_updates["openai_model"] = body.openai_model
+        if body.openai_api_key:
+            setting_updates["openai_api_key"] = body.openai_api_key
+    elif provider == "anthropic":
+        if body.anthropic_model:
+            setting_updates["anthropic_model"] = body.anthropic_model
+        if body.anthropic_api_key:
+            setting_updates["anthropic_api_key"] = body.anthropic_api_key
+    elif provider == "xai":
+        if body.xai_model:
+            setting_updates["xai_model"] = body.xai_model
+        if body.xai_api_key:
+            setting_updates["xai_api_key"] = body.xai_api_key
 
     settings.update(**setting_updates)
 
@@ -177,6 +205,18 @@ async def update_llm_config(body: LLMConfigUpdate, request: Request):
                     switch_kwargs["model"] = settings.GROQ_MODEL
                     if settings.GROQ_API_KEY:
                         switch_kwargs["api_key"] = settings.GROQ_API_KEY
+                elif provider == "openai":
+                    switch_kwargs["model"] = settings.OPENAI_MODEL
+                    if settings.OPENAI_API_KEY:
+                        switch_kwargs["api_key"] = settings.OPENAI_API_KEY
+                elif provider == "anthropic":
+                    switch_kwargs["model"] = settings.ANTHROPIC_MODEL
+                    if settings.ANTHROPIC_API_KEY:
+                        switch_kwargs["api_key"] = settings.ANTHROPIC_API_KEY
+                elif provider == "xai":
+                    switch_kwargs["model"] = settings.XAI_MODEL
+                    if settings.XAI_API_KEY:
+                        switch_kwargs["api_key"] = settings.XAI_API_KEY
                 llm_svc.switch_provider(provider, **switch_kwargs)
         except Exception as e:
             logger.warning("Could not switch live LLMService provider: %s", e)
@@ -192,4 +232,10 @@ async def update_llm_config(body: LLMConfigUpdate, request: Request):
         "gemini_api_key_set": bool(settings.GEMINI_API_KEY),
         "groq_model": settings.GROQ_MODEL,
         "groq_api_key_set": bool(settings.GROQ_API_KEY),
+        "openai_model": settings.OPENAI_MODEL,
+        "openai_api_key_set": bool(settings.OPENAI_API_KEY),
+        "anthropic_model": settings.ANTHROPIC_MODEL,
+        "anthropic_api_key_set": bool(settings.ANTHROPIC_API_KEY),
+        "xai_model": settings.XAI_MODEL,
+        "xai_api_key_set": bool(settings.XAI_API_KEY),
     }

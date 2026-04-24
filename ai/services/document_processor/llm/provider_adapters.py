@@ -145,6 +145,75 @@ class GeminiAdapter(LLMProviderAdapter):
         return True
 
 
+class OpenAIAdapter(LLMProviderAdapter):
+    """OpenAI (ChatGPT): large context, native tool calling."""
+
+    def get_max_context_chars(self) -> int:
+        return 400_000  # ~100k tokens
+
+    def get_max_simple_prompt_chars(self) -> int:
+        return 100_000
+
+    def get_max_listing_context_chars(self) -> int:
+        return 50_000
+
+    def get_max_output_tokens(self, prompt_type: str) -> int:
+        if prompt_type == PROMPT_TYPE_DOCUMENT_LISTING:
+            return 2048
+        if prompt_type in (PROMPT_TYPE_CLASSIFICATION, PROMPT_TYPE_SHORT_DIRECT):
+            return 200
+        return 8192
+
+    def supports_tool_calling(self) -> bool:
+        return True
+
+
+class AnthropicAdapter(LLMProviderAdapter):
+    """Anthropic (Claude): very large context, native tool calling."""
+
+    def get_max_context_chars(self) -> int:
+        return 600_000  # ~200k tokens
+
+    def get_max_simple_prompt_chars(self) -> int:
+        return 100_000
+
+    def get_max_listing_context_chars(self) -> int:
+        return 50_000
+
+    def get_max_output_tokens(self, prompt_type: str) -> int:
+        if prompt_type == PROMPT_TYPE_DOCUMENT_LISTING:
+            return 2048
+        if prompt_type in (PROMPT_TYPE_CLASSIFICATION, PROMPT_TYPE_SHORT_DIRECT):
+            return 200
+        return 8192
+
+    def supports_tool_calling(self) -> bool:
+        return True
+
+
+class XAIAdapter(LLMProviderAdapter):
+    """xAI (Grok): large context, native tool calling."""
+
+    def get_max_context_chars(self) -> int:
+        return 400_000  # ~131k tokens
+
+    def get_max_simple_prompt_chars(self) -> int:
+        return 100_000
+
+    def get_max_listing_context_chars(self) -> int:
+        return 50_000
+
+    def get_max_output_tokens(self, prompt_type: str) -> int:
+        if prompt_type == PROMPT_TYPE_DOCUMENT_LISTING:
+            return 2048
+        if prompt_type in (PROMPT_TYPE_CLASSIFICATION, PROMPT_TYPE_SHORT_DIRECT):
+            return 200
+        return 8192
+
+    def supports_tool_calling(self) -> bool:
+        return True
+
+
 def create_adapter_for_provider(provider: str, settings: Optional[object] = None) -> LLMProviderAdapter:
     """Factory: returns the adapter for the given provider. Reads config from settings if present."""
     provider = (provider or "ollama").lower().strip()
@@ -157,4 +226,10 @@ def create_adapter_for_provider(provider: str, settings: Optional[object] = None
         return GroqAdapter()
     if provider == "gemini":
         return GeminiAdapter()
+    if provider == "openai":
+        return OpenAIAdapter()
+    if provider == "anthropic":
+        return AnthropicAdapter()
+    if provider == "xai":
+        return XAIAdapter()
     return OllamaAdapter()
