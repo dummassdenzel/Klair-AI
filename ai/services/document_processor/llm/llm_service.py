@@ -375,8 +375,20 @@ class LLMService:
             return content, tool_calls if tool_calls else None
         except Exception as e:
             err_str = str(e)
-            if "400" in err_str and "tool_use_failed" in err_str.lower():
-                logger.info("chat_with_tools got tool_use_failed; retrying without tools")
+            if "tool_use_failed" in err_str.lower():
+                # Groq rejected the model output because it wrote plain text instead
+                # of a tool call. The error payload contains `failed_generation` —
+                # the model's actual attempted answer. Extract and return it directly
+                # so the user still gets a useful response without an extra API call.
+                failed_text = self._extract_failed_generation(err_str)
+                if failed_text and len(failed_text) > 20:
+                    logger.info(
+                        "chat_with_tools: tool_use_failed — returning failed_generation text (%d chars)",
+                        len(failed_text),
+                    )
+                    return failed_text, None
+                # failed_generation was empty/too short — fall back to a no-tools call
+                logger.info("chat_with_tools: tool_use_failed with no usable text; retrying without tools")
                 try:
                     content = await self._chat_messages_no_tools(messages, max_tokens)
                     return (content or "I couldn't generate a response.", None)
@@ -384,6 +396,35 @@ class LLMService:
                     logger.warning("Fallback chat without tools failed: %s", retry_e)
             logger.error("chat_with_tools failed: %s", e)
             return "I couldn't generate a response due to an error.", None
+
+    @staticmethod
+    def _extract_failed_generation(err_str: str) -> str:
+        """Parse failed_generation text from a Groq tool_use_failed error string."""
+        import json, re
+        # The error string typically contains the raw JSON payload somewhere.
+        # Try to find and parse it.
+        json_match = re.search(r'\{.*"failed_generation".*\}', err_str, re.DOTALL)
+        if json_match:
+            try:
+                payload = json.loads(json_match.group(0))
+                text = (
+                    payload.get("error", {}).get("failed_generation")
+                    or payload.get("failed_generation")
+                    or ""
+                )
+                return text.strip()
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        # Fallback: simple substring extraction
+        marker = '"failed_generation":'
+        idx = err_str.find(marker)
+        if idx != -1:
+            after = err_str[idx + len(marker):].strip()
+            if after.startswith('"'):
+                end = after.find('"}')
+                if end != -1:
+                    return after[1:end].replace("\\n", "\n").strip()
+        return ""
 
     async def _chat_messages_no_tools(
         self,
