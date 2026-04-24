@@ -37,6 +37,10 @@ import { getFileTypeConfig } from "$lib/utils/fileTypes";
   let loadingSuggestions = false;
   let suggestionsFetchedFor = ""; // tracks which directory suggestions were fetched for
 
+  // Follow-up suggestions shown below the last AI response
+  let followUpSuggestions: string[] = [];
+  let followUpLoading = false;
+
   async function fetchSuggestions() {
     if (loadingSuggestions) return;
     loadingSuggestions = true;
@@ -171,6 +175,10 @@ import { getFileTypeConfig } from "$lib/utils/fileTypes";
       return;
     }
 
+    // Clear follow-up suggestions from the previous exchange
+    followUpSuggestions = [];
+    followUpLoading = false;
+
     // Create or get current chat session
     let session = $currentChatSession;
     if (!session) {
@@ -227,6 +235,12 @@ import { getFileTypeConfig } from "$lib/utils/fileTypes";
                 : msg,
             );
             setTimeout(() => scrollLastAiResponseToTop(true), 80);
+            // Fetch follow-up suggestions asynchronously — don't block the response
+            followUpLoading = true;
+            apiService.getFollowUpSuggestions(message, finalMessage).then((s) => {
+              followUpSuggestions = s;
+              followUpLoading = false;
+            });
           },
           onError(detail) {
             throw new Error(detail || "Stream failed");
@@ -606,6 +620,39 @@ import { getFileTypeConfig } from "$lib/utils/fileTypes";
                   </span>
                 {/if}
               </div>
+
+              <!-- Follow-up suggestions — only on the last completed message -->
+              {#if i === messages.length - 1 && !$isChatLoading}
+                {#if followUpLoading}
+                  <div class="flex gap-2 mt-3">
+                    {#each [1, 2, 3] as _}
+                      <div class="h-7 w-32 rounded-full bg-gray-200 dark:bg-gray-700 animate-pulse"></div>
+                    {/each}
+                  </div>
+                {:else if followUpSuggestions.length > 0}
+                  <div class="flex flex-wrap gap-2 mt-3">
+                    {#each followUpSuggestions as s}
+                      <button
+                        type="button"
+                        onclick={() => sendMessage(s)}
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full
+                          border border-[#443C68]/30 dark:border-[#443C68]/40
+                          text-[#443C68] dark:text-purple-300
+                          bg-[#443C68]/5 dark:bg-[#443C68]/10
+                          hover:bg-[#443C68]/15 dark:hover:bg-[#443C68]/20
+                          hover:border-[#443C68]/60
+                          transition-all active:scale-95"
+                      >
+                        <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                        </svg>
+                        {s}
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              {/if}
+
               </div>
             </div>
           {/if}

@@ -262,6 +262,9 @@ class DocumentProcessorOrchestrator:
     async def generate_suggestions(self) -> List[str]:
         return await self.pipeline.generate_suggestions(self.current_directory or "")
 
+    async def generate_follow_up_suggestions(self, question: str, answer: str) -> List[str]:
+        return await self.pipeline.generate_follow_up_suggestions(question, answer)
+
     # ── Data management ───────────────────────────────────────────────────────
 
     async def clear_all_data(self) -> None:

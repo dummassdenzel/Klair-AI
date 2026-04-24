@@ -95,6 +95,21 @@ async def _rewrite_query_for_session(session_id: int, raw_message: str) -> str:
 # Chat
 # ---------------------------------------------------------------------------
 
+@router.post("/chat/follow-up-suggestions")
+async def get_follow_up_suggestions(body: dict, state=Depends(require_app_state)):
+    """Return 2-3 contextual follow-up suggestions based on the last Q&A exchange."""
+    question = (body.get("question") or "").strip()
+    answer = (body.get("answer") or "").strip()
+    if not question or not answer:
+        return {"suggestions": []}
+    try:
+        suggestions = await state.doc_processor.generate_follow_up_suggestions(question, answer)
+        return {"suggestions": suggestions}
+    except Exception as e:
+        logger.warning("Follow-up suggestions failed: %s", e)
+        return {"suggestions": []}
+
+
 @router.get("/chat/suggestions")
 async def get_chat_suggestions(state=Depends(require_app_state)):
     """Return 4 context-aware suggested questions based on the indexed documents."""

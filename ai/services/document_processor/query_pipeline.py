@@ -414,6 +414,45 @@ class QueryPipelineService:
     def invalidate_suggestions_cache(self, directory: str = "") -> None:
         self._suggestions_cache.pop(directory or "_default", None)
 
+    async def generate_follow_up_suggestions(self, question: str, answer: str) -> List[str]:
+        """Return 2-3 short follow-up questions based on the last Q&A exchange."""
+        if not question or not answer:
+            return []
+        try:
+            return await asyncio.wait_for(
+                self._do_generate_follow_ups(question, answer), timeout=12.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Follow-up suggestion generation timed out")
+            return []
+        except Exception as e:
+            logger.warning("Follow-up suggestion generation failed: %s", e)
+            return []
+
+    async def _do_generate_follow_ups(self, question: str, answer: str) -> List[str]:
+        # Truncate answer so prompt stays compact
+        answer_snippet = answer[:600].strip()
+        prompt = (
+            f'A user asked: "{question}"\n'
+            f'The assistant answered: "{answer_snippet}"\n\n'
+            "Suggest exactly 3 short follow-up questions the user might want to ask next.\n"
+            "Rules:\n"
+            "- Each question must be under 12 words\n"
+            "- Naturally follow from the answer — dive deeper, related angle, or comparison\n"
+            "- Write as the user would type them — casual and natural\n"
+            "- Return ONLY 3 lines, no numbering, bullets, or extra text\n\n"
+            "Questions:"
+        )
+        response = await self.llm_service.generate_simple(
+            prompt, prompt_type="short_direct", max_completion_tokens=120
+        )
+        lines = [
+            l.strip().lstrip("•-–—*123456789. ").strip('"').strip("'")
+            for l in (response or "").split("\n")
+            if l.strip()
+        ]
+        return [l for l in lines if len(l) > 6 and "?" in l][:3]
+
     # ------------------------------------------------------------------
     # Shared pipeline
     # ------------------------------------------------------------------

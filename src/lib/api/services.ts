@@ -264,6 +264,15 @@ export const apiService = {
     return response.data;
   },
 
+  async getFollowUpSuggestions(question: string, answer: string): Promise<string[]> {
+    try {
+      const response = await apiClient.post('/chat/follow-up-suggestions', { question, answer });
+      return response.data?.suggestions ?? [];
+    } catch {
+      return [];
+    }
+  },
+
   // LLM provider configuration
   async getLLMConfig(): Promise<LLMConfig> {
     const response = await apiClient.get('/llm/config');
