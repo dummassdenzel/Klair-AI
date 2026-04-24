@@ -109,7 +109,16 @@ class QueryPipelineService:
         "referencing another document — check the document's own title or prominent heading first. "
         "IMPORTANT — NEVER write tool names in brackets in your response. Do not write "
         "[search_documents], [list_documents], [search_specific_document], [summarize_corpus], "
-        "or [propose_document_edit] anywhere in your answer."
+        "or [propose_document_edit] anywhere in your answer.\n"
+        "KNOWLEDGE ENRICHMENT — when the user asks a comparative, contextual, or benchmarking question "
+        "(e.g. 'how does this compare to industry average?', 'is this margin good?', 'what's typical for this?'), "
+        "you MUST do two things: (1) answer using the retrieved document data as the primary source, "
+        "(2) enrich the answer with relevant general knowledge from your training — industry benchmarks, "
+        "typical ranges, common standards — to give the user useful context beyond the documents. "
+        "Clearly distinguish: present document findings first, then add context introduced with a phrase like "
+        "'For context, industry benchmarks suggest...' or 'Generally speaking, ...' "
+        "Do NOT say 'this information is not in the documents' and stop there — always provide useful context "
+        "when general knowledge is relevant to the question."
     )
 
     def __init__(
