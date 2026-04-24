@@ -222,6 +222,24 @@ class DocumentProcessorOrchestrator:
         await self.indexing.initialize_from_directory(directory_path, resume_mode)
         self.edit_service.current_directory = directory_path
         self.pipeline.invalidate_suggestions_cache(directory_path)
+        self.set_post_index_hook(lambda: self._schedule_suggestions_prewarm(directory_path))
+
+    def _schedule_suggestions_prewarm(self, directory_path: str) -> None:
+        """Sync hook: schedule async suggestions pre-warm as a background task."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._prewarm_suggestions(directory_path))
+        except Exception as e:
+            logger.warning("Could not schedule suggestions pre-warm: %s", e)
+
+    async def _prewarm_suggestions(self, directory_path: str) -> None:
+        """Pre-warm the suggestions cache so the UI gets instant results."""
+        try:
+            await self.pipeline.generate_suggestions(directory_path)
+            logger.info("Suggestions pre-warm complete for %s", directory_path)
+        except Exception as e:
+            logger.warning("Suggestions pre-warm failed: %s", e)
 
     async def add_document(
         self, file_path: str, force_reindex: bool = False, use_queue: bool = True
