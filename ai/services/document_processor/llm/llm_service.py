@@ -381,13 +381,13 @@ class LLMService:
                 # the model's actual attempted answer. Extract and return it directly
                 # so the user still gets a useful response without an extra API call.
                 failed_text = self._extract_failed_generation(err_str)
-                if failed_text and len(failed_text) > 20:
+                if failed_text and len(failed_text) > 20 and not self._looks_like_tool_call(failed_text):
                     logger.info(
                         "chat_with_tools: tool_use_failed — returning failed_generation text (%d chars)",
                         len(failed_text),
                     )
                     return failed_text, None
-                # failed_generation was empty/too short — fall back to a no-tools call
+                # failed_generation was empty, too short, or contains tool call JSON — fall back
                 logger.info("chat_with_tools: tool_use_failed with no usable text; retrying without tools")
                 try:
                     content = await self._chat_messages_no_tools(messages, max_tokens)
@@ -425,6 +425,12 @@ class LLMService:
                 if end != -1:
                     return after[1:end].replace("\\n", "\n").strip()
         return ""
+
+    @staticmethod
+    def _looks_like_tool_call(text: str) -> bool:
+        """Return True if the text appears to be a tool call schema rather than a user-facing answer."""
+        import re
+        return bool(re.search(r'"name"\s*:\s*"(?:search_|list_|summarize_|propose_)', text))
 
     async def _chat_messages_no_tools(
         self,
