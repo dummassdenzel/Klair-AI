@@ -37,7 +37,7 @@ _TOOL_CITATION_RE = re.compile(
 from .models import QueryResult
 from .llm.llm_service import LLMService
 from .extraction.embedding_service import EmbeddingService
-from .query_config import CONTEXT_CHUNK_SEP
+from .query_config import CONTEXT_CHUNK_SEP, is_aggregation_query
 from .corpus_summary import summarize_corpus, corpus_metadata_from_documents
 from .tools.contract import (
     ListDocumentsResult,
@@ -89,8 +89,8 @@ class QueryPipelineService:
         "documents (e.g. 'what is the total amount', 'find all mentions of X', 'what does the agreement say about Y'). "
         "For value/amount queries you MUST use search_documents with a targeted content query — "
         "the document list only shows brief previews and does NOT contain detailed figures. "
-        "If a value query also requires knowing which documents are relevant, call list_documents FIRST "
-        "then search_documents for the actual values from each relevant document.\n"
+        "If a query asks for BOTH a count/list AND specific values (e.g. 'how many invoices and what is the total?'), "
+        "call list_documents AND search_documents TOGETHER in the same response — not one after the other.\n"
         "• search_specific_document → use when the user names a specific file and wants its content.\n"
         "• summarize_corpus → use only for a general high-level overview/summary of the folder.\n"
         "• propose_document_edit → use when the user wants to MODIFY, UPDATE, EDIT, CHANGE, or FIX "
@@ -528,8 +528,8 @@ class QueryPipelineService:
         documents: List[Dict[str, Any]] = []
         for doc in all_docs:
             filename = Path(doc.file_path).name
-            preview = (doc.content_preview or "")[:300]
-            if len((doc.content_preview or "")) > 300:
+            preview = (doc.content_preview or "")[:1500]
+            if len((doc.content_preview or "")) > 1500:
                 preview += "..."
             documents.append(
                 {
@@ -548,11 +548,20 @@ class QueryPipelineService:
         """Tool: search_documents. Single hybrid retrieval + rerank; returns context and sources."""
         if not query or not str(query).strip():
             return None
-        embedding = self.embedding_service.encode_query(query.strip())
+        q = query.strip()
+        embedding = self.embedding_service.encode_query(q)
+        # Use high-recall aggregation params for value/total queries so Amount Due
+        # and similar tail fields aren't cut off by the standard top-k cap.
+        params_override = (
+            {"top_k": 100, "final_top_k": 50}
+            if is_aggregation_query(q)
+            else None
+        )
         rag = await self.retrieval.retrieve_and_build_context(
-            question=query.strip(),
+            question=q,
             query_type="document_search",
             query_embedding=embedding,
+            retrieval_params_override=params_override,
         )
         if rag is None:
             return None

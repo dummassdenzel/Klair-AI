@@ -438,10 +438,25 @@ class LLMService:
         max_tokens: int = 4096,
     ) -> Optional[str]:
         import litellm
+        # Replace the system message with a plain instruction so the model doesn't
+        # try to write tool call JSON when no tools are available via the API.
+        clean_messages = []
+        for msg in messages:
+            if msg.get("role") == "system":
+                clean_messages.append({
+                    "role": "system",
+                    "content": (
+                        "You are a helpful assistant. Answer the user's question directly "
+                        "using only the information already provided in this conversation. "
+                        "Do not write JSON, tool calls, or code blocks. Just answer in plain text."
+                    ),
+                })
+            else:
+                clean_messages.append(msg)
         response = await self._with_retry(
             lambda: litellm.acompletion(
                 model=self._litellm_model(),
-                messages=messages,
+                messages=clean_messages,
                 api_key=self._api_key(),
                 temperature=0.1,
                 max_tokens=max_tokens,
