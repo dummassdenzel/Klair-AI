@@ -235,12 +235,15 @@ import { getFileTypeConfig } from "$lib/utils/fileTypes";
                 : msg,
             );
             setTimeout(() => scrollLastAiResponseToTop(true), 80);
-            // Fetch follow-up suggestions asynchronously — don't block the response
+            // Delay before follow-up suggestions so Groq's TPM window partially
+            // resets after the main query's token spend, preventing rate-limit failures.
             followUpLoading = true;
-            apiService.getFollowUpSuggestions(message, finalMessage).then((s) => {
-              followUpSuggestions = s;
-              followUpLoading = false;
-            });
+            setTimeout(() => {
+              apiService.getFollowUpSuggestions(message, finalMessage).then((s) => {
+                followUpSuggestions = s;
+                followUpLoading = false;
+              });
+            }, 2000);
           },
           onError(detail) {
             throw new Error(detail || "Stream failed");

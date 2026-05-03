@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onMount, onDestroy, untrack } from 'svelte';
+  import { fly, fade } from 'svelte/transition';
   import type { ChatSession, IndexedDocument } from '$lib/api/types';
   import { updateQueueStatus, systemStatus } from '$lib/stores/api';
   import DocumentTreeNav from '$lib/components/DocumentTreeNav.svelte';
@@ -313,6 +314,126 @@
     }
   }
 
+  let exportingSessionId = $state<number | null>(null);
+  type Toast = { id: number; message: string; type: 'success' | 'error' };
+  let toasts = $state<Toast[]>([]);
+  let _toastCounter = 0;
+
+  function showToast(message: string, type: 'success' | 'error' = 'success') {
+    const id = ++_toastCounter;
+    toasts = [...toasts, { id, message, type }];
+    setTimeout(() => {
+      toasts = toasts.filter(t => t.id !== id);
+    }, 3500);
+  }
+
+  async function exportSessionAsPdf(session: ChatSession) {
+    exportingSessionId = session.id;
+    onToggleDropdown(-1, new MouseEvent('click'));
+    try {
+      const { jsPDF } = await import('jspdf');
+      const data = await apiService.getChatMessages(session.id);
+      const messages: import('$lib/api/types').ChatMessage[] = data.messages ?? data ?? [];
+
+      const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+      const pageW = doc.internal.pageSize.getWidth();
+      const pageH = doc.internal.pageSize.getHeight();
+      const margin = 18;
+      const contentW = pageW - margin * 2;
+      let y = margin;
+
+      const addPageIfNeeded = (needed: number) => {
+        if (y + needed > pageH - margin) {
+          doc.addPage();
+          y = margin;
+        }
+      };
+
+      const wrapText = (text: string, maxW: number, fontSize: number): string[] => {
+        doc.setFontSize(fontSize);
+        return doc.splitTextToSize(text, maxW);
+      };
+
+      // Header
+      doc.setFontSize(16);
+      doc.setTextColor(68, 60, 104);
+      doc.setFont('helvetica', 'bold');
+      const titleLines = wrapText(session.title, contentW - 10, 16);
+      doc.text(titleLines, margin, y);
+      y += titleLines.length * 7 + 2;
+
+      doc.setFontSize(9);
+      doc.setTextColor(140, 140, 140);
+      doc.setFont('helvetica', 'normal');
+      const formattedDate = new Date(session.created_at).toLocaleDateString('en-US', {
+        year: 'numeric', month: 'long', day: 'numeric'
+      });
+      doc.text(
+        `Exported from klair.ai  ·  ${formattedDate}  ·  ${messages.length} message${messages.length !== 1 ? 's' : ''}`,
+        margin, y
+      );
+      y += 5;
+
+      // Divider
+      doc.setDrawColor(200, 200, 200);
+      doc.line(margin, y, pageW - margin, y);
+      y += 7;
+
+      for (const msg of messages) {
+        // User label
+        addPageIfNeeded(12);
+        doc.setFontSize(8);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(68, 60, 104);
+        doc.text('YOU', margin, y);
+        y += 4;
+
+        // User bubble
+        const userLines = wrapText(msg.user_message, contentW - 6, 10);
+        const userBoxH = userLines.length * 5 + 6;
+        addPageIfNeeded(userBoxH + 4);
+        doc.setFillColor(240, 238, 255);
+        doc.setDrawColor(68, 60, 104);
+        doc.roundedRect(margin, y, contentW, userBoxH, 2, 2, 'FD');
+        doc.setFontSize(10);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(40, 40, 40);
+        doc.text(userLines, margin + 3, y + 5);
+        y += userBoxH + 5;
+
+        // AI label
+        addPageIfNeeded(12);
+        doc.setFontSize(8);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(100, 100, 100);
+        doc.text('KLAIR.AI', margin, y);
+        y += 4;
+
+        // AI bubble
+        const aiLines = wrapText(msg.ai_response, contentW - 6, 10);
+        const aiBoxH = aiLines.length * 5 + 6;
+        addPageIfNeeded(aiBoxH + 4);
+        doc.setFillColor(250, 250, 250);
+        doc.setDrawColor(200, 200, 200);
+        doc.roundedRect(margin, y, contentW, aiBoxH, 2, 2, 'FD');
+        doc.setFontSize(10);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(40, 40, 40);
+        doc.text(aiLines, margin + 3, y + 5);
+        y += aiBoxH + 10;
+      }
+
+      const safeTitle = session.title.replace(/[^a-z0-9]/gi, '_').substring(0, 40);
+      doc.save(`${safeTitle}.pdf`);
+      showToast('Conversation saved as PDF');
+    } catch (err) {
+      console.error('Export failed:', err);
+      showToast('Failed to export PDF', 'error');
+    } finally {
+      exportingSessionId = null;
+    }
+  }
+
   onMount(() => {
     window.addEventListener('click', handleClickOutside);
     return () => {
@@ -607,12 +728,36 @@
             <!-- Dropdown menu -->
             {#if openDropdownId === session.id}
               <div
-                class="absolute right-0 mt-1 w-40 bg-white dark:bg-gray-950 rounded-lg shadow-lg border border-gray-200 dark:border-gray-800 py-1 z-50"
+                class="absolute right-0 mt-1 w-44 bg-white dark:bg-gray-950 rounded-lg shadow-lg border border-gray-200 dark:border-gray-800 py-1 z-50"
                 role="menu"
                 onclick={(e) => e.stopPropagation()}
                 onkeydown={(e) => e.stopPropagation()}
                 tabindex="0"
               >
+                <button
+                  type="button"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    exportSessionAsPdf(session);
+                  }}
+                  disabled={exportingSessionId === session.id}
+                  class="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  role="menuitem"
+                >
+                  {#if exportingSessionId === session.id}
+                    <svg class="animate-spin w-4 h-4 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Exporting…
+                  {:else}
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    Export as PDF
+                  {/if}
+                </button>
+                <div class="border-t border-gray-100 dark:border-gray-800 my-1"></div>
                 <button
                   type="button"
                   onclick={(e) => {
@@ -904,6 +1049,31 @@
       </div>
     </div>
   {/if}
+</div>
+
+<!-- ── Toasts ── -->
+<div class="fixed bottom-5 left-1/2 -translate-x-1/2 flex flex-col gap-2 z-[200] pointer-events-none">
+  {#each toasts as toast (toast.id)}
+    <div
+      in:fly={{ y: 16, duration: 250 }}
+      out:fade={{ duration: 200 }}
+      class="flex items-center gap-2 px-4 py-2.5 rounded-xl shadow-lg text-sm font-medium
+        {toast.type === 'success'
+          ? 'bg-[#443C68] text-white'
+          : 'bg-red-600 text-white'}"
+    >
+      {#if toast.type === 'success'}
+        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" />
+        </svg>
+      {:else}
+        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      {/if}
+      {toast.message}
+    </div>
+  {/each}
 </div>
 
 <!-- ── File operation modals ── -->

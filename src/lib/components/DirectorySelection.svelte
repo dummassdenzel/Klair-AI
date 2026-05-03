@@ -80,28 +80,27 @@
   }
 </script>
 
-<div class="flex flex-col items-center justify-center min-h-full p-8 bg-white dark:bg-gray-950">
+<div class="flex flex-col items-center justify-center min-h-full px-5 py-10 sm:p-8 bg-white dark:bg-gray-950">
   <div class="w-full max-w-2xl mx-auto">
     <!-- Welcome message with optional logo -->
-    <div class="text-center mb-12">
+    <div class="text-center mb-6 sm:mb-12">
       <img
         src="/klair.ai-sm.png"
         alt="Klair AI"
-        class="w-20 h-20 mx-auto mb-4 object-contain"
+        class="w-16 h-16 sm:w-20 sm:h-20 mx-auto mb-4 object-contain"
       />
-      <h1 class="text-7xl font-bold tracking-tight text-[#37352F] dark:text-gray-100 mb-2">
+      <h1 class="text-4xl sm:text-6xl lg:text-7xl font-bold tracking-tight text-[#37352F] dark:text-gray-100 mb-2">
         Welcome to Klair AI
       </h1>
       <p class="text-gray-600 dark:text-gray-400 text-sm max-w-md mx-auto">
-        Your AI-powered document workspace. 
+        Your AI-powered document workspace.
       </p>
     </div>
 
     <div class="space-y-6">
-      <div class="text-center py-6">
+      <div class="text-center py-3 sm:py-6">
         {#if !selectedDirectory}
           <div class="mb-6">
-            
             <p class="text-gray-600 dark:text-gray-400 text-sm mb-4">
               Let's start by choosing the folder containing your documents.
             </p>
@@ -110,7 +109,7 @@
                 type="button"
                 onclick={handleSelectDirectory}
                 disabled={isSetting || isSelecting}
-                class="px-8 py-4 bg-[#443C68] text-white rounded-lg hover:bg-[#3A3457] disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center gap-3 text-lg shadow-lg hover:shadow-xl"
+                class="w-full sm:w-auto px-8 py-4 bg-[#443C68] text-white rounded-lg hover:bg-[#3A3457] disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center justify-center gap-3 text-lg shadow-lg hover:shadow-xl active:scale-95"
               >
                 {#if isSelecting}
                   <div
@@ -139,7 +138,7 @@
                   type="button"
                   onclick={handleCancel}
                   disabled={isSetting || isSelecting}
-                  class="px-6 py-3 text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-900 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
+                  class="w-full sm:w-auto px-6 py-3 text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-900 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors active:scale-95"
                 >
                   Back
                 </button>

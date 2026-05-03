@@ -25,8 +25,8 @@ vite.config.ts.timestamp-*
 venv/
 env/
 
-ai/klair.db-shm
-ai/klair.db-wal
+*.db-shm
+*.db-wal
 
 # Python cache
 __pycache__/
